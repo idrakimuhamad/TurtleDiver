@@ -1,15 +1,13 @@
 # TurtleDiver - macOS VPN Client
 
-A native macOS application for managing VPN connections using openconnect, stoken, and vpn-slice.
+A macOS application for managing VPN connections using openconnect, stoken, and vpn-slice. Similar to the [hellsturtle](https://github.com/idrakimuhamad/hellsturtle) project, but for MacOS.
 
 ## Features
 
 - **Simple Interface**: Easy-to-use GUI for VPN connection management
-- **Settings Management**: Store and manage VPN configuration settings
-- **Connection Status**: Real-time connection status display
-- **Debug Output**: Optional debug mode to view CLI command output
+- **Token**: Automatic token generation management and form fill up
 - **Tunneling Support**: Option to use vpn-slice for selective routing
-- **Settings Persistence**: Settings are saved using macOS UserDefaults
+- **Local Configuration**: Everything stored locally on device no cloud storage or syncing
 
 ## Prerequisites
 
@@ -22,11 +20,6 @@ brew install stoken
 brew install vpn-slice
 ```
 
-## Installation
-
-1. Clone or download this project
-2. Open `VPNConnect.xcodeproj` in Xcode
-3. Build and run the project
 
 ## Configuration
 
@@ -62,6 +55,12 @@ Click **Disconnect** to terminate the VPN connection.
 ### Debug Mode
 
 Enable debug mode in settings to view real-time CLI command output in the main window.
+
+## Development
+
+1. Clone or download this project
+2. Open `VPNConnect.xcodeproj` in Xcode
+3. Build and run the project
 
 ## Architecture
 
