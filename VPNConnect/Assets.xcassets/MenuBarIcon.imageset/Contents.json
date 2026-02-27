@@ -1,0 +1,29 @@
+{
+  "images" : [
+    {
+      "size" : "18x18",
+      "idiom" : "mac",
+      "filename" : "MenuBarIcon_1x.png",
+      "scale" : "1x"
+    },
+    {
+      "size" : "18x18",
+      "idiom" : "mac",
+      "filename" : "MenuBarIcon_2x.png",
+      "scale" : "2x"
+    },
+    {
+      "size" : "18x18",
+      "idiom" : "mac",
+      "filename" : "MenuBarIcon_3x.png",
+      "scale" : "3x"
+    }
+  ],
+  "info" : {
+    "version" : 1,
+    "author" : "xcode"
+  },
+  "properties" : {
+    "template-rendering-intent" : "template"
+  }
+}
