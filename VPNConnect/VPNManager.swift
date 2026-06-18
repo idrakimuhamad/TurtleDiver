@@ -65,12 +65,21 @@ class ConnectionHistoryManager {
         }
     }
     
+    func deleteAttempt(id: UUID) {
+        var history = getHistory()
+        history.removeAll { $0.id == id }
+        if let encoded = try? JSONEncoder().encode(history) {
+            UserDefaults.standard.set(encoded, forKey: historyKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+    
     func clearHistory() {
         UserDefaults.standard.removeObject(forKey: historyKey)
     }
 }
 
-enum VPNStatus {
+enum VPNStatus: Equatable {
     case disconnected
     case connecting
     case connected
@@ -99,11 +108,16 @@ class VPNManager: ObservableObject {
     private let pidFilePath = "/tmp/turtlediver.pid"
     private var currentAttemptId: UUID?
     
+    /// Incremented on each `connect()` call so stale termination handlers
+    /// from a previous connection can detect they should not act on state.
+    private var connectionGeneration: UInt64 = 0
+    
     private init() {}
     
     func connect() {
         guard case .disconnected = status else { return }
         
+        connectionGeneration += 1
         status = .connecting
         debugOutput = "Starting VPN connection...\n"
         errorBurst = 0
@@ -143,8 +157,27 @@ class VPNManager: ObservableObject {
             return
         }
         
-        DispatchQueue.global(qos: .background).async {
-            self.executeVPNConnection()
+        // Setup proxy if enabled
+        if settings.useProxy, let proxyConfig = settings.selectedProxy {
+            DispatchQueue.main.async {
+                self.debugOutput += "Setting up proxy: \(proxyConfig.name)...\n"
+            }
+            Task {
+                do {
+                    try await ProxyManager.shared.setupProxy(for: proxyConfig, adminPassword: settings.adminPassword)
+                    await MainActor.run {
+                        self.debugOutput += "Proxy configured successfully\n"
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.debugOutput += "Warning: Failed to setup proxy: \(error.localizedDescription)\n"
+                    }
+                }
+            }
+        }
+        
+        Task {
+            await self.executeVPNConnection()
         }
     }
     
@@ -162,6 +195,14 @@ class VPNManager: ObservableObject {
             ConnectionHistoryManager.shared.updateAttempt(attempt)
         }
         
+        // Teardown proxy if it was enabled
+        let settings = SettingsManager.shared
+        if settings.useProxy {
+            Task {
+                await ProxyManager.shared.teardownProxy(adminPassword: settings.adminPassword)
+            }
+        }
+        
         // Synchronous cleanup to ensure no processes are left behind
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
@@ -172,42 +213,32 @@ class VPNManager: ObservableObject {
             }
         }
         
-        // Try to kill using sudo if we have admin password
-        let adminPwd = SettingsManager.shared.adminPassword
-        if !adminPwd.isEmpty {
-             // 1. Try kill by PID file
-             if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
-                !pidStr.isEmpty {
-                 let killProc = Process()
-                 killProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-                 killProc.arguments = ["-S", "kill", pidStr]
-                 let pipe = Pipe()
-                 killProc.standardInput = pipe
-                 try? killProc.run()
-                 if let data = "\(adminPwd)\n".data(using: .utf8) {
-                     try? pipe.fileHandleForWriting.write(contentsOf: data)
-                 }
-                 killProc.waitUntilExit()
-             }
-             
-             // 2. Try pkill openconnect as backup
-             let pkillProc = Process()
-             pkillProc.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-             pkillProc.arguments = ["-S", "pkill", "openconnect"]
-             let pipe = Pipe()
-             pkillProc.standardInput = pipe
-             try? pkillProc.run()
-             if let data = "\(adminPwd)\n".data(using: .utf8) {
-                 try? pipe.fileHandleForWriting.write(contentsOf: data)
-             }
-             pkillProc.waitUntilExit()
-        } else {
-             // Fallback for non-sudo or missing password (might fail if root)
-             let pkillProc = Process()
-             pkillProc.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-             pkillProc.arguments = ["openconnect"]
-             try? pkillProc.run()
-             pkillProc.waitUntilExit()
+        // Fire-and-forget cleanup for subprocesses via async task
+        Task {
+            let adminPwd = SettingsManager.shared.adminPassword
+            if !adminPwd.isEmpty {
+                // 1. Try kill by PID file
+                if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
+                   !pidStr.isEmpty {
+                    _ = try? await runProcess(
+                        executable: URL(fileURLWithPath: "/usr/bin/sudo"),
+                        arguments: ["-S", "kill", pidStr],
+                        input: adminPwd
+                    )
+                }
+                // 2. Try pkill openconnect as backup
+                _ = try? await runProcess(
+                    executable: URL(fileURLWithPath: "/usr/bin/sudo"),
+                    arguments: ["-S", "pkill", "openconnect"],
+                    input: adminPwd
+                )
+            } else {
+                // Fallback for non-sudo or missing password
+                _ = try? await runProcess(
+                    executable: URL(fileURLWithPath: "/usr/bin/pkill"),
+                    arguments: ["openconnect"]
+                )
+            }
         }
     }
     
@@ -217,13 +248,22 @@ class VPNManager: ObservableObject {
         status = .disconnecting
         debugOutput += "Disconnecting VPN...\n"
         
+        // Teardown proxy if it was enabled
+        let settings = SettingsManager.shared
+        if settings.useProxy {
+            Task {
+                await ProxyManager.shared.teardownProxy(adminPassword: settings.adminPassword)
+            }
+            debugOutput += "Proxy teardown complete\n"
+        }
+        
         // Log disconnection attempt
         if let id = currentAttemptId {
             let duration = connectionStartTime.map { Date().timeIntervalSince($0) }
             let attempt = ConnectionAttempt(
                 id: id,
                 timestamp: connectionStartTime ?? Date(),
-                host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
+                host: settings.vpnHost.isEmpty ? "Unknown" : settings.vpnHost,
                 status: "Disconnected",
                 duration: duration,
                 logOutput: debugOutput
@@ -252,17 +292,17 @@ class VPNManager: ObservableObject {
         stopDurationTimer()
     }
     
-    private func executeVPNConnection() {
+    private func executeVPNConnection() async {
         // Check for existing openconnect processes
-        terminateExistingOpenConnect()
+        await terminateExistingOpenConnect()
         
         let settings = SettingsManager.shared
         let withTunneling = settings.useTunneling
         
         // Generate token using stoken
-        let token = generateToken(passcode: settings.vpnPasscode)
+        let token = await generateToken(passcode: settings.vpnPasscode)
         guard !token.isEmpty else {
-            DispatchQueue.main.async {
+            await MainActor.run {
                 self.status = .error("Failed to generate token")
                 self.debugOutput += "Error: Failed to generate token using stoken\n"
             }
@@ -272,8 +312,7 @@ class VPNManager: ObservableObject {
         let pin = settings.vpnPasscode + token
         
         if settings.adminPassword.isEmpty {
-            let semaphore = DispatchSemaphore(value: 0)
-            DispatchQueue.main.async {
+            let result = await MainActor.run { () -> Bool in
                 let alert = NSAlert()
                 alert.messageText = "Admin Password Required"
                 alert.informativeText = "Please enter your local administrator password to configure network settings."
@@ -287,10 +326,11 @@ class VPNManager: ObservableObject {
                 let response = alert.runModal()
                 if response == .alertFirstButtonReturn {
                     settings.adminPassword = input.stringValue
+                    return true
                 }
-                semaphore.signal()
+                return false
             }
-            semaphore.wait()
+            if !result { return }
         }
         
         guard !settings.adminPassword.isEmpty else {
@@ -642,8 +682,10 @@ class VPNManager: ObservableObject {
                 }
             }
             
-            process.terminationHandler = { proc in
+            let gen = connectionGeneration
+            process.terminationHandler = { [weak self] proc in
                 DispatchQueue.main.async {
+                    guard let self = self, self.connectionGeneration == gen else { return }
                     self.outputPipe?.fileHandleForReading.readabilityHandler = nil
                     self.errorPipe?.fileHandleForReading.readabilityHandler = nil
                     if proc.terminationStatus == 0 {
@@ -692,106 +734,82 @@ class VPNManager: ObservableObject {
             self.forceTerminate()
         }
     }
-    private func terminateExistingOpenConnect() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["openconnect"]
+    private func terminateExistingOpenConnect() async {
+        let pgrepExec = URL(fileURLWithPath: "/usr/bin/pgrep")
         
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                DispatchQueue.main.async {
-                    self.debugOutput += "Found existing openconnect process. Terminating...\n"
-                }
-                
-                // Kill existing openconnect processes
-                let killProcess = Process()
-                killProcess.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-                killProcess.arguments = ["openconnect"]
-                try? killProcess.run()
-                killProcess.waitUntilExit()
-                
-                // Also try sudo kill if regular kill fails (likely needs sudo)
-                if killProcess.terminationStatus != 0 {
-                     // We can't easily sudo pkill without prompting, 
-                     // but we can try to use the admin password if we have it,
-                     // or just warn the user.
-                     // For now, let's assume if we started it, we can kill it, 
-                     // or if it was started with sudo, we might need sudo to kill it.
-                     // Let's try to use the stored admin password to sudo kill if available
-                    if !SettingsManager.shared.adminPassword.isEmpty {
-                        let sudoKill = Process()
-                        sudoKill.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-                        sudoKill.arguments = ["-S", "pkill", "openconnect"]
-                        let inPipe = Pipe()
-                        sudoKill.standardInput = inPipe
-                        try? sudoKill.run()
-                        if let d = "\(SettingsManager.shared.adminPassword)\n".data(using: .utf8) {
-                            inPipe.fileHandleForWriting.write(d)
-                        }
-                        sudoKill.waitUntilExit()
-                    }
-                }
-                
-                // Wait a moment for cleanup
-                Thread.sleep(forTimeInterval: 1.0)
-            }
-        } catch {
-            print("Error checking for openconnect: \(error)")
+        guard let pgrepResult = try? await runProcess(executable: pgrepExec, arguments: ["openconnect"]),
+              !pgrepResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
         }
+        
+        await MainActor.run {
+            self.debugOutput += "Found existing openconnect process. Terminating...\n"
+        }
+        
+        // Try pkill first
+        let pkillResult = try? await runProcess(
+            executable: URL(fileURLWithPath: "/usr/bin/pkill"),
+            arguments: ["openconnect"]
+        )
+        
+        // If regular pkill failed and admin password is available, try sudo
+        if pkillResult == nil, !SettingsManager.shared.adminPassword.isEmpty {
+            _ = try? await runProcess(
+                executable: URL(fileURLWithPath: "/usr/bin/sudo"),
+                arguments: ["-S", "pkill", "openconnect"],
+                input: SettingsManager.shared.adminPassword
+            )
+        }
+        
+        // Wait a moment for cleanup
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
 
-    private func generateToken(passcode: String) -> String {
-        let process = Process()
+    private func generateToken(passcode: String) async -> String {
         let stokenPath = binaryPath("stoken")
-        if let path = stokenPath {
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = ["tokencode"]
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["stoken", "tokencode"]
-        }
         
         // Ensure PATH includes Homebrew locations
         var env = ProcessInfo.processInfo.environment
         let defaultPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
         env["PATH"] = "\(defaultPaths):\(env["PATH"] ?? "")"
+        
         var startedAccess = false
         var usingTokenFile = false
         var tokenFilePath: String?
+        
+        // Determine executable and arguments
+        func makeArguments(baseArgs: [String] = ["tokencode"]) -> [String] {
+            var args = baseArgs
+            if !passcode.isEmpty { args.append(contentsOf: ["-p", passcode]) }
+            return args
+        }
+        
+        let executable: URL
+        var arguments: [String]
+        
         if let tokenURL = SettingsManager.shared.resolvedStokenTokenURL() {
             if tokenURL.startAccessingSecurityScopedResource() {
                 startedAccess = true
                 usingTokenFile = true
                 tokenFilePath = tokenURL.path
-                var args = ["tokencode", "--file", tokenURL.path]
-                if !passcode.isEmpty { args.append(contentsOf: ["-p", passcode]) }
-                process.arguments = args
+                executable = stokenPath.map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: "/usr/bin/env")
+                arguments = stokenPath != nil ? makeArguments(baseArgs: ["tokencode", "--file", tokenURL.path]) : ["stoken", "tokencode", "--file", tokenURL.path] + (passcode.isEmpty ? [] : ["-p", passcode])
+            } else {
+                // Fallback: use default approach
+                executable = stokenPath.map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: "/usr/bin/env")
+                arguments = stokenPath != nil ? makeArguments() : ["stoken"] + makeArguments()
             }
         } else {
             let tokenPath = SettingsManager.shared.stokenTokenFilePath
             if !tokenPath.isEmpty {
                 usingTokenFile = true
                 tokenFilePath = tokenPath
-                var args = ["tokencode", "--file", tokenPath]
-                if !passcode.isEmpty { args.append(contentsOf: ["-p", passcode]) }
-                process.arguments = args
+                executable = stokenPath.map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: "/usr/bin/env")
+                arguments = stokenPath != nil ? makeArguments(baseArgs: ["tokencode", "--file", tokenPath]) : ["stoken", "tokencode", "--file", tokenPath] + (passcode.isEmpty ? [] : ["-p", passcode])
             } else {
-                if let stokenPath = stokenPath {
-                    var args = ["tokencode"]
-                    if !passcode.isEmpty { args.append(contentsOf: ["-p", passcode]) }
-                    process.arguments = args
-                } else {
-                    var args = ["stoken", "tokencode"]
-                    if !passcode.isEmpty { args.append(contentsOf: ["-p", passcode]) }
-                    process.arguments = args
-                }
+                executable = stokenPath.map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: "/usr/bin/env")
+                arguments = stokenPath != nil ? makeArguments() : ["stoken"] + makeArguments()
+                
                 if let stokenURL = SettingsManager.shared.resolvedStokenURL() {
                     if stokenURL.startAccessingSecurityScopedResource() {
                         startedAccess = true
@@ -805,53 +823,57 @@ class VPNManager: ObservableObject {
                 }
             }
         }
-        process.environment = env
         
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        // Helper to stop security-scoped access
+        func stopAccess() {
+            guard startedAccess else { return }
+            if usingTokenFile, let url = SettingsManager.shared.resolvedStokenTokenURL() {
+                url.stopAccessingSecurityScopedResource()
+            } else if let url = SettingsManager.shared.resolvedStokenURL() {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        
+        // Helper to log token info
+        func logTokenInfo() async {
+            await MainActor.run {
+                self.debugOutput += "stoken path: \(stokenPath ?? "/usr/bin/env stoken")\n"
+                if usingTokenFile {
+                    self.debugOutput += "Using --file\n"
+                } else if let rc = env["STOKEN_RC"] {
+                    self.debugOutput += "Using STOKEN_RC: \(rc)\n"
+                }
+            }
+        }
         
         do {
-            try process.run()
-            process.waitUntilExit()
+            let (stdout, stderr) = try await runProcess(
+                executable: executable,
+                arguments: arguments,
+                environment: env
+            )
             
-            let outData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let errorOut = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let output = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             
             if output.isEmpty {
+                // Retry with explicit --file if using a token file
                 if usingTokenFile, let filePath = tokenFilePath {
-                    let p2 = Process()
-                    if let path = stokenPath {
-                        p2.executableURL = URL(fileURLWithPath: path)
-                        p2.arguments = ["tokencode", "--file", filePath]
-                    } else {
-                        p2.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                        p2.arguments = ["stoken", "tokencode", "--file", filePath]
-                    }
-                    p2.environment = env
-                    let o2 = Pipe()
-                    let e2 = Pipe()
-                    p2.standardOutput = o2
-                    p2.standardError = e2
-                    try? p2.run()
-                    p2.waitUntilExit()
-                    let out2 = String(data: o2.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if !out2.isEmpty {
-                        if startedAccess {
-                            if usingTokenFile, let url = SettingsManager.shared.resolvedStokenTokenURL() {
-                                url.stopAccessingSecurityScopedResource()
-                            } else if let url = SettingsManager.shared.resolvedStokenURL() {
-                                url.stopAccessingSecurityScopedResource()
-                            }
+                    let retryExec = stokenPath.map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: "/usr/bin/env")
+                    let retryArgs = stokenPath != nil
+                        ? ["tokencode", "--file", filePath] + (passcode.isEmpty ? [] : ["-p", passcode])
+                        : ["stoken", "tokencode", "--file", filePath] + (passcode.isEmpty ? [] : ["-p", passcode])
+                    
+                    if let retryResult = try? await runProcess(executable: retryExec, arguments: retryArgs, environment: env) {
+                        let retryOutput = retryResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !retryOutput.isEmpty {
+                            stopAccess()
+                            return retryOutput
                         }
-                        return out2
                     }
                 }
-                DispatchQueue.main.async {
-                    self.debugOutput += "stoken error: \(errorOut)\n"
+                
+                await MainActor.run {
+                    self.debugOutput += "stoken error: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))\n"
                     self.debugOutput += "Tried path: \(stokenPath ?? "/usr/bin/env stoken")\n"
                     if usingTokenFile {
                         self.debugOutput += "Using --file\n"
@@ -862,70 +884,40 @@ class VPNManager: ObservableObject {
                             self.debugOutput += "STOKEN_RC not set\n"
                         }
                     }
-                    // Log error attempt
-                    if let id = self.currentAttemptId {
-                        let attempt = ConnectionAttempt(
-                            id: id,
-                            timestamp: self.connectionStartTime ?? Date(),
-                            host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                            status: "Failed - Token Error",
-                            logOutput: self.debugOutput
-                        )
-                        ConnectionHistoryManager.shared.updateAttempt(attempt)
-                    }
+                    self.logTokenErrorAttempt()
                 }
             } else {
-                DispatchQueue.main.async {
-                    self.debugOutput += "stoken path: \(stokenPath ?? "/usr/bin/env stoken")\n"
-                    if usingTokenFile {
-                        self.debugOutput += "Using --file\n"
-                    } else {
-                        if let rc = env["STOKEN_RC"] {
-                            self.debugOutput += "Using STOKEN_RC: \(rc)\n"
-                        }
-                    }
-                }
+                await logTokenInfo()
             }
             
-            if startedAccess {
-                if usingTokenFile, let url = SettingsManager.shared.resolvedStokenTokenURL() {
-                    url.stopAccessingSecurityScopedResource()
-                } else if let url = SettingsManager.shared.resolvedStokenURL() {
-                    url.stopAccessingSecurityScopedResource()
-                }
-            }
+            stopAccess()
             return output
         } catch {
-            DispatchQueue.main.async {
+            await MainActor.run {
                 self.debugOutput += "Error generating token: \(error.localizedDescription)\n"
                 self.debugOutput += "Tried path: \(stokenPath ?? "/usr/bin/env stoken")\n"
                 if usingTokenFile {
                     self.debugOutput += "Using --file\n"
-                } else {
-                    if let rc = env["STOKEN_RC"] {
-                        self.debugOutput += "STOKEN_RC: \(rc)\n"
-                    }
+                } else if let rc = env["STOKEN_RC"] {
+                    self.debugOutput += "STOKEN_RC: \(rc)\n"
                 }
-                // Log error attempt
-                if let id = self.currentAttemptId {
-                    let attempt = ConnectionAttempt(
-                        id: id,
-                        timestamp: self.connectionStartTime ?? Date(),
-                        host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                        status: "Failed - Token Error",
-                        logOutput: self.debugOutput
-                    )
-                    ConnectionHistoryManager.shared.updateAttempt(attempt)
-                }
+                self.logTokenErrorAttempt()
             }
-            if startedAccess {
-                if usingTokenFile, let url = SettingsManager.shared.resolvedStokenTokenURL() {
-                    url.stopAccessingSecurityScopedResource()
-                } else if let url = SettingsManager.shared.resolvedStokenURL() {
-                    url.stopAccessingSecurityScopedResource()
-                }
-            }
+            stopAccess()
             return ""
+        }
+    }
+    
+    private func logTokenErrorAttempt() {
+        if let id = currentAttemptId {
+            let attempt = ConnectionAttempt(
+                id: id,
+                timestamp: connectionStartTime ?? Date(),
+                host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
+                status: "Failed - Token Error",
+                logOutput: debugOutput
+            )
+            ConnectionHistoryManager.shared.updateAttempt(attempt)
         }
     }
     
@@ -1019,6 +1011,86 @@ class VPNManager: ObservableObject {
         }
         process = nil
         stopDurationTimer()
+    }
+    
+    // MARK: - Async Process Helper
+    
+    private func runProcess(
+        executable: URL,
+        arguments: [String] = [],
+        input: String? = nil,
+        environment: [String: String]? = nil
+    ) async throws -> (stdout: String, stderr: String) {
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = arguments
+            
+            if let env = environment {
+                var merged = ProcessInfo.processInfo.environment
+                merged.merge(env) { (_, new) in new }
+                process.environment = merged
+            }
+            
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+            
+            if input != nil {
+                let inputPipe = Pipe()
+                process.standardInput = inputPipe
+            }
+            
+            var stdoutData = Data()
+            var stderrData = Data()
+            
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty {
+                    stdoutData.append(data)
+                }
+            }
+            
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty {
+                    stderrData.append(data)
+                }
+            }
+            
+            process.terminationHandler = { proc in
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                
+                stdoutData.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+                stderrData.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+                
+                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                
+                if proc.terminationStatus == 0 {
+                    continuation.resume(returning: (stdout, stderr))
+                } else {
+                    continuation.resume(throwing: ProcessError.exitStatus(proc.terminationStatus, stderr))
+                }
+            }
+            
+            do {
+                try process.run()
+                
+                if let inputString = input, let inputPipe = process.standardInput as? Pipe {
+                    if let data = "\(inputString)\n".data(using: .utf8) {
+                        inputPipe.fileHandleForWriting.write(data)
+                    }
+                    inputPipe.fileHandleForWriting.closeFile()
+                }
+            } catch {
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                continuation.resume(throwing: error)
+            }
+        }
     }
     
     private func shellEscape(_ s: String) -> String {

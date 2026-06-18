@@ -1,7 +1,43 @@
 import Cocoa
 import Combine
+import SwiftUI
 
-@main
+// MARK: - Startup Logger
+
+enum StartupLog {
+    private static let logPath = "/tmp/TurtleDiver-launch.log"
+    private static let queue = DispatchQueue(label: "com.turtlediver.startup-log")
+    
+    static func write(_ message: String) {
+        print("[TurtleDiver] \(message)")
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        queue.async {
+            if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: logPath)) {
+                handle.seekToEndOfFile()
+                if let data = line.data(using: .utf8) {
+                    handle.write(data)
+                }
+                handle.closeFile()
+            } else {
+                // First write — create the file
+                try? line.write(toFile: logPath, atomically: false, encoding: .utf8)
+            }
+        }
+    }
+    
+    static func reset() {
+        try? FileManager.default.removeItem(atPath: logPath)
+        write("=== Launch Log ===")
+        write("App version: \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        write("Build: \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown")")
+        write("LSUIElement: \(Bundle.main.infoDictionary?["LSUIElement"] ?? "not set")")
+        write("NSPrincipalClass: \(Bundle.main.infoDictionary?["NSPrincipalClass"] ?? "not set")")
+        write("NSMainStoryboardFile: \(Bundle.main.infoDictionary?["NSMainStoryboardFile"] ?? "not set")")
+        write("ActivationPolicy: \(NSApp.activationPolicy().rawValue) (0=NSApplicationActivationPolicyRegular, 1=Accessory, 2=Prohibited)")
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     
     var window: NSWindow!
@@ -10,35 +46,130 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        // Create the main window
-        let mainViewController = MainViewController()
-        window = NSWindow(contentViewController: mainViewController)
-        window.title = "VPN Connect"
-        // Start with compact size matching MainViewController default state
-        window.setContentSize(NSSize(width: 360, height: 450))
-        window.styleMask.insert(.resizable)
-        // Allow resizing down to compact width
-        window.minSize = NSSize(width: 360, height: 400)
-        window.isReleasedWhenClosed = false
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+        StartupLog.reset()
+        StartupLog.write("applicationDidFinishLaunching started")
         
-        // Initialize menu bar manager
-        menuBarManager = MenuBarManager()
-        
-        // Set up the menu bar
+        // 1. Set up the menu FIRST — before anything else
+        StartupLog.write("Step 1: Setting up menu bar...")
         setupMenuBar()
+        StartupLog.write("Step 1 done. mainMenu set: \(NSApp.mainMenu != nil)")
         
-        // Observe theme changes
+        // 2. Initialize menu bar (status item) manager
+        StartupLog.write("Step 2: Initializing MenuBarManager...")
+        menuBarManager = MenuBarManager()
+        StartupLog.write("Step 2 done.")
+        
+        // 3. Create and show the main window
+        StartupLog.write("Step 3: Setting up main window...")
+        setupMainWindow()
+        StartupLog.write("Step 3 done. window: \(window != nil), visible: \(window?.isVisible ?? false)")
+        
+        // 4. Observe theme changes
+        StartupLog.write("Step 4: Setting up theme observation...")
         SettingsManager.shared.$theme
             .receive(on: DispatchQueue.main)
             .sink { [weak self] theme in
                 self?.applyTheme(theme)
             }
             .store(in: &cancellables)
+        
+        // 5. Observe debug mode for window resize
+        SettingsManager.shared.$debugMode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] debugMode in
+                self?.resizeWindowForDebugMode(debugMode)
+            }
+            .store(in: &cancellables)
+        
+        // 6. Observe content-affecting settings for dynamic window height
+        Publishers.Merge3(
+            SettingsManager.shared.$useTunneling.map { _ in },
+            SettingsManager.shared.$useProxy.map { _ in },
+            VPNManager.shared.$status.map { _ in }
+        )
+        .debounce(for: 0.1, scheduler: DispatchQueue.main)
+        .sink { [weak self] _ in
+            self?.resizeWindowForContent()
+        }
+        .store(in: &cancellables)
             
-        // Apply initial theme
+        // 7. Apply initial theme
         applyTheme(SettingsManager.shared.theme)
+        StartupLog.write("Step 7: Theme applied")
+        
+        // 6. Activate last, after everything is set up
+        StartupLog.write("Step 6: Activating...")
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        StartupLog.write("Step 6 done. isVisible: \(window.isVisible), isKeyWindow: \(window.isKeyWindow)")
+        
+        // 8. Immediately set the correct window height (before the debounced observation fires)
+        resizeWindowForContent()
+        StartupLog.write("Step 8: Initial window height set")
+        
+        StartupLog.write("applicationDidFinishLaunching complete")
+    }
+    
+    private func setupMainWindow() {
+        StartupLog.write("  setupMainWindow: creating MainView...")
+        let mainView = MainView()
+        let hostingView = NSHostingView(rootView: mainView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        StartupLog.write("  setupMainWindow: hostingView created")
+        
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 550),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.title = "VPN Connect"
+        window.minSize = NSSize(width: 360, height: 480)
+        window.maxSize = NSSize(width: 860, height: 680)
+        window.isReleasedWhenClosed = false
+        window.center()
+        StartupLog.write("  setupMainWindow: window created, frame: \(NSStringFromRect(window.frame))")
+        
+        // Pin the hosting view to all edges — same approach as old AppKit code
+        NSLayoutConstraint.activate([
+            hostingView.topAnchor.constraint(equalTo: hostingView.superview!.topAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: hostingView.superview!.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: hostingView.superview!.trailingAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: hostingView.superview!.bottomAnchor)
+        ])
+        
+        addSettingsTitlebarAccessory(to: window)
+        StartupLog.write("  setupMainWindow: accessory added")
+    }
+    
+    private func addSettingsTitlebarAccessory(to window: NSWindow) {
+        let accessory = NSTitlebarAccessoryViewController()
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 34, height: 22))
+        
+        let button = NSButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        let config = NSImage.SymbolConfiguration(scale: .medium)
+        button.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")?.withSymbolConfiguration(config)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.contentTintColor = .labelColor
+        button.target = self
+        button.action = #selector(showSettings)
+        
+        view.addSubview(button)
+        accessory.view = view
+        accessory.layoutAttribute = .right
+        
+        NSLayoutConstraint.activate([
+            button.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            button.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            button.widthAnchor.constraint(equalToConstant: 24),
+            button.heightAnchor.constraint(equalToConstant: 22)
+        ])
+        
+        window.addTitlebarAccessoryViewController(accessory)
     }
     
     private func applyTheme(_ theme: AppTheme) {
@@ -66,41 +197,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func showMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-    }
-    
-    func applicationWillTerminate(_ aNotification: Notification) {
-        // Clean up VPN connection if active
-        VPNManager.shared.cleanupOnTermination()
-    }
-    
-    private func setupMenuBar() {
-        let mainMenu = NSMenu()
-        
-        // App menu
-        let appMenuItem = NSMenuItem()
-        mainMenu.addItem(appMenuItem)
-        let appMenu = NSMenu(title: "VPN Connect")
-        appMenuItem.submenu = appMenu
-        
-        appMenu.addItem(withTitle: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
-        appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        
-        // Edit Menu
-        let editMenuItem = NSMenuItem()
-        mainMenu.addItem(editMenuItem)
-        let editMenu = NSMenu(title: "Edit")
-        editMenuItem.submenu = editMenu
-        
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
-        editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(withTitle: "Cut", action: Selector(("cut:")), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: Selector(("copy:")), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: Selector(("paste:")), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: Selector(("selectAll:")), keyEquivalent: "a")
-        
-        NSApp.mainMenu = mainMenu
+        window.orderFrontRegardless()
     }
     
     @objc func showSettings() {
@@ -110,6 +207,135 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+    
+    func applicationWillTerminate(_ aNotification: Notification) {
+        VPNManager.shared.cleanupOnTermination()
+    }
+    
+    /// Calculates the ideal content height based on which UI elements are visible,
+    /// then resizes the window accordingly with animation.
+    func resizeWindowForContent() {
+        guard let window = window else { return }
+        
+        // Base height for always-visible items (top badge, icon, status, host,
+        // spacer, button, proxy section, debug toggle, paddings/spacings).
+        let baseHeight: CGFloat = 550
+        
+        // Extra height for each conditional element
+        let sm = SettingsManager.shared
+        let tunnelingExtra: CGFloat = sm.useTunneling ? 40 : 0
+        let isConnected: Bool
+        switch VPNManager.shared.status {
+        case .connected: isConnected = true
+        default: isConnected = false
+        }
+        let proxyBadgeExtra: CGFloat = (isConnected && sm.useProxy && sm.selectedProxy != nil) ? 40 : 0
+        let durationExtra: CGFloat = isConnected ? 64 : 0
+        
+        let targetHeight = baseHeight + tunnelingExtra + proxyBadgeExtra + durationExtra
+        let clampedHeight = min(max(targetHeight, window.minSize.height), 680)
+        
+        let currentFrame = window.frame
+        let currentContentHeight = window.contentRect(forFrameRect: currentFrame).size.height
+        guard abs(currentContentHeight - clampedHeight) > 10 else { return } // skip small changes
+        
+        let newContentSize = NSSize(width: window.contentRect(forFrameRect: currentFrame).size.width, height: clampedHeight)
+        let newFrameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: newContentSize))
+        
+        var newFrame = currentFrame
+        newFrame.size = newFrameRect.size
+        newFrame.origin.y = currentFrame.origin.y + (currentFrame.size.height - newFrame.size.height)
+        // Keep centered horizontally
+        newFrame.origin.x = currentFrame.origin.x - (newFrame.size.width - currentFrame.size.width) / 2
+        
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(newFrame, display: true)
+        }
+    }
+    
+    func resizeWindowForDebugMode(_ enabled: Bool) {
+        guard let window = window else { return }
+        let targetWidth: CGFloat = enabled ? 800 : 360
+        
+        // Calculate new frame — keep the window anchored at top-left
+        let currentFrame = window.frame
+        let newContentSize = NSSize(width: targetWidth, height: window.contentRect(forFrameRect: currentFrame).size.height)
+        let newFrameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: newContentSize))
+        
+        var newFrame = currentFrame
+        newFrame.size = newFrameRect.size
+        newFrame.origin.x = currentFrame.origin.x - (newFrame.size.width - currentFrame.size.width) / 2
+        newFrame.origin.y = currentFrame.origin.y + (currentFrame.size.height - newFrame.size.height)
+        
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(newFrame, display: true)
+        }
+    }
+    
+    private func setupMenuBar() {
+        StartupLog.write("  setupMenuBar: creating main menu...")
+        let mainMenu = NSMenu()
+        mainMenu.autoenablesItems = false
+        
+        // --- App Menu ---
+        let appMenuItem = NSMenuItem(title: "TurtleDiver", action: nil, keyEquivalent: "")
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu(title: "TurtleDiver")
+        appMenu.autoenablesItems = false
+        appMenuItem.submenu = appMenu
+        
+        let aboutItem = NSMenuItem(title: "About TurtleDiver",
+                                    action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                                    keyEquivalent: "")
+        aboutItem.target = NSApp
+        appMenu.addItem(aboutItem)
+        StartupLog.write("  setupMenuBar: added About item")
+        
+        appMenu.addItem(NSMenuItem.separator())
+        
+        let settingsItem = NSMenuItem(title: "Settings...",
+                                       action: #selector(showSettings),
+                                       keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        StartupLog.write("  setupMenuBar: added Settings item")
+        
+        appMenu.addItem(NSMenuItem.separator())
+        
+        let quitItem = NSMenuItem(title: "Quit",
+                                   action: #selector(NSApplication.terminate(_:)),
+                                   keyEquivalent: "q")
+        quitItem.target = NSApp
+        appMenu.addItem(quitItem)
+        StartupLog.write("  setupMenuBar: added Quit item")
+        
+        // --- Edit Menu ---
+        let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.autoenablesItems = true
+        editMenuItem.submenu = editMenu
+        
+        editMenu.addItem(withTitle: "Undo", action: NSSelectorFromString("undo:"), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: NSSelectorFromString("redo:"), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        
+        StartupLog.write("  setupMenuBar: assigning mainMenu...")
+        NSApp.mainMenu = mainMenu
+        let menuDump = mainMenu.items.map { item in
+            let subItems = (item.submenu?.items ?? []).map { "\($0.title)(enabled=\($0.isEnabled),target=\($0.target != nil))" }
+            return "\(item.title): [\(subItems.joined(separator: ", "))]"
+        }.joined(separator: "; ")
+        StartupLog.write("  setupMenuBar: done. menu=\(menuDump)")
+    }
 }
 
 class MenuBarManager: NSObject {
@@ -117,21 +343,22 @@ class MenuBarManager: NSObject {
     private var cancellables = Set<AnyCancellable>()
     
     override init() {
+        StartupLog.write("MenuBarManager.init: creating status item...")
         super.init()
-        // Create the status item in the system menu bar
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        StartupLog.write("MenuBarManager.init: statusItem created: \(statusItem != nil)")
         
-        // Initial setup
         if let button = statusItem.button {
             button.image = NSImage(named: "MenuBarIcon")
             button.imagePosition = .imageLeft
+            StartupLog.write("MenuBarManager.init: button image set: \(button.image != nil)")
+        } else {
+            StartupLog.write("MenuBarManager.init: WARNING - no statusItem.button!")
         }
         
-        // Setup the initial menu
         updateMenu(status: .disconnected)
-        
-        // Start observing VPN status changes
         setupBindings()
+        StartupLog.write("MenuBarManager.init: done")
     }
     
     private func setupBindings() {

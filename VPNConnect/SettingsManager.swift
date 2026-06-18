@@ -1,6 +1,49 @@
 import Foundation
 import Combine
 
+// MARK: - Proxy Configuration
+
+struct ProxyConfiguration: Codable, Identifiable {
+    let id: UUID
+    var name: String
+    var pacFilePath: String?
+    var pacBookmarkData: Data?
+    var pacCode: String?
+    var isActive: Bool
+    
+    init(id: UUID = UUID(), name: String, pacFilePath: String? = nil, pacBookmarkData: Data? = nil, pacCode: String? = nil, isActive: Bool = false) {
+        self.id = id
+        self.name = name
+        self.pacFilePath = pacFilePath
+        self.pacBookmarkData = pacBookmarkData
+        self.pacCode = pacCode
+        self.isActive = isActive
+    }
+    
+    var resolvedPACURL: URL? {
+        if let bookmarkData = pacBookmarkData {
+            var isStale = false
+            if let url = try? URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale) {
+                return url
+            }
+        }
+        if let path = pacFilePath {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+    
+    var pacContent: String? {
+        if let code = pacCode {
+            return code
+        }
+        if let url = resolvedPACURL {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+        return nil
+    }
+}
+
 enum AppTheme: String, CaseIterable {
     case system = "system"
     case light = "light"
@@ -39,18 +82,17 @@ class SettingsManager: ObservableObject {
         static let stokenTokenFilePath = "stokenTokenFilePath"
         static let stokenTokenBookmarkData = "stokenTokenBookmarkData"
         static let useTunneling = "useTunneling"
+        static let proxyConfigurations = "proxyConfigurations"
+        static let useProxy = "useProxy"
+        static let selectedProxyID = "selectedProxyID"
     }
     
-    func resetAllSettings() {
+    func resetAllSettings() async {
         if let bundleID = Bundle.main.bundleIdentifier {
             defaults.removePersistentDomain(forName: bundleID)
             defaults.synchronize()
         }
         
-        // Re-initialize properties if needed (though removing domain should clear values for getters)
-        // Reset in-memory values if they were cached (properties are computed so they pull from defaults)
-        
-        // Specific reset for complex objects if needed
         stokenBookmarkData = nil
         stokenTokenBookmarkData = nil
     }
@@ -85,9 +127,8 @@ class SettingsManager: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.vpnSliceURLs) }
     }
     
-    var debugMode: Bool {
-        get { defaults.bool(forKey: Keys.debugMode) }
-        set { defaults.set(newValue, forKey: Keys.debugMode) }
+    @Published var debugMode: Bool = false {
+        didSet { defaults.set(debugMode, forKey: Keys.debugMode) }
     }
     
     var stokenRCPath: String {
@@ -126,9 +167,64 @@ class SettingsManager: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.stokenTokenBookmarkData) }
     }
     
-    var useTunneling: Bool {
-        get { defaults.bool(forKey: Keys.useTunneling) }
-        set { defaults.set(newValue, forKey: Keys.useTunneling) }
+    @Published var useTunneling: Bool = false {
+        didSet { defaults.set(useTunneling, forKey: Keys.useTunneling) }
+    }
+    
+    // MARK: - Proxy Configuration Properties
+    
+    var proxyConfigurations: [ProxyConfiguration] {
+        get {
+            guard let data = defaults.data(forKey: Keys.proxyConfigurations),
+                  let configs = try? JSONDecoder().decode([ProxyConfiguration].self, from: data) else {
+                return []
+            }
+            return configs
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Keys.proxyConfigurations)
+            }
+        }
+    }
+    
+    @Published var useProxy: Bool = false {
+        didSet { defaults.set(useProxy, forKey: Keys.useProxy) }
+    }
+    
+    @Published var selectedProxyID: UUID? = nil {
+        didSet { defaults.set(selectedProxyID?.uuidString, forKey: Keys.selectedProxyID) }
+    }
+    
+    var selectedProxy: ProxyConfiguration? {
+        guard let id = selectedProxyID else { return nil }
+        return proxyConfigurations.first { $0.id == id }
+    }
+    
+    func addProxyConfiguration(_ config: ProxyConfiguration) {
+        var configs = proxyConfigurations
+        configs.append(config)
+        proxyConfigurations = configs
+        objectWillChange.send()
+    }
+    
+    func updateProxyConfiguration(_ config: ProxyConfiguration) {
+        var configs = proxyConfigurations
+        if let index = configs.firstIndex(where: { $0.id == config.id }) {
+            configs[index] = config
+            proxyConfigurations = configs
+        }
+        objectWillChange.send()
+    }
+    
+    func deleteProxyConfiguration(id: UUID) {
+        var configs = proxyConfigurations
+        configs.removeAll { $0.id == id }
+        proxyConfigurations = configs
+        if selectedProxyID == id {
+            selectedProxyID = nil
+        }
+        objectWillChange.send()
     }
     
     func updateStokenTokenURL(_ url: URL) {
@@ -148,6 +244,14 @@ class SettingsManager: ObservableObject {
     }
     
     private init() {
+        // Load persisted values
+        debugMode = defaults.bool(forKey: Keys.debugMode)
+        useProxy = defaults.bool(forKey: Keys.useProxy)
+        if let str = defaults.string(forKey: Keys.selectedProxyID), let uuid = UUID(uuidString: str) {
+            selectedProxyID = uuid
+        }
+        
+        // Load theme
         if let raw = defaults.string(forKey: "appTheme"), let t = AppTheme(rawValue: raw) {
             self.theme = t
         } else {
