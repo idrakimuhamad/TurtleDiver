@@ -1,5 +1,14 @@
 import Foundation
 
+// MARK: - Sendable Data Buffer
+
+/// A reference type wrapper around Data that is explicitly Sendable,
+/// allowing it to be captured in @Sendable closures for Swift 6 concurrency checking.
+final class SendableDataBuffer: @unchecked Sendable {
+    var data = Data()
+    func append(_ other: Data) { data.append(other) }
+}
+
 // MARK: - Process Error
 
 enum ProcessError: LocalizedError {
@@ -64,20 +73,20 @@ class ProxyManager {
                 process.standardInput = inputPipe
             }
             
-            var stdoutData = Data()
-            var stderrData = Data()
+            let stdoutBuffer = SendableDataBuffer()
+            let stderrBuffer = SendableDataBuffer()
             
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if !data.isEmpty {
-                    stdoutData.append(data)
+                    stdoutBuffer.append(data)
                 }
             }
             
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if !data.isEmpty {
-                    stderrData.append(data)
+                    stderrBuffer.append(data)
                 }
             }
             
@@ -87,11 +96,11 @@ class ProxyManager {
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
                 
                 // Read any remaining data
-                stdoutData.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-                stderrData.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+                stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+                stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
                 
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                let stdout = String(data: stdoutBuffer.data, encoding: .utf8) ?? ""
+                let stderr = String(data: stderrBuffer.data, encoding: .utf8) ?? ""
                 
                 if proc.terminationStatus == 0 {
                     continuation.resume(returning: (stdout, stderr))
@@ -106,7 +115,7 @@ class ProxyManager {
                 // Write input after process starts
                 if let inputString = input, let inputPipe = process.standardInput as? Pipe {
                     if let data = "\(inputString)\n".data(using: .utf8) {
-                        inputPipe.fileHandleForWriting.write(data)
+                        try? inputPipe.fileHandleForWriting.write(contentsOf: data)
                     }
                     inputPipe.fileHandleForWriting.closeFile()
                 }

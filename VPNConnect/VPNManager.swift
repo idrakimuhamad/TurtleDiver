@@ -2,6 +2,74 @@ import Foundation
 import Cocoa
 import Combine
 
+// MARK: - Connection Log File
+
+/// Writes a detailed, timestamped trace of the VPN connection I/O to a file.
+/// Use this to debug credential flow issues that are not visible in the UI debug panel.
+final class VpnConnectionLogger: @unchecked Sendable {
+    static let logPath = "/tmp/turtlediver-vpn.log"
+    
+    private let queue = DispatchQueue(label: "com.turtlediver.vpn-log", qos: .utility)
+    private var fileHandle: FileHandle?
+    
+    init() {
+        // Truncate the log file on each connection
+        FileManager.default.createFile(atPath: Self.logPath, contents: nil, attributes: nil)
+        if let handle = FileHandle(forWritingAtPath: Self.logPath) {
+            fileHandle = handle
+        }
+        write("=== VPN Connection Log ===")
+    }
+    
+    deinit {
+        fileHandle?.closeFile()
+    }
+    
+    func write(_ message: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] \(message)\n"
+        queue.async { [weak self] in
+            guard let handle = self?.fileHandle else { return }
+            if let data = line.data(using: .utf8) {
+                handle.write(data)
+            }
+        }
+    }
+    
+    /// Logs raw data from an openconnect stream (stdout or stderr).
+    func logStream(_ stream: String, data: Data) {
+        guard !data.isEmpty else { return }
+        if let text = String(data: data, encoding: .utf8) {
+            for line in text.components(separatedBy: .newlines) where !line.isEmpty {
+                write("[\(stream)] \(line)")
+            }
+        } else {
+            write("[\(stream)] <binary data: \(data.count) bytes>")
+        }
+    }
+    
+    /// Logs a credential being written to the input pipe (redacted for security).
+    func logSend(_ label: String, value: String? = nil) {
+        if let val = value, !val.isEmpty {
+            write("[SEND] \(label): \(String(repeating: "•", count: val.count)) (\(val.count) chars)")
+        } else if let val = value {
+            write("[SEND] \(label): <empty>")
+        } else {
+            write("[SEND] \(label)")
+        }
+    }
+    
+    func logHandler(_ handler: String, action: String) {
+        write("[HANDLER] \(handler): \(action)")
+    }
+    
+    func flush() {
+        queue.sync {
+            fileHandle?.synchronizeFile()
+        }
+    }
+}
+
 // Import the connection history types
 struct ConnectionAttempt: Codable, Identifiable {
     let id: UUID
@@ -105,12 +173,23 @@ class VPNManager: ObservableObject {
     private var connectionStartTime: Date?
     private var errorBurst: Int = 0
     private var challengePending = false
+    /// Tracks whether we have already sent credentials for the current
+    /// prompt round, preventing duplicate writes when the server sends
+    /// multiple "PASSCODE:" lines in the same batch.
+    private var passcodePromptCount = 0
     private let pidFilePath = "/tmp/turtlediver.pid"
     private var currentAttemptId: UUID?
     
     /// Incremented on each `connect()` call so stale termination handlers
     /// from a previous connection can detect they should not act on state.
     private var connectionGeneration: UInt64 = 0
+    
+    /// Timer that polls for openconnect connection success via PID file / pgrep.
+    private var connectionPollTimer: DispatchSourceTimer?
+    
+    /// Flag set when the pipe write-end has been closed, preventing
+    /// readability handlers from attempting writes after forceTerminate().
+    private var pipeClosed = false
     
     private init() {}
     
@@ -122,6 +201,7 @@ class VPNManager: ObservableObject {
         debugOutput = "Starting VPN connection...\n"
         errorBurst = 0
         challengePending = false
+        passcodePromptCount = 0
         
         let settings = SettingsManager.shared
         
@@ -213,40 +293,43 @@ class VPNManager: ObservableObject {
             }
         }
         
-        // Fire-and-forget cleanup for subprocesses via async task
-        Task {
-            let adminPwd = SettingsManager.shared.adminPassword
-            if !adminPwd.isEmpty {
-                // 1. Try kill by PID file
-                if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
-                   !pidStr.isEmpty {
-                    _ = try? await runProcess(
-                        executable: URL(fileURLWithPath: "/usr/bin/sudo"),
-                        arguments: ["-S", "kill", pidStr],
-                        input: adminPwd
-                    )
-                }
-                // 2. Try pkill openconnect as backup
-                _ = try? await runProcess(
-                    executable: URL(fileURLWithPath: "/usr/bin/sudo"),
-                    arguments: ["-S", "pkill", "openconnect"],
-                    input: adminPwd
-                )
-            } else {
-                // Fallback for non-sudo or missing password
-                _ = try? await runProcess(
-                    executable: URL(fileURLWithPath: "/usr/bin/pkill"),
-                    arguments: ["openconnect"]
-                )
+        // Gracefully terminate openconnect via PID file (allows clean network teardown)
+        if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidStr), !pidStr.isEmpty, kill(pid, 0) == 0 {
+            // Blocking call — this is called from applicationWillTerminate on the main thread,
+            // but it's essential to give openconnect time to restore network settings before exit.
+            kill(pid, SIGTERM)
+            let deadline = DispatchTime.now() + .seconds(3)
+            while DispatchTime.now() < deadline {
+                usleep(200_000)
+                if kill(pid, 0) != 0 { break }
             }
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL) // Last resort — app is quitting anyway
+            }
+        } else {
+            // PID file missing — try pkill with SIGTERM (not SIGKILL)
+            let pkillTask = Process()
+            pkillTask.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pkillTask.arguments = ["-15", "openconnect"]
+            try? pkillTask.run()
+            // Don't wait — the process may take time to clean up, but the app is exiting.
+            // The network may briefly be in a bad state until the kernel cleans up.
         }
     }
     
     func disconnect() {
         if case .disconnected = status { return }
         
+        // Use appropriate log message depending on current state
+        let wasConnecting = if case .connecting = status { true } else { false }
+        
         status = .disconnecting
-        debugOutput += "Disconnecting VPN...\n"
+        if wasConnecting {
+            debugOutput += "Cancelling connection...\n"
+        } else {
+            debugOutput += "Disconnecting VPN...\n"
+        }
         
         // Teardown proxy if it was enabled
         let settings = SettingsManager.shared
@@ -271,16 +354,41 @@ class VPNManager: ObservableObject {
             ConnectionHistoryManager.shared.updateAttempt(attempt)
         }
         
+        // STEP 1: Gracefully terminate openconnect (allows clean network teardown)
+        if let pidStr = try? String(contentsOfFile: pidFilePath)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidStr), !pidStr.isEmpty {
+            debugOutput += "Terminating openconnect (PID: \(pid)) gracefully...\n"
+            let cleanExit = terminateGracefully(pid: pid)
+            if cleanExit {
+                debugOutput += "openconnect exited cleanly, network restored\n"
+            } else {
+                debugOutput += "openconnect force-killed (network may need manual restore)\n"
+            }
+        }
+        
+        // No pkill -9 backup — it races with graceful SIGTERM and prevents
+        // openconnect from restoring network routes/DNS, causing internet loss.
+        
+        // STEP 2: Clean up PID file
+        try? FileManager.default.removeItem(atPath: pidFilePath)
+        
+        // STEP 3: Gracefully terminate the bash/sudo wrapper process
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         if let proc = process {
             if proc.isRunning {
                 let pid = proc.processIdentifier
-                proc.terminate()
-                DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 1) {
-                    if proc.isRunning {
-                        _ = kill(pid, SIGTERM)
-                    }
+                proc.terminate() // SIGTERM
+                // Bash/sudo will exit once openconnect is gone — give it a moment
+                let deadline = DispatchTime.now() + .seconds(2)
+                while DispatchTime.now() < deadline {
+                    usleep(100_000)
+                    if !proc.isRunning { break }
+                }
+                if proc.isRunning {
+                    _ = kill(pid, SIGKILL)
+                    debugOutput += "Shell process force-killed\n"
                 }
             }
         }
@@ -309,38 +417,11 @@ class VPNManager: ObservableObject {
             return
         }
         
+        // The server expects the PIN (static) prepended to the TOTP tokencode.
+        // stoken tokencode -p returns just the 6-digit TOTP, not the combined value.
+        // So we manually combine: passcode + token.
         let pin = settings.vpnPasscode + token
-        
-        if settings.adminPassword.isEmpty {
-            let result = await MainActor.run { () -> Bool in
-                let alert = NSAlert()
-                alert.messageText = "Admin Password Required"
-                alert.informativeText = "Please enter your local administrator password to configure network settings."
-                alert.addButton(withTitle: "OK")
-                alert.addButton(withTitle: "Cancel")
-                
-                let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-                alert.accessoryView = input
-                alert.window.initialFirstResponder = input
-                
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn {
-                    settings.adminPassword = input.stringValue
-                    return true
-                }
-                return false
-            }
-            if !result { return }
-        }
-        
-        guard !settings.adminPassword.isEmpty else {
-            DispatchQueue.main.async {
-                self.status = .error("Admin password required")
-                self.debugOutput += "Error: Admin password required for elevated openconnect\n"
-            }
-            return
-        }
-        
+
         // Build the command: options first, then host
         var arguments: [String] = ["--force-dpd=10", "--user=\(settings.vpnID)", "--pid-file", pidFilePath]
         if withTunneling {
@@ -357,79 +438,97 @@ class VPNManager: ObservableObject {
             }
         }
         
-        // Create process
-        let process = Process()
-        let openconnectPath = binaryPath("openconnect")
-        let sudoPath = "/usr/bin/sudo"
-        if let oc = openconnectPath {
-            process.executableURL = URL(fileURLWithPath: sudoPath)
-            process.arguments = ["-S", oc] + arguments
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["sudo", "-S", "openconnect"] + arguments
+        // Ensure admin password is available for sudo -S
+        if settings.adminPassword.isEmpty {
+            await MainActor.run {
+                self.debugOutput += "Admin password required for VPN connection.\n"
+            }
+            // promptForAdminPasswordAndRetry is @MainActor — Swift auto-hops to main actor
+            let retry = await self.promptForAdminPasswordAndRetry()
+            guard retry else {
+                await MainActor.run {
+                    self.status = .error("Admin password required")
+                    self.debugOutput += "Connection cancelled - admin password is needed to configure network settings.\n"
+                }
+                return
+            }
         }
         
-        // Ensure PATH includes Homebrew locations
-        var env = ProcessInfo.processInfo.environment
+        let openconnectPath = binaryPath("openconnect") ?? "openconnect"
         let defaultPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        env["PATH"] = "\(defaultPaths):\(env["PATH"] ?? "")"
-        process.environment = env
+        let pathEnv = "export PATH=\(shellEscape(defaultPaths)):$PATH"
+        let ocEscaped = shellEscape(openconnectPath)
+        let argsEscaped = arguments.map(shellEscape).joined(separator: " ")
+        let adminPwdEscaped = shellEscape(settings.adminPassword)
+        let pinEscaped = shellEscape(pin)
+        let passEscaped = shellEscape(settings.vpnPassword)
         
-        // Set up pipes for output
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        // Build command matching the working vpn.sh script:
+        // 1. Pre-cache sudo password via `echo <pwd> | sudo -S -v`
+        // 2. Pipe credentials directly to `sudo openconnect` (no -S — all stdin goes to openconnect)
+        // This avoids sudo -S consuming credential data meant for openconnect, matching the
+        // working script where `printf "$PIN\n$PASSWORD" | sudo openconnect ...` passes all stdin to openconnect.
+        // Credential order: PIN (passcode+tokencode) first, VPN password second.
+        let shellCommand = "\(pathEnv); echo \(adminPwdEscaped) | sudo -S -v && printf '%s\\n%s\\n' \(pinEscaped) \(passEscaped) | sudo \(ocEscaped) \(argsEscaped)"
         
-        // Set up input for password
-        let inputPipe = Pipe()
-        process.standardInput = inputPipe
+        // Connection file logger
+        let log = VpnConnectionLogger()
+        log.write("Host: \(settings.vpnHost)")
+        log.write("User: \(settings.vpnID)")
+        log.write("Tunneling: \(withTunneling)")
+        log.write("openconnect path: \(openconnectPath)")
+        log.write("Arguments: \(arguments)")
+        log.write("Command: printf '<admin_pwd>\\n<PIN>\\n<PASS>' | sudo -S -v && sudo openconnect <args> (matches working vpn.sh)")
+        log.logSend("Admin password (for sudo)", value: settings.adminPassword)
+        log.logSend("PIN (passcode+tokencode)", value: pin)
+        log.logSend("VPN password", value: settings.vpnPassword)
+        log.flush()
         
-        // Handle output
-        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+        DispatchQueue.main.async {
+            self.debugOutput += "Connection log: \(VpnConnectionLogger.logPath)\n"
+            self.debugOutput += "Launching openconnect via sudo...\n"
+        }
+        
+        // Run via bash -c (direct, unbuffered — no osascript intermediary)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", shellCommand]
+        
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        
+        // Reset flags
+        self.passcodePromptCount = 0
+        self.pipeClosed = false
+        
+        // Handle output — now unbuffered since we run bash directly, not via osascript
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
+            log.logStream("STDOUT", data: data)
             if let output = String(data: data, encoding: .utf8) {
                 DispatchQueue.main.async {
                     self.debugOutput += output
                     let lowerOut = output.lowercased()
                     
-                    if lowerOut.contains("enter next passcode") {
-                        self.challengePending = true
+                    // "Please enter your username and password." is a WebVPN banner, not a prompt.
+                    if lowerOut.contains("please enter your username and password") {
+                        log.logHandler("STDOUT", action: "banner text, no input sent")
                     }
                     
-                    if lowerOut.contains("passcode:") || lowerOut.contains("enter pin") {
-                        if self.challengePending {
-                            self.onChallenge?("Enter Next PASSCODE", { response in
-                                let answer = "\(response)\n"
-                                if let data = answer.data(using: .utf8) {
-                                    inputPipe.fileHandleForWriting.write(data)
-                                }
-                                self.challengePending = false
-                            })
-                        } else {
-                            let creds = "\(pin)\n"
-                            if let data = creds.data(using: .utf8) {
-                                inputPipe.fileHandleForWriting.write(data)
-                            }
-                        }
-                    }
-                    if lowerOut.contains("password:") {
-                        let pw = "\(settings.vpnPassword)\n"
-                        if let data = pw.data(using: .utf8) {
-                            inputPipe.fileHandleForWriting.write(data)
-                        }
-                    }
+                    // Check connection success signals
                     if output.contains("Established DTLS")
                         || output.contains("ESP session established")
                         || output.contains("Connected as")
                         || output.contains("CSTP connected")
                         || output.contains("Configured as")
                         || output.contains("Got CONNECT response") {
+                        log.logHandler("STDOUT", action: "detected successful connection signal")
                         if case .connecting = self.status {
                             self.status = .connected
                             self.startDurationTimer()
                             self.cancelConnectionTimer()
-                            // Update history with successful connection
                             if let id = self.currentAttemptId {
                                 let attempt = ConnectionAttempt(
                                     id: id,
@@ -442,336 +541,164 @@ class VPNManager: ObservableObject {
                             }
                         }
                     }
-                    self.errorBurst = 0
                 }
             }
         }
         
-        let usingSlice = withTunneling
-        var errorBuffer = Data()
-        
-        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
+            log.logStream("STDERR", data: data)
             
-            errorBuffer.append(data)
-            
-            guard let fullString = String(data: errorBuffer, encoding: .utf8) else { return }
-            
-            // Process only if we have newlines or buffer is getting large
-            if fullString.contains("\n") || errorBuffer.count > 4096 {
-                var lines = fullString.components(separatedBy: .newlines)
-                
-                // Handle buffering
-                if !fullString.hasSuffix("\n") {
-                    if let last = lines.last {
-                        errorBuffer = last.data(using: .utf8) ?? Data()
-                        lines.removeLast()
-                    }
-                } else {
-                    errorBuffer = Data()
-                    if lines.last == "" { lines.removeLast() }
-                }
-                
-                for line in lines {
-                    let cleanLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if cleanLine.isEmpty { continue }
+            guard let text = String(data: data, encoding: .utf8) else { return }
+            for line in text.components(separatedBy: .newlines) {
+                let cleanLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if cleanLine.isEmpty { continue }
+                DispatchQueue.main.async {
+                    let lower = cleanLine.lowercased()
                     
-                    DispatchQueue.main.async {
-                        let lower = cleanLine.lowercased()
-                        
-                        // Benign slice output: show without "ERROR:" prefix
-                        if usingSlice {
-                            if lower.contains("got results:")
-                               || lower.contains("dns in a rdata")
-                               || lower.contains("route: writing to routing socket") {
-                                
-                                // Strip any leading "error: " and append
-                                var display = cleanLine
-                                if lower.hasPrefix("error: ") {
-                                    display = String(cleanLine.dropFirst(7))
-                                } else if lower.hasPrefix("error:") {
-                                    display = String(cleanLine.dropFirst(6))
-                                }
-                                self.debugOutput += display + "\n"
-                                self.errorBurst = 0
-                                return
-                            }
-                        }
-                        
-                        // Ignore normal portal/transport messages during setup
-                        if lower.contains("got http response")
-                            || lower.contains("unexpected 404 result from server")
-                            || lower.contains("get `http")
-                            || lower.contains("post `http")
-                            || lower.contains("no dtls address")
-                            || lower.contains("set up udp failed; using ssl instead") {
-                            return
-                        }
-                        
-                        // Prompt handling
-                        if lower.contains("enter next passcode") {
-                            self.challengePending = true
-                        }
-                        
-                        if lower.contains("please enter your username and password") || lower.contains("passcode:") {
-                            if self.challengePending {
-                                self.onChallenge?("Enter Next PASSCODE", { response in
-                                    let answer = "\(response)\n"
-                                    if let data = answer.data(using: .utf8) {
-                                        inputPipe.fileHandleForWriting.write(data)
-                                    }
-                                    self.challengePending = false
-                                })
-                            } else {
-                                let creds = "\(pin)\n"
-                                if let data = creds.data(using: .utf8) {
-                                    inputPipe.fileHandleForWriting.write(data)
-                                }
-                            }
-                            self.debugOutput += "\(cleanLine)\n"
-                            return
-                        }
-                        if lower.contains("password:") {
-                            let pw = "\(settings.vpnPassword)\n"
-                            if let data = pw.data(using: .utf8) {
-                                inputPipe.fileHandleForWriting.write(data)
-                            }
-                            self.debugOutput += "\(cleanLine)\n"
-                            return
-                        }
-                        
-                        // Fatal errors
-                        if lower.contains("sudo") || lower.contains("permission denied") {
-                            self.debugOutput += "ERROR: \(cleanLine)\n"
-                            if case .connecting = self.status {
-                                self.status = .error("Requires admin privileges")
-                                self.cancelConnectionTimer()
-                            }
-                            return
-                        } else if lower.contains("operation not permitted") {
-                            self.debugOutput += "ERROR: \(cleanLine)\n"
-                            if case .connecting = self.status {
-                                self.status = .error("Operation not permitted")
-                                self.cancelConnectionTimer()
-                                self.forceTerminate()
-                            }
-                            return
-                        } else if lower.contains("administrator username or password was incorrect") || lower.contains("-60005") {
-                             self.debugOutput += "ERROR: \(cleanLine)\n"
-                            if case .connecting = self.status {
-                                self.status = .error("Admin password incorrect")
-                                self.cancelConnectionTimer()
-                                self.forceTerminate()
-                            }
-                            return
-                        } else if lower.contains("failed to open tun device") || lower.contains("failed to connect utun unit") {
-                             self.debugOutput += "ERROR: \(cleanLine)\n"
-                            if case .connecting = self.status {
-                                self.status = .error("Tun setup failed")
-                                self.cancelConnectionTimer()
-                                self.forceTerminate()
-                            }
-                            return
-                        } else if lower.contains("cstp dead peer detection detected dead peer!") {
-                            self.debugOutput += "WARNING: \(cleanLine)\n"
-                            return
-                        } else if lower.contains("failed to reconnect to host") {
-                            self.debugOutput += "WARNING: \(cleanLine)\n"
-                            return
-                        } else if lower.contains("login failed") {
-                            self.debugOutput += "ERROR: \(cleanLine)\n"
-                            self.forceTerminate()
-                            self.status = .error("Login failed")
-                            self.cancelConnectionTimer()
-                            // Log error attempt
-                            if let id = self.currentAttemptId {
-                                let attempt = ConnectionAttempt(
-                                    id: id,
-                                    timestamp: self.connectionStartTime ?? Date(),
-                                    host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                                    status: "Failed - Login Failed",
-                                    logOutput: self.debugOutput
-                                )
-                                ConnectionHistoryManager.shared.updateAttempt(attempt)
-                            }
-                            return
-                        } else if lower.contains("fgets (stdin): inappropriate ioctl for device") {
-                            self.debugOutput += "ERROR: \(cleanLine)\n"
-                            self.forceTerminate()
-                            self.status = .error("Credential input error")
-                            self.cancelConnectionTimer()
-                            // Log error attempt
-                            if let id = self.currentAttemptId {
-                                let attempt = ConnectionAttempt(
-                                    id: id,
-                                    timestamp: self.connectionStartTime ?? Date(),
-                                    host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                                    status: "Failed - Credential Error",
-                                    logOutput: self.debugOutput
-                                )
-                                ConnectionHistoryManager.shared.updateAttempt(attempt)
-                            }
-                            return
-                        }
-                        
-                        // Generic error handling
-                        if lower.contains("error") {
-                            // If it already says ERROR, don't duplicate
-                            if lower.hasPrefix("error") {
-                                self.debugOutput += "\(cleanLine)\n"
-                            } else {
-                                self.debugOutput += "ERROR: \(cleanLine)\n"
-                            }
-                            
-                            if case .connecting = self.status {
-                                self.status = .error("OpenConnect error")
-                                self.cancelConnectionTimer()
-                                // Log error attempt
-                                if let id = self.currentAttemptId {
-                                    let attempt = ConnectionAttempt(
-                                        id: id,
-                                        timestamp: self.connectionStartTime ?? Date(),
-                                        host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                                        status: "Failed - \(cleanLine)",
-                                        logOutput: self.debugOutput
-                                    )
-                                    ConnectionHistoryManager.shared.updateAttempt(attempt)
-                                }
-                            }
-                            return
-                        }
-                        
-                        if lower.contains("send bye") || lower.contains("terminating") {
-                            self.debugOutput += "\(cleanLine)\n"
-                            self.forceTerminate()
-                            self.status = .disconnected
-                            self.cancelConnectionTimer()
-                            return
-                        }
-                        
-                        // Default fallback for unknown stderr lines
-                        if lower.hasPrefix("error") {
-                            self.debugOutput += "\(cleanLine)\n"
-                        } else {
-                            self.debugOutput += "ERROR: \(cleanLine)\n"
-                        }
-                        self.errorBurst += 1
+                    // Handle potential login failure messages from openconnect.
+                    // NOTE: Do NOT force-terminate here — the VPN may have successfully
+                    // connected (routes configured, vpn-slice running) even when openconnect
+                    // outputs "login failed" as part of a multi-step auth flow or secondary
+                    // challenge. If it's a real failure, openconnect will exit on its own
+                    // and the termination handler will report the error.
+                    if lower.contains("login failed") {
+                        log.logHandler("STDERR", action: "LOGIN FAILED reported by openconnect — may be part of multi-step auth")
+                        self.debugOutput += "WARN: \(cleanLine) (openconnect may still continue)\n"
+                    }
+                    
+                    // Authentication errors
+                    if lower.contains("authentication failed") || lower.contains("authorization failed") {
+                        log.logHandler("STDERR", action: "Auth failed")
+                        self.debugOutput += "ERROR: \(cleanLine)\n"
+                        return
+                    }
+                    
+                    // Sudo / admin password issues
+                    if lower.contains("sudo") || lower.contains("permission denied") || lower.contains("incorrect") {
+                        log.logHandler("STDERR", action: "admin password issue")
+                        self.debugOutput += "ERROR: \(cleanLine)\n"
+                        return
                     }
                 }
             }
         }
         
-        self.process = process
-        self.outputPipe = outputPipe
-        self.errorPipe = errorPipe
-        self.inputPipe = inputPipe
+        self.process = proc
+        self.outputPipe = outPipe
+        self.errorPipe = errPipe
+        self.inputPipe = nil
+        
+        let gen = connectionGeneration
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                guard let self = self, self.connectionGeneration == gen else { return }
+                log.write("[TERM] VPN process terminated (status: \(p.terminationStatus))")
+                log.flush()
+                self.outputPipe?.fileHandleForReading.readabilityHandler = nil
+                self.errorPipe?.fileHandleForReading.readabilityHandler = nil
+                self.debugOutput += "VPN process exited (status: \(p.terminationStatus))\n"
+                // Only update status if we weren't already connected
+                if case .connected = self.status {
+                    self.status = .disconnected
+                } else if case .connecting = self.status {
+                    self.status = .error("Connection failed (status: \(p.terminationStatus))")
+                }
+                self.cancelConnectionTimer()
+            }
+        }
         
         do {
-            try process.run()
-            
-            // Send credentials
-            let admin = settings.adminPassword
-            if let d = "\(admin)\n\(pin)\n\(settings.vpnPassword)\n".data(using: .utf8) {
-                inputPipe.fileHandleForWriting.write(d)
-            }
+            try proc.run()
+            log.write("[INIT] bash process started with PID \(proc.processIdentifier)")
+            log.flush()
             
             DispatchQueue.main.async {
-                if case .connecting = self.status {
-                    self.debugOutput += "Awaiting connection confirmation...\n"
-                }
-            }
-            
-            let gen = connectionGeneration
-            process.terminationHandler = { [weak self] proc in
-                DispatchQueue.main.async {
-                    guard let self = self, self.connectionGeneration == gen else { return }
-                    self.outputPipe?.fileHandleForReading.readabilityHandler = nil
-                    self.errorPipe?.fileHandleForReading.readabilityHandler = nil
-                    if proc.terminationStatus == 0 {
-                        self.debugOutput += "VPN connection terminated normally\n"
-                    } else {
-                        self.debugOutput += "VPN connection terminated with error: \(proc.terminationStatus)\n"
-                    }
-                    self.status = .disconnected
-                    self.cancelConnectionTimer()
-                    self.errorBurst = 0
-                    // Log termination attempt
-                    if let id = self.currentAttemptId {
-                        let duration = self.connectionStartTime.map { Date().timeIntervalSince($0) }
-                        let attempt = ConnectionAttempt(
-                            id: id,
-                            timestamp: self.connectionStartTime ?? Date(),
-                            host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                            status: proc.terminationStatus == 0 ? "Disconnected" : "Failed - Terminated",
-                            duration: duration,
-                            logOutput: self.debugOutput
-                        )
-                        ConnectionHistoryManager.shared.updateAttempt(attempt)
-                    }
-                }
+                self.debugOutput += "VPN process launched. Awaiting connection...\n"
             }
             
             self.startConnectionTimer(timeoutSeconds: 90)
             
+            // Start polling for connection success via PID file.
+            // Since we now run bash directly (not through osascript),
+            // stdout/stderr arrive in real-time via the readability handlers.
+            // The PID file polling is a secondary fallback.
+            self.startConnectionPollingTimer(log: log, gen: gen)
         } catch {
+            log.write("[TERM] bash process failed to start: \(error.localizedDescription)")
+            log.flush()
+            self.pipeClosed = true
             DispatchQueue.main.async {
-                self.status = .error("Failed to start VPN: \(error.localizedDescription)")
+                self.status = .error("Failed to launch: \(error.localizedDescription)")
                 self.debugOutput += "Error: \(error.localizedDescription)\n"
                 self.cancelConnectionTimer()
-                // Log error attempt
-                if let id = self.currentAttemptId {
-                    let attempt = ConnectionAttempt(
-                        id: id,
-                        timestamp: self.connectionStartTime ?? Date(),
-                        host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                        status: "Failed - \(error.localizedDescription)",
-                        logOutput: self.debugOutput
-                    )
-                    ConnectionHistoryManager.shared.updateAttempt(attempt)
-                }
             }
-            self.forceTerminate()
         }
     }
+    
     private func terminateExistingOpenConnect() async {
-        let pgrepExec = URL(fileURLWithPath: "/usr/bin/pgrep")
+        let adminPwd = SettingsManager.shared.adminPassword
+        var existingPid: Int32?
         
-        guard let pgrepResult = try? await runProcess(executable: pgrepExec, arguments: ["openconnect"]),
-              !pgrepResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
+        // 1. Check PID file first — extract PID to avoid reading the file twice
+        if let pidStr = try? String(contentsOfFile: pidFilePath)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidStr), !pidStr.isEmpty, kill(pid, 0) == 0 {
+            existingPid = pid
+        }
+        
+        // 2. Fall back to pgrep
+        if existingPid == nil {
+            let pgrepExec = URL(fileURLWithPath: "/usr/bin/pgrep")
+            if let pgrepResult = try? await runProcess(executable: pgrepExec, arguments: ["-f", "openconnect"]),
+               !pgrepResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // We know a process exists, but we don't have a reliable PID yet
+                // (the pgrep output could include multiple PIDs). We'll rely on
+                // sudo pkill -9 below to kill it.
+            } else {
+                return // No process found
+            }
         }
         
         await MainActor.run {
             self.debugOutput += "Found existing openconnect process. Terminating...\n"
         }
         
-        // Try pkill first
-        let pkillResult = try? await runProcess(
-            executable: URL(fileURLWithPath: "/usr/bin/pkill"),
-            arguments: ["openconnect"]
-        )
-        
-        // If regular pkill failed and admin password is available, try sudo
-        if pkillResult == nil, !SettingsManager.shared.adminPassword.isEmpty {
+        // 3. Gracefully terminate by PID file first
+        if let pid = existingPid {
+            await MainActor.run {
+                self.debugOutput += "Gracefully terminating existing openconnect (PID: \(pid))...\n"
+            }
+            terminateGracefully(pid: pid)
+        } else {
+            await MainActor.run {
+                self.debugOutput += "No PID file found, sending SIGTERM via pkill...\n"
+            }
+            // Use pkill with SIGTERM (signal 15) instead of SIGKILL,
+            // giving openconnect a chance to restore network configuration.
             _ = try? await runProcess(
-                executable: URL(fileURLWithPath: "/usr/bin/sudo"),
-                arguments: ["-S", "pkill", "openconnect"],
-                input: SettingsManager.shared.adminPassword
+                executable: URL(fileURLWithPath: "/usr/bin/pkill"),
+                arguments: ["-15", "-f", "openconnect"]
             )
+            // Give it time to clean up
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
         
-        // Wait a moment for cleanup
+        // 4. Clean up the stale PID file
+        try? FileManager.default.removeItem(atPath: pidFilePath)
+        
+        // Wait for cleanup to complete
         try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
 
-    private func generateToken(passcode: String) async -> String {
+    private func generateToken(passcode: String, isNext: Bool = false) async -> String {
         let stokenPath = binaryPath("stoken")
         
         // Ensure PATH includes Homebrew locations
-        var env = ProcessInfo.processInfo.environment
         let defaultPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        env["PATH"] = "\(defaultPaths):\(env["PATH"] ?? "")"
+        var envBuilder = ProcessInfo.processInfo.environment
+        envBuilder["PATH"] = "\(defaultPaths):\(envBuilder["PATH"] ?? "")"
         
         var startedAccess = false
         var usingTokenFile = false
@@ -780,6 +707,7 @@ class VPNManager: ObservableObject {
         // Determine executable and arguments
         func makeArguments(baseArgs: [String] = ["tokencode"]) -> [String] {
             var args = baseArgs
+            if isNext { args.append("--next") }
             if !passcode.isEmpty { args.append(contentsOf: ["-p", passcode]) }
             return args
         }
@@ -813,16 +741,25 @@ class VPNManager: ObservableObject {
                 if let stokenURL = SettingsManager.shared.resolvedStokenURL() {
                     if stokenURL.startAccessingSecurityScopedResource() {
                         startedAccess = true
-                        env["STOKEN_RC"] = stokenURL.path
+                        envBuilder["STOKEN_RC"] = stokenURL.path
                     }
                 } else {
                     let rcPath = SettingsManager.shared.stokenRCPath
                     if !rcPath.isEmpty {
-                        env["STOKEN_RC"] = rcPath
+                        envBuilder["STOKEN_RC"] = rcPath
+                    } else {
+                        // Fallback: check if ~/.stokenrc exists (stoken's default path)
+                        let homeRC = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".stokenrc").path
+                        if FileManager.default.isReadableFile(atPath: homeRC) {
+                            envBuilder["STOKEN_RC"] = homeRC
+                        }
                     }
                 }
             }
         }
+        
+        // Capture the final env as a constant to satisfy Swift 6 concurrency checking
+        let env = envBuilder
         
         // Helper to stop security-scoped access
         func stopAccess() {
@@ -860,8 +797,8 @@ class VPNManager: ObservableObject {
                 if usingTokenFile, let filePath = tokenFilePath {
                     let retryExec = stokenPath.map { URL(fileURLWithPath: $0) } ?? URL(fileURLWithPath: "/usr/bin/env")
                     let retryArgs = stokenPath != nil
-                        ? ["tokencode", "--file", filePath] + (passcode.isEmpty ? [] : ["-p", passcode])
-                        : ["stoken", "tokencode", "--file", filePath] + (passcode.isEmpty ? [] : ["-p", passcode])
+                        ? makeArguments(baseArgs: ["tokencode", "--file", filePath])
+                        : ["stoken"] + makeArguments(baseArgs: ["tokencode", "--file", filePath])
                     
                     if let retryResult = try? await runProcess(executable: retryExec, arguments: retryArgs, environment: env) {
                         let retryOutput = retryResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -956,6 +893,133 @@ class VPNManager: ObservableObject {
     private func cancelConnectionTimer() {
         connectionTimer?.cancel()
         connectionTimer = nil
+        connectionPollTimer?.cancel()
+        connectionPollTimer = nil
+    }
+    
+    /// Polls the PID file every 2 seconds to detect when openconnect has
+    /// successfully started. Since we now run bash directly (not through
+    /// osascript), stdout/stderr arrive in real-time via readability handlers.
+    /// This polling timer is a secondary fallback for detecting the connection.
+    ///
+    /// Detection strategy (tiered):
+    /// 1. Check the PID file (written by openconnect via `--pid-file`) — instant
+    ///    when openconnect supports it.
+    /// 2. After 10 seconds without a PID file, fall back to pgrep. Since
+    ///    `terminateExistingOpenConnect()` already cleaned up stale processes
+    ///    before starting, any new openconnect PID found by pgrep must be from
+    ///    the current connection. We exclude the bash process PID itself.
+    ///
+    /// This avoids false positives from stale processes (which pgrep without
+    /// cleanup would detect) while still working when openconnect doesn't
+    /// write the PID file in foreground mode.
+    private func startConnectionPollingTimer(log: VpnConnectionLogger, gen: UInt64) {
+        // Cancel any previous polling timer
+        connectionPollTimer?.cancel()
+        
+        // The bash process that launched this connection. At this point
+        // `self.process` has been set and `proc.run()` has been called,
+        // so `processIdentifier` should be valid. We'll exclude this PID
+        // from pgrep results to avoid detecting the bash wrapper itself.
+        let bashPid: Int32? = self.process?.processIdentifier
+        
+        // Track how many polls have elapsed. After 5 (10 seconds), fall back
+        // to pgrep if the PID file hasn't appeared.
+        var pollCount = 0
+        
+        let pollTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+        pollTimer.schedule(deadline: .now() + 2.0, repeating: 2.0)
+        pollTimer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            pollCount += 1
+            
+            // Quick check on generation to avoid unnecessary work
+            var shouldContinue = false
+            let genCheck = DispatchGroup()
+            genCheck.enter()
+            DispatchQueue.main.async {
+                if case .connecting = self.status, self.connectionGeneration == gen {
+                    shouldContinue = true
+                } else {
+                    pollTimer.cancel()
+                }
+                genCheck.leave()
+            }
+            genCheck.wait()
+            guard shouldContinue else { return }
+            
+            var detectedPid: Int32?
+            
+            // Tier 1: Check the PID file (fast path)
+            if let pidStr = try? String(contentsOfFile: self.pidFilePath)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               let pid = Int32(pidStr),
+               !pidStr.isEmpty,
+               kill(pid, 0) == 0 {
+                detectedPid = pid
+                log.write("[POLL] PID file found — PID \(pid) is alive")
+            }
+            
+            // Tier 2: After 10 seconds, fall back to pgrep
+            // We exclude the osascript PID because `pgrep -f openconnect`
+            // will match osascript's command line (the -e argument contains
+            // "openconnect").
+            if detectedPid == nil && pollCount >= 5 {
+                let pgrepTask = Process()
+                pgrepTask.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+                pgrepTask.arguments = ["-f", "openconnect"]
+                let outPipe = Pipe()
+                pgrepTask.standardOutput = outPipe
+                pgrepTask.standardError = FileHandle.nullDevice
+                try? pgrepTask.run()
+                pgrepTask.waitUntilExit()
+                
+                if pgrepTask.terminationStatus == 0 {
+                    let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .components(separatedBy: .newlines)
+                        .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+                    
+                    // Pick the first PID that is NOT the shell process and is still alive
+                    detectedPid = pids.first { runningPid in
+                        runningPid != bashPid
+                        && runningPid != ProcessInfo.processInfo.processIdentifier
+                        && kill(runningPid, 0) == 0
+                    }
+                    
+                    if let pid = detectedPid {
+                        log.write("[POLL] pgrep fallback found openconnect PID \(pid) (bash PID: \(bashPid ?? -1))")
+                    }
+                }
+            }
+            
+            guard let pid = detectedPid else { return }
+            
+            // Connection detected! Update status.
+            log.flush()
+            pollTimer.cancel()
+            self.connectionPollTimer = nil
+            
+            DispatchQueue.main.async {
+                guard case .connecting = self.status, self.connectionGeneration == gen else { return }
+                self.debugOutput += "VPN connection established (PID: \(pid))\n"
+                self.status = .connected
+                self.startDurationTimer()
+                self.cancelConnectionTimer()
+                if let id = self.currentAttemptId {
+                    let attempt = ConnectionAttempt(
+                        id: id,
+                        timestamp: self.connectionStartTime ?? Date(),
+                        host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
+                        status: "Connected",
+                        logOutput: self.debugOutput
+                    )
+                    ConnectionHistoryManager.shared.updateAttempt(attempt)
+                }
+            }
+        }
+        pollTimer.resume()
+        connectionPollTimer = pollTimer
     }
     
     private func startDurationTimer() {
@@ -983,34 +1047,90 @@ class VPNManager: ObservableObject {
         }
     }
     
+    /// Send SIGTERM and wait up to `timeoutSeconds` for the process to exit.
+    /// Returns true if the process exited cleanly, false if force-kill was required.
+    /// This is critical — SIGKILL prevents openconnect from restoring network
+    /// configuration (routes, DNS, utun interface), causing total internet loss.
+    @discardableResult
+    private func terminateGracefully(pid: Int32, timeoutSeconds: TimeInterval = 3.0) -> Bool {
+        guard kill(pid, 0) == 0 else { return true } // already dead
+        
+        kill(pid, SIGTERM)
+        
+        let deadline = DispatchTime.now() + .seconds(Int(timeoutSeconds))
+        while DispatchTime.now() < deadline {
+            usleep(200_000) // 200ms
+            if kill(pid, 0) != 0 { return true } // exited cleanly
+        }
+        
+        // Only force-kill as last resort — this may leave network in a bad state
+        kill(pid, SIGKILL)
+        return false
+    }
+    
     private func forceTerminate() {
+        // Mark the pipe as closed so readability handlers skip writes
+        pipeClosed = true
+        
+        // Clear readability handlers FIRST to prevent any new callbacks
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
+        
+        // Gracefully terminate openconnect (allows clean network teardown)
+        if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidStr) {
+            terminateGracefully(pid: pid)
+        }
+        
+        // Then handle the shell wrapper
         if let proc = process {
             if proc.isRunning {
                 let pid = proc.processIdentifier
                 proc.terminate()
-                DispatchQueue.global(qos: .background).async {
-                    usleep(500_000)
-                    if proc.isRunning {
-                        _ = kill(pid, SIGTERM)
-                        usleep(500_000)
-                        if proc.isRunning {
-                            _ = kill(pid, SIGKILL)
-                        }
-                    }
+                // Give it up to 2 seconds to exit after openconnect is gone
+                let deadline = DispatchTime.now() + .seconds(2)
+                while DispatchTime.now() < deadline {
+                    usleep(100_000)
+                    if !proc.isRunning { break }
+                }
+                if proc.isRunning {
+                    _ = kill(pid, SIGKILL)
                 }
             }
         }
-        // Fallback: kill by pid file if exists
-        if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidStr) {
-            _ = kill(pid, SIGTERM)
-            usleep(500_000)
-            _ = kill(pid, SIGKILL)
-        }
         process = nil
+        inputPipe = nil
         stopDurationTimer()
+    }
+    
+    /// Shows an on-demand alert asking for the local admin password when sudo fails,
+    /// stores it via Keychain, and signals whether to retry the connection.
+    @MainActor
+    private func promptForAdminPasswordAndRetry() async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Admin Password Required"
+        alert.informativeText = "VPN requires administrator privileges to configure network settings. Please enter your local Mac login password."
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Cancel")
+        
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let password = input.stringValue
+            guard !password.isEmpty else {
+                // Empty password = cancel
+                self.debugOutput += "Admin password prompt cancelled (empty password)\n"
+                return false
+            }
+            SettingsManager.shared.adminPassword = password
+            self.debugOutput += "Admin password updated. Retrying connection...\n"
+            return true
+        }
+        self.debugOutput += "Admin password prompt dismissed\n"
+        return false
     }
     
     // MARK: - Async Process Helper
@@ -1042,8 +1162,8 @@ class VPNManager: ObservableObject {
                 process.standardInput = inputPipe
             }
             
-            var stdoutData = Data()
-            var stderrData = Data()
+            let stdoutData = SendableDataBuffer()
+            let stderrData = SendableDataBuffer()
             
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
@@ -1066,8 +1186,8 @@ class VPNManager: ObservableObject {
                 stdoutData.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
                 stderrData.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
                 
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                let stdout = String(data: stdoutData.data, encoding: .utf8) ?? ""
+                let stderr = String(data: stderrData.data, encoding: .utf8) ?? ""
                 
                 if proc.terminationStatus == 0 {
                     continuation.resume(returning: (stdout, stderr))
@@ -1081,7 +1201,7 @@ class VPNManager: ObservableObject {
                 
                 if let inputString = input, let inputPipe = process.standardInput as? Pipe {
                     if let data = "\(inputString)\n".data(using: .utf8) {
-                        inputPipe.fileHandleForWriting.write(data)
+                        try? inputPipe.fileHandleForWriting.write(contentsOf: data)
                     }
                     inputPipe.fileHandleForWriting.closeFile()
                 }
@@ -1095,61 +1215,6 @@ class VPNManager: ObservableObject {
     
     private func shellEscape(_ s: String) -> String {
         if s.isEmpty { return "''" }
-        return "'" + s.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-    }
-    
-    private func launchElevatedViaAppleScript(openconnectPath: String?, args: [String], pin: String, password: String) {
-        let oc = openconnectPath ?? "openconnect"
-        let pathEnv = "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        let ocQ = shellEscape(oc)
-        let argsQ = args.map(shellEscape).joined(separator: " ")
-        let pinQ = shellEscape(pin)
-        let passQ = shellEscape(password)
-        let pidQ = shellEscape(pidFilePath)
-        let shell = "\(pathEnv); printf %s\\\\n%s\\\\n \(pinQ) \(passQ) | \(ocQ) --passwd-on-stdin \(argsQ) -b --pid-file \(pidQ)"
-        let appleScript = "do shell script \"\(shell)\" with administrator privileges"
-        
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        proc.arguments = ["-e", appleScript]
-        let out = Pipe()
-        let err = Pipe()
-        proc.standardOutput = out
-        proc.standardError = err
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
-                if !stdout.isEmpty { self.debugOutput += stdout + "\n" }
-                if !stderr.isEmpty { self.debugOutput += "ERROR: \(stderr)\n" }
-                if proc.terminationStatus == 0 {
-                    self.debugOutput += "Elevated openconnect launched. Verifying...\n"
-                    DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 1.0) {
-                        if let pidStr = try? String(contentsOfFile: self.pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
-                           !pidStr.isEmpty {
-                            DispatchQueue.main.async {
-                                self.debugOutput += "Elevated openconnect running with PID \(pidStr)\n"
-                                if case .connecting = self.status {
-                                    self.status = .connected
-                                }
-                            }
-                        } else {
-                            DispatchQueue.main.async {
-                                self.status = .error("Elevated launch verification failed")
-                            }
-                        }
-                    }
-                } else {
-                    self.status = .error("Elevated launch failed")
-                }
-            }
-        } catch {
-            DispatchQueue.main.async {
-                self.debugOutput += "AppleScript elevation error: \(error.localizedDescription)\n"
-                self.status = .error("Elevation error")
-            }
-        }
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\\"'\\\"'") + "'"
     }
 }

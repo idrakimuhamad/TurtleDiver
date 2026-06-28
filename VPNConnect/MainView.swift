@@ -8,6 +8,7 @@ struct MainView: View {
     @State private var debugWidth: CGFloat = 360
     @State private var isConnecting = false
     @State private var isAtBottom = true
+    @State private var copiedFeedback = false
     
     private let statusAnimation = Animation.spring(response: 0.38, dampingFraction: 0.75)
     
@@ -40,40 +41,46 @@ struct MainView: View {
                         .textSelection(.enabled)
                 }
                 
-                // Tunneling Badge
-                if settings.useTunneling {
-                    Text("SPLIT TUNNELING ACTIVE")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.blue)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
+                // Tunneling Badge (reserve height, fade only)
+                Text("SPLIT TUNNELING ACTIVE")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.blue)
+                    .frame(height: settings.useTunneling ? 14 : 0, alignment: .center)
+                    .opacity(settings.useTunneling ? 1 : 0)
+                    .clipped()
                 
-                // Proxy Badge
-                if case .connected = vpnManager.status,
-                   settings.useProxy,
-                   let proxyName = settings.selectedProxy?.name {
-                    Text("PROXY: \(proxyName.uppercased())")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.purple)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
-                
-                Spacer()
-                
-                // Stats (Duration) with slide/fade
-                if case .connected = vpnManager.status {
-                    VStack(spacing: 2) {
-                        Text("DURATION")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
-                        
-                        Text(vpnManager.durationString)
-                            .font(.system(size: 16, weight: .medium, design: .monospaced))
-                            .contentTransition(.numericText())
-                            .animation(.linear, value: vpnManager.durationString)
+                // Proxy Badge (reserve height, fade only)
+                Group {
+                    if let name = settings.selectedProxy?.name, vpnManager.status == .connected, settings.useProxy {
+                        Text("PROXY: \(name.uppercased())")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.purple)
+                    } else {
+                        // Reserve space so layout never shifts
+                        Text(" ")
+                            .font(.system(size: 10, weight: .bold))
+                            .hidden()
                     }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                .frame(height: 14, alignment: .center)
+                .opacity((vpnManager.status == .connected && settings.useProxy && settings.selectedProxy != nil) ? 1 : 0)
+                
+                Spacer(minLength: 0)
+                
+                // Stats (Duration) — reserve space, fade only
+                VStack(spacing: 2) {
+                    Text("DURATION")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    
+                    Text(vpnManager.durationString)
+                        .font(.system(size: 16, weight: .medium, design: .monospaced))
+                        .contentTransition(.numericText())
+                        .animation(.linear, value: vpnManager.durationString)
+                }
+                .frame(height: vpnManager.status == .connected ? 42 : 0)
+                .opacity(vpnManager.status == .connected ? 1 : 0)
+                .clipped()
                 
                 // Action Button with scale feedback
                 Button(action: actionButtonTapped) {
@@ -115,7 +122,6 @@ struct MainView: View {
             }
             .frame(width: 360)
             .padding(.bottom, 40)
-            .animation(statusAnimation, value: vpnManager.status)
             
             // Separator
             if showDebugPanel {
@@ -132,6 +138,7 @@ struct MainView: View {
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                             .padding(8)
+                            .textSelection(.enabled)
                             .contentTransition(.opacity)
                         
                         // Invisible anchor at the bottom — auto-scroll targets this
@@ -142,6 +149,38 @@ struct MainView: View {
                     .frame(minWidth: 300, idealWidth: 440, maxHeight: .infinity)
                     .background(Color(white: 0.1))
                     .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .overlay(alignment: .topTrailing) {
+                        HStack(spacing: 6) {
+                            // Copy button with feedback
+                            Button {
+                                let pasteboard = NSPasteboard.general
+                                pasteboard.clearContents()
+                                pasteboard.setString(vpnManager.debugOutput, forType: .string)
+                                copiedFeedback = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                    copiedFeedback = false
+                                }
+                            } label: {
+                                Label(copiedFeedback ? "Copied!" : "Copy", systemImage: copiedFeedback ? "checkmark" : "doc.on.doc")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.plain)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(copiedFeedback ? Color.green.opacity(0.3) : Color(white: 0.2))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(copiedFeedback ? Color.green : Color(white: 0.35), lineWidth: 1)
+                                    )
+                            )
+                            .foregroundColor(copiedFeedback ? .green : .white)
+                            .animation(.easeInOut(duration: 0.2), value: copiedFeedback)
+                        }
+                        .padding(.trailing, 12)
+                        .padding(.top, 8)
+                    }
                     .overlay(alignment: .bottomTrailing) {
                         // "Scroll to Bottom" button — appears when user scrolls up
                         if !isAtBottom {
@@ -321,7 +360,7 @@ struct MainView: View {
         case .disconnected, .error:
             return "Connect"
         case .connecting:
-            return "Connecting..."
+            return "Cancel"
         case .connected:
             return "Disconnect"
         case .disconnecting:
@@ -331,7 +370,7 @@ struct MainView: View {
     
     private var actionButtonDisabled: Bool {
         switch vpnManager.status {
-        case .connecting, .disconnecting:
+        case .disconnecting:
             return true
         default:
             return false
@@ -350,10 +389,14 @@ struct MainView: View {
     // MARK: - Actions
     
     private func actionButtonTapped() {
-        if case .connected = vpnManager.status {
+        switch vpnManager.status {
+        case .connected:
             vpnManager.disconnect()
-        } else {
-            // Validate settings
+        case .connecting:
+            // Cancel the in-progress connection attempt
+            vpnManager.disconnect()
+        case .disconnected, .error:
+            // Validate settings before connecting
             var missingFields: [String] = []
             
             if settings.vpnHost.isEmpty { missingFields.append("Organization Domain") }
@@ -375,6 +418,8 @@ struct MainView: View {
             }
             
             vpnManager.connect()
+        case .disconnecting:
+            break // Button is disabled, ignore
         }
     }
 }

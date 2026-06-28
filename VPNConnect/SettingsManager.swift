@@ -71,10 +71,8 @@ class SettingsManager: ObservableObject {
     
     private enum Keys {
         static let vpnHost = "vpnHost"
-        static let vpnPassword = "vpnPassword"
         static let vpnID = "vpnID"
-        static let vpnPasscode = "vpnPasscode"
-        static let adminPassword = "adminPassword"
+        // Credentials (adminPassword, vpnPassword, vpnPasscode) are stored in the Keychain, not UserDefaults
         static let vpnSliceURLs = "vpnSliceURLs"
         static let debugMode = "debugMode"
         static let stokenRCPath = "stokenRCPath"
@@ -93,6 +91,9 @@ class SettingsManager: ObservableObject {
             defaults.synchronize()
         }
         
+        KeychainHelper.delete(account: KeychainHelper.adminPasswordAccount)
+        KeychainHelper.delete(account: KeychainHelper.vpnPasswordAccount)
+        KeychainHelper.delete(account: KeychainHelper.vpnPasscodeAccount)
         stokenBookmarkData = nil
         stokenTokenBookmarkData = nil
     }
@@ -102,9 +103,16 @@ class SettingsManager: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.vpnHost) }
     }
     
+    /// Stored in the system Keychain rather than UserDefaults for security.
     var vpnPassword: String {
-        get { defaults.string(forKey: Keys.vpnPassword) ?? "" }
-        set { defaults.set(newValue, forKey: Keys.vpnPassword) }
+        get { KeychainHelper.retrieve(account: KeychainHelper.vpnPasswordAccount) ?? "" }
+        set {
+            if newValue.isEmpty {
+                KeychainHelper.delete(account: KeychainHelper.vpnPasswordAccount)
+            } else {
+                KeychainHelper.store(password: newValue, account: KeychainHelper.vpnPasswordAccount)
+            }
+        }
     }
     
     var vpnID: String {
@@ -112,14 +120,29 @@ class SettingsManager: ObservableObject {
         set { defaults.set(newValue, forKey: Keys.vpnID) }
     }
     
+    /// Stored in the system Keychain rather than UserDefaults for security.
     var vpnPasscode: String {
-        get { defaults.string(forKey: Keys.vpnPasscode) ?? "" }
-        set { defaults.set(newValue, forKey: Keys.vpnPasscode) }
+        get { KeychainHelper.retrieve(account: KeychainHelper.vpnPasscodeAccount) ?? "" }
+        set {
+            if newValue.isEmpty {
+                KeychainHelper.delete(account: KeychainHelper.vpnPasscodeAccount)
+            } else {
+                KeychainHelper.store(password: newValue, account: KeychainHelper.vpnPasscodeAccount)
+            }
+        }
     }
     
+    /// Stored in the system Keychain rather than UserDefaults for security.
+    /// Falls back to empty string if no entry exists (triggers the on-demand alert).
     var adminPassword: String {
-        get { defaults.string(forKey: Keys.adminPassword) ?? "" }
-        set { defaults.set(newValue, forKey: Keys.adminPassword) }
+        get { KeychainHelper.retrieve(account: KeychainHelper.adminPasswordAccount) ?? "" }
+        set {
+            if newValue.isEmpty {
+                KeychainHelper.delete(account: KeychainHelper.adminPasswordAccount)
+            } else {
+                KeychainHelper.store(password: newValue, account: KeychainHelper.adminPasswordAccount)
+            }
+        }
     }
     
     var vpnSliceURLs: [String] {

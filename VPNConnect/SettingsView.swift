@@ -100,6 +100,8 @@ struct ConfigurationView: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var passcode: String = ""
+    @State private var showPassword = false
+    @State private var showPasscode = false
     @State private var stokenFilePath: String = ""
     @State private var useTunneling = false
     @State private var sliceURLs: String = ""
@@ -111,8 +113,32 @@ struct ConfigurationView: View {
             Section {
                 TextField("Organization Domain", text: $host, prompt: Text("vpn.company.com"))
                 TextField("Username", text: $username, prompt: Text("Enter username"))
-                SecureField("Password", text: $password, prompt: Text("Enter password"))
-                SecureField("Passcode (2FA)", text: $passcode, prompt: Text("Enter passcode or token"))
+                HStack {
+                    if showPassword {
+                        TextField("Password", text: $password, prompt: Text("Enter password"))
+                    } else {
+                        SecureField("Password", text: $password, prompt: Text("Enter password"))
+                    }
+                    Button(action: { showPassword.toggle() }) {
+                        Image(systemName: showPassword ? "eye.slash" : "eye")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(showPassword ? "Hide password" : "Show password")
+                }
+                HStack {
+                    if showPasscode {
+                        TextField("Passcode (2FA)", text: $passcode, prompt: Text("Enter passcode or token"))
+                    } else {
+                        SecureField("Passcode (2FA)", text: $passcode, prompt: Text("Enter passcode or token"))
+                    }
+                    Button(action: { showPasscode.toggle() }) {
+                        Image(systemName: showPasscode ? "eye.slash" : "eye")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(showPasscode ? "Hide passcode" : "Show passcode")
+                }
             } header: {
                 Text("Authentication Details")
                     .font(.system(size: 12, weight: .regular))

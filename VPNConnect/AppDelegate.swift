@@ -82,10 +82,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
         
         // 6. Observe content-affecting settings for dynamic window height
-        Publishers.Merge3(
+        // Note: VPN status changes do NOT trigger a resize — the main content
+        // reserves space for conditional elements and fades them with opacity
+        // so the window stays a fixed height during connection transitions.
+        Publishers.Merge(
             SettingsManager.shared.$useTunneling.map { _ in },
-            SettingsManager.shared.$useProxy.map { _ in },
-            VPNManager.shared.$status.map { _ in }
+            SettingsManager.shared.$useProxy.map { _ in }
         )
         .debounce(for: 0.1, scheduler: DispatchQueue.main)
         .sink { [weak self] _ in

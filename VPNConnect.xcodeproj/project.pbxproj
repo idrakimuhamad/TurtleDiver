@@ -16,6 +16,8 @@
 		1A2B3C691234567890ABCDEF /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C681234567890ABCDEF /* MainView.swift */; };
 		1A2B3C711234567890ABCDEF /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C6A1234567890ABCDEF /* SettingsView.swift */; };
 		1A2B3C721234567890ABCDEF /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C6B1234567890ABCDEF /* main.swift */; };
+		1A2B3C741234567890ABCDEF /* ToggleableSecureTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C731234567890ABCDEF /* ToggleableSecureTextField.swift */; };
+		1A2B3C761234567890ABCDEF /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C751234567890ABCDEF /* KeychainHelper.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +33,8 @@
 		1A2B3C6A1234567890ABCDEF /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		1A2B3C6B1234567890ABCDEF /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		1A2B3C701234567890ABCDEF /* VPNManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNManager.swift; sourceTree = "<group>"; };
+		1A2B3C731234567890ABCDEF /* ToggleableSecureTextField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToggleableSecureTextField.swift; sourceTree = "<group>"; };
+		1A2B3C751234567890ABCDEF /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +70,8 @@
 				1A2B3C4C1234567890ABCDEF /* AppDelegate.swift */,
 				1A2B3C6B1234567890ABCDEF /* main.swift */,
 				1A2B3C701234567890ABCDEF /* VPNManager.swift */,
+				1A2B3C731234567890ABCDEF /* ToggleableSecureTextField.swift */,
+				1A2B3C751234567890ABCDEF /* KeychainHelper.swift */,
 				1A2B3C601234567890ABCDEF /* SettingsManager.swift */,
 				1A2B3C621234567890ABCDEF /* SettingsWindowController.swift */,
 				1A2B3C641234567890ABCDEF /* ProxyManager.swift */,
@@ -155,6 +161,8 @@
 				1A2B3C691234567890ABCDEF /* MainView.swift in Sources */,
 				1A2B3C711234567890ABCDEF /* SettingsView.swift in Sources */,
 				1A2B3C721234567890ABCDEF /* main.swift in Sources */,
+				1A2B3C741234567890ABCDEF /* ToggleableSecureTextField.swift in Sources */,
+				1A2B3C761234567890ABCDEF /* KeychainHelper.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
