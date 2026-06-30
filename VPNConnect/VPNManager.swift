@@ -191,7 +191,12 @@ class VPNManager: ObservableObject {
     /// readability handlers from attempting writes after forceTerminate().
     private var pipeClosed = false
     
-    private init() {}
+    private init() {
+        // Check for existing openconnect process on launch
+        DispatchQueue.main.async { [weak self] in
+            self?.checkForExistingConnection()
+        }
+    }
     
     func connect() {
         guard case .disconnected = status else { return }
@@ -369,6 +374,11 @@ class VPNManager: ObservableObject {
         
         // No pkill -9 backup — it races with graceful SIGTERM and prevents
         // openconnect from restoring network routes/DNS, causing internet loss.
+        //
+        // NOTE: We do NOT clean up stale vpn-slice /etc/hosts entries here.
+        // vpn-slice's atexit handlers clean up on graceful SIGTERM. If they fail
+        // (e.g. sudo cache expired), the next connection's shell command pipeline
+        // handles the cleanup before connecting.
         
         // STEP 2: Clean up PID file
         try? FileManager.default.removeItem(atPath: pidFilePath)
@@ -423,7 +433,10 @@ class VPNManager: ObservableObject {
         let pin = settings.vpnPasscode + token
 
         // Build the command: options first, then host
-        var arguments: [String] = ["--force-dpd=10", "--user=\(settings.vpnID)", "--pid-file", pidFilePath]
+        // Auto-reconnect for up to 7 days when the server disconnects
+        // (e.g. idle timeout, network interruption). openconnect caches the
+        // session cookie internally so reconnection doesn't need stdin.
+        var arguments: [String] = ["--force-dpd=10", "--reconnect-timeout=604800", "--user=\(settings.vpnID)", "--pid-file", pidFilePath]
         if withTunneling {
             let slicePath = binaryPath("vpn-slice") ?? "vpn-slice"
             let sliceArg = "\(slicePath) \(settings.vpnSliceURLs.joined(separator: " "))"
@@ -469,7 +482,11 @@ class VPNManager: ObservableObject {
         // This avoids sudo -S consuming credential data meant for openconnect, matching the
         // working script where `printf "$PIN\n$PASSWORD" | sudo openconnect ...` passes all stdin to openconnect.
         // Credential order: PIN (passcode+tokencode) first, VPN password second.
-        let shellCommand = "\(pathEnv); echo \(adminPwdEscaped) | sudo -S -v && printf '%s\\n%s\\n' \(pinEscaped) \(passEscaped) | sudo \(ocEscaped) \(argsEscaped)"
+        // Build the shell command:
+        //   1. Clean up stale vpn-slice entries from /etc/hosts (same sudo session)
+        //   2. Cache sudo credentials so openconnect doesn't prompt later
+        //   3. Pipe PIN+password to openconnect via sudo
+        let shellCommand = "\(pathEnv); echo \(adminPwdEscaped) | sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts 2>/dev/null; echo \(adminPwdEscaped) | sudo -S -v && printf '%s\\n%s\\n' \(pinEscaped) \(passEscaped) | sudo \(ocEscaped) \(argsEscaped)"
         
         // Connection file logger
         let log = VpnConnectionLogger()
@@ -685,7 +702,13 @@ class VPNManager: ObservableObject {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
         
-        // 4. Clean up the stale PID file
+        // 4. Clean up any stale vpn-slice entries from /etc/hosts
+        // (entries from a partially-killed previous session prevent the new connection from working)
+        await MainActor.run {
+            self.cleanupVpnSliceHosts()
+        }
+        
+        // 5. Clean up the stale PID file
         try? FileManager.default.removeItem(atPath: pidFilePath)
         
         // Wait for cleanup to complete
@@ -1216,5 +1239,141 @@ class VPNManager: ObservableObject {
     private func shellEscape(_ s: String) -> String {
         if s.isEmpty { return "''" }
         return "'" + s.replacingOccurrences(of: "'", with: "'\\\"'\\\"'") + "'"
+    }
+    
+    // MARK: - /etc/hosts Cleanup
+    
+    /// Removes any stale vpn-slice entries from /etc/hosts.
+    /// vpn-slice marks its entries with "# vpn-slice-<IFACE> AUTOCREATED".
+    /// When openconnect is terminated, vpn-slice's atexit handlers should
+    /// clean these up, but they often fail because:
+    ///   - sudo's credential cache expires (default 5 min), causing the
+    ///     cleanup to hang waiting for a password that never arrives
+    ///   - SIGKILL (after the 3-second grace window) kills vpn-slice
+    ///     before its atexit handlers can run
+    /// Stale entries cause the next connection to fail because DNS
+    /// resolution still points to old tunnel IPs that no longer exist.
+    private func cleanupVpnSliceHosts() {
+        let adminPwd = SettingsManager.shared.adminPassword
+        guard !adminPwd.isEmpty else {
+            debugOutput += "Warning: Cannot clean /etc/hosts — no admin password stored\n"
+            return
+        }
+        
+        let adminPwdEscaped = shellEscape(adminPwd)
+        let sedCommand = "echo \(adminPwdEscaped) | sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts"
+        
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = ["-c", sedCommand]
+        
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = errPipe
+        
+        do {
+            try task.run()
+            task.waitUntilExit()
+            if task.terminationStatus == 0 {
+                debugOutput += "Cleaned up stale vpn-slice entries from /etc/hosts\n"
+            } else {
+                let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                debugOutput += "Warning: Failed to clean /etc/hosts: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+            }
+        } catch {
+            debugOutput += "Warning: Failed to clean /etc/hosts: \(error.localizedDescription)\n"
+        }
+    }
+    
+    // MARK: - Existing Connection Detection
+    
+    /// Checks if openconnect is already running (from a previous session)
+    /// and updates the app status accordingly. Called on launch.
+    private func checkForExistingConnection() {
+        // Tier 1: Check PID file
+        var existingPid: Int32?
+        if let pidStr = try? String(contentsOfFile: pidFilePath)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidStr), !pidStr.isEmpty, kill(pid, 0) == 0 {
+            existingPid = pid
+        }
+        
+        // Tier 2: Fall back to pgrep
+        if existingPid == nil {
+            let pgrepTask = Process()
+            pgrepTask.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            pgrepTask.arguments = ["-f", "openconnect"]
+            let outPipe = Pipe()
+            pgrepTask.standardOutput = outPipe
+            pgrepTask.standardError = FileHandle.nullDevice
+            do {
+                try pgrepTask.run()
+                pgrepTask.waitUntilExit()
+                if pgrepTask.terminationStatus == 0 {
+                    let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .components(separatedBy: .newlines)
+                        .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+                    // Exclude our own process
+                    existingPid = pids.first { $0 != ProcessInfo.processInfo.processIdentifier && kill($0, 0) == 0 }
+                }
+            } catch {
+                // pgrep not available — no detection possible
+                return
+            }
+        }
+        
+        guard let pid = existingPid else { return }
+        
+        // Get the process start time for the duration display
+        let startTime = processStartTime(pid: pid)
+        
+        // Write the PID to the PID file so disconnect(), forceTerminate(),
+        // and cleanupOnTermination() can find and gracefully kill openconnect.
+        try? "\(pid)\n".write(toFile: pidFilePath, atomically: false, encoding: .utf8)
+        
+        debugOutput += "Found existing VPN connection (PID: \(pid))\n"
+        status = .connected
+        connectionStartTime = startTime ?? Date()
+        startDurationTimer()
+        
+        // Also log to connection history
+        let attemptId = UUID()
+        currentAttemptId = attemptId
+        let attempt = ConnectionAttempt(
+            id: attemptId,
+            timestamp: connectionStartTime ?? Date(),
+            host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
+            status: "Connected (adopted from existing process)",
+            logOutput: debugOutput
+        )
+        ConnectionHistoryManager.shared.addAttempt(attempt)
+    }
+    
+    /// Gets the process start time by parsing `ps -o lstart= -p <pid>`.
+    /// Returns nil if the process is gone or the command fails.
+    private func processStartTime(pid: Int32) -> Date? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/ps")
+        task.arguments = ["-o", "lstart=", "-p", "\(pid)"]
+        let outPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            task.waitUntilExit()
+            guard task.terminationStatus == 0 else { return nil }
+            let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !output.isEmpty else { return nil }
+            // ps -o lstart= format: "Sat Jun 29 10:30:45 2026"
+            let formatter = DateFormatter()
+            formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            return formatter.date(from: output)
+        } catch {
+            return nil
+        }
     }
 }

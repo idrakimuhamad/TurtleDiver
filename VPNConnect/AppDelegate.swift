@@ -81,15 +81,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         
-        // 6. Observe content-affecting settings for dynamic window height
-        // Note: VPN status changes do NOT trigger a resize — the main content
-        // reserves space for conditional elements and fades them with opacity
-        // so the window stays a fixed height during connection transitions.
-        Publishers.Merge(
+        // 6. Observe content-affecting settings and VPN status for dynamic window height.
+        // When the connection state changes (e.g. connected → duration visible) or
+        // optional features are toggled, resize the window to fit all visible content
+        // without clipping.
+        Publishers.Merge4(
             SettingsManager.shared.$useTunneling.map { _ in },
-            SettingsManager.shared.$useProxy.map { _ in }
+            SettingsManager.shared.$useProxy.map { _ in },
+            VPNManager.shared.$status.map { _ in },
+            Just(()) // fire once on launch
         )
-        .debounce(for: 0.1, scheduler: DispatchQueue.main)
+        .debounce(for: 0.2, scheduler: DispatchQueue.main)
         .sink { [weak self] _ in
             self?.resizeWindowForContent()
         }
@@ -251,8 +253,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         newFrame.origin.x = currentFrame.origin.x - (newFrame.size.width - currentFrame.size.width) / 2
         
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.duration = 0.38
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.2, 0.64, 1.0)
             window.animator().setFrame(newFrame, display: true)
         }
     }
@@ -272,8 +274,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         newFrame.origin.y = currentFrame.origin.y + (currentFrame.size.height - newFrame.size.height)
         
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.duration = 0.38
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.2, 0.64, 1.0)
             window.animator().setFrame(newFrame, display: true)
         }
     }

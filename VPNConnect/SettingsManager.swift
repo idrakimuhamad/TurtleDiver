@@ -269,6 +269,7 @@ class SettingsManager: ObservableObject {
     private init() {
         // Load persisted values
         debugMode = defaults.bool(forKey: Keys.debugMode)
+        useTunneling = defaults.bool(forKey: Keys.useTunneling)
         useProxy = defaults.bool(forKey: Keys.useProxy)
         if let str = defaults.string(forKey: Keys.selectedProxyID), let uuid = UUID(uuidString: str) {
             selectedProxyID = uuid

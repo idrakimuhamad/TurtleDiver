@@ -41,33 +41,32 @@ struct MainView: View {
                         .textSelection(.enabled)
                 }
                 
-                // Tunneling Badge (reserve height, fade only)
+                // Tunneling Badge (animated height & opacity)
                 Text("SPLIT TUNNELING ACTIVE")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.blue)
                     .frame(height: settings.useTunneling ? 14 : 0, alignment: .center)
                     .opacity(settings.useTunneling ? 1 : 0)
                     .clipped()
+                    .animation(.spring(response: 0.38, dampingFraction: 0.75), value: settings.useTunneling)
                 
-                // Proxy Badge (reserve height, fade only)
+                // Proxy Badge (animated height & opacity)
+                let showProxyBadge = vpnManager.status == .connected && settings.useProxy && settings.selectedProxy != nil
                 Group {
-                    if let name = settings.selectedProxy?.name, vpnManager.status == .connected, settings.useProxy {
+                    if showProxyBadge, let name = settings.selectedProxy?.name {
                         Text("PROXY: \(name.uppercased())")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.purple)
-                    } else {
-                        // Reserve space so layout never shifts
-                        Text(" ")
-                            .font(.system(size: 10, weight: .bold))
-                            .hidden()
                     }
                 }
-                .frame(height: 14, alignment: .center)
-                .opacity((vpnManager.status == .connected && settings.useProxy && settings.selectedProxy != nil) ? 1 : 0)
+                .frame(height: showProxyBadge ? 14 : 0, alignment: .center)
+                .opacity(showProxyBadge ? 1 : 0)
+                .clipped()
+                .animation(.spring(response: 0.38, dampingFraction: 0.75), value: showProxyBadge)
                 
                 Spacer(minLength: 0)
                 
-                // Stats (Duration) — reserve space, fade only
+                // Stats (Duration) — animated height & opacity
                 VStack(spacing: 2) {
                     Text("DURATION")
                         .font(.system(size: 10, weight: .semibold))
@@ -81,6 +80,7 @@ struct MainView: View {
                 .frame(height: vpnManager.status == .connected ? 42 : 0)
                 .opacity(vpnManager.status == .connected ? 1 : 0)
                 .clipped()
+                .animation(.spring(response: 0.38, dampingFraction: 0.75), value: vpnManager.status == .connected)
                 
                 // Action Button with scale feedback
                 Button(action: actionButtonTapped) {
@@ -96,7 +96,7 @@ struct MainView: View {
                 .scaleEffect(actionButtonDisabled ? 0.97 : 1.0)
                 .animation(statusAnimation, value: actionButtonDisabled)
                 
-                // Proxy Section
+                // Proxy Section (animated expand/collapse)
                 VStack(spacing: 8) {
                     Toggle("Use Proxy", isOn: $settings.useProxy)
                         .font(.system(size: 12))
@@ -114,6 +114,7 @@ struct MainView: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
+                .animation(.spring(response: 0.38, dampingFraction: 0.75), value: settings.useProxy)
                 
                 // Debug Toggle
                 Toggle("Enable Debug Mode", isOn: $settings.debugMode)
@@ -122,6 +123,7 @@ struct MainView: View {
             }
             .frame(width: 360)
             .padding(.bottom, 40)
+            .animation(statusAnimation, value: vpnManager.status)
             
             // Separator
             if showDebugPanel {
@@ -223,7 +225,7 @@ struct MainView: View {
                 }
             }
         }
-        .frame(minWidth: 360, idealWidth: 360, maxWidth: 860, minHeight: 480, idealHeight: 550, maxHeight: 550)
+        .frame(minWidth: 360, idealWidth: 360, maxWidth: 860, minHeight: 480)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             showDebugPanel = settings.debugMode
