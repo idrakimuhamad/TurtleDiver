@@ -1,23 +1,29 @@
 import SwiftUI
-import UniformTypeIdentifiers
-import JavaScriptCore
 
 // MARK: - Navigation Route
 
 enum SettingsRoute: Hashable {
     case configuration
     case appearance
-    case proxy
     case history
-    case proxyEditor(UUID)
     case connectionDetail(UUID)
+    case dashboard
+    case profiles
+    case rules
+    case routing
+    case policies
 }
 
 // MARK: - Root Settings View
 
 struct SettingsView: View {
+    /// When set, the stack navigates there on first appearance (menu bar
+    /// deep links, e.g. open Dashboard directly).
+    var initialRoute: SettingsRoute? = nil
+    @State private var path: [SettingsRoute] = []
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             SettingsMenuView()
                 .navigationDestination(for: SettingsRoute.self) { route in
                     switch route {
@@ -25,22 +31,31 @@ struct SettingsView: View {
                         ConfigurationView()
                     case .appearance:
                         AppearanceView()
-                    case .proxy:
-                        ProxySettingsView()
                     case .history:
                         HistoryView()
-                    case .proxyEditor(let id):
-                        if let config = SettingsManager.shared.proxyConfigurations.first(where: { $0.id == id }) {
-                            ProxyEditorView(config: config)
-                        }
                     case .connectionDetail(let id):
                         if let attempt = ConnectionHistoryManager.shared.getHistory().first(where: { $0.id == id }) {
                             ConnectionDetailView(attempt: attempt)
                         }
+                    case .dashboard:
+                        DashboardView()
+                    case .profiles:
+                        ProfilesView()
+                    case .rules:
+                        RulesEditorView()
+                    case .routing:
+                        RoutingView()
+                    case .policies:
+                        PoliciesView()
                     }
                 }
         }
         .frame(width: 600, height: 600)
+        .onAppear {
+            if let route = initialRoute, path.isEmpty {
+                path.append(route)
+            }
+        }
     }
 }
 
@@ -66,8 +81,28 @@ struct SettingsMenuView: View {
             }
             
             Section {
-                NavigationLink(value: SettingsRoute.proxy) {
-                    Label("Proxy (PAC)", systemImage: "point.connected.arrow.up.forward")
+                NavigationLink(value: SettingsRoute.dashboard) {
+                    Label("Dashboard", systemImage: "gauge.with.needle")
+                        .labelStyle(.titleAndIcon)
+                        .padding(.vertical, 4)
+                }
+                NavigationLink(value: SettingsRoute.policies) {
+                    Label("Policies", systemImage: "arrow.triangle.swap")
+                        .labelStyle(.titleAndIcon)
+                        .padding(.vertical, 4)
+                }
+                NavigationLink(value: SettingsRoute.rules) {
+                    Label("Rules", systemImage: "list.number")
+                        .labelStyle(.titleAndIcon)
+                        .padding(.vertical, 4)
+                }
+                NavigationLink(value: SettingsRoute.routing) {
+                    Label("Routing", systemImage: "arrow.triangle.branch")
+                        .labelStyle(.titleAndIcon)
+                        .padding(.vertical, 4)
+                }
+                NavigationLink(value: SettingsRoute.profiles) {
+                    Label("Profiles", systemImage: "doc.text")
                         .labelStyle(.titleAndIcon)
                         .padding(.vertical, 4)
                 }
@@ -409,319 +444,6 @@ struct HistoryView: View {
             return .red
         }
         return .primary
-    }
-}
-
-// MARK: - Proxy Settings View
-
-struct ProxySettingsView: View {
-    @ObservedObject private var settings = SettingsManager.shared
-    @State private var proxyConfigs: [ProxyConfiguration] = []
-    @State private var showEditor = false
-    @State private var editingConfigID: UUID? = nil
-    @State private var showAddAlert = false
-    @State private var newProxyName: String = ""
-    @State private var showDeleteAlert = false
-    @State private var deletingConfigID: UUID? = nil
-    
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Use Proxy for VPN Connection", isOn: $settings.useProxy)
-                    .padding(.vertical, 4)
-                
-                if settings.useProxy {
-                    Picker("Select Proxy", selection: $settings.selectedProxyID) {
-                        Text("(None)").tag(nil as UUID?)
-                        ForEach(proxyConfigs) { config in
-                            Text(config.name).tag(config.id as UUID?)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            
-            if !proxyConfigs.isEmpty {
-                Section {
-                    ForEach(proxyConfigs) { config in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(config.name)
-                                    .font(.system(size: 13))
-                                if let path = config.pacFilePath {
-                                    Text(URL(fileURLWithPath: path).lastPathComponent)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                } else if config.pacCode != nil {
-                                    Text("Custom PAC Code")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            
-                            Spacer()
-                            
-                            if settings.selectedProxyID == config.id {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(.accentColor)
-                            }
-                        }
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            settings.selectedProxyID = config.id
-                        }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                deletingConfigID = config.id
-                                showDeleteAlert = true
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Proxy List")
-                        .font(.system(size: 12, weight: .regular))
-                        .textCase(.uppercase)
-                }
-            }
-            
-            Section {
-                HStack(spacing: 12) {
-                    Button("+ Add Proxy") {
-                        showAddAlert = true
-                    }
-                    .controlSize(.regular)
-                    
-                    Button("Edit Selected") {
-                        if let id = settings.selectedProxyID {
-                            editingConfigID = id
-                            showEditor = true
-                        }
-                    }
-                    .controlSize(.regular)
-                    .disabled(settings.selectedProxyID == nil)
-                    
-                    if proxyConfigs.isEmpty {
-                        Spacer()
-                        Text("Click + Add Proxy to create one")
-                            .font(.system(size: 11))
-                            .foregroundColor(.tertiary)
-                    } else {
-                        Spacer()
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
-        .formStyle(.grouped)
-        .padding(.bottom, 40)
-        .navigationTitle("Proxy Configuration")
-        
-        .onAppear {
-            loadConfigs()
-        }
-        .alert("New Proxy Configuration", isPresented: $showAddAlert) {
-            TextField("Proxy name", text: $newProxyName)
-            Button("Create") {
-                let name = newProxyName.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !name.isEmpty else { return }
-                let newConfig = ProxyConfiguration(name: name, isActive: false)
-                SettingsManager.shared.addProxyConfiguration(newConfig)
-                loadConfigs()
-                editingConfigID = newConfig.id
-                showEditor = true
-                newProxyName = ""
-            }
-            Button("Cancel", role: .cancel) {
-                newProxyName = ""
-            }
-        }
-        .alert("Delete Proxy?", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                if let id = deletingConfigID {
-                    SettingsManager.shared.deleteProxyConfiguration(id: id)
-                    loadConfigs()
-                }
-                deletingConfigID = nil
-            }
-            Button("Cancel", role: .cancel) {
-                deletingConfigID = nil
-            }
-        } message: {
-            if let id = deletingConfigID,
-               let config = proxyConfigs.first(where: { $0.id == id }) {
-                Text("Are you sure you want to delete \"\(config.name)\"?")
-            }
-        }
-        .sheet(isPresented: $showEditor) {
-            if let id = editingConfigID,
-               let config = proxyConfigs.first(where: { $0.id == id }) {
-                ProxyEditorView(config: config)
-            }
-        }
-    }
-    
-    private func loadConfigs() {
-        proxyConfigs = settings.proxyConfigurations
-    }
-}
-
-// MARK: - Proxy Editor View
-
-struct ProxyEditorView: View {
-    let config: ProxyConfiguration
-    
-    @Environment(\.dismiss) private var dismiss
-    
-    @State private var name: String = ""
-    @State private var useFileSource = true
-    @State private var filePath: String = ""
-    @State private var pacCode: String = ""
-    @State private var showFilePicker = false
-    @State private var showValidationError = false
-    @State private var validationError: String = ""
-    
-    var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section("Name") {
-                    TextField("Enter proxy name", text: $name)
-                }
-                
-                Section("Proxy Source") {
-                    Picker("Source Type", selection: $useFileSource) {
-                        Text("PAC File").tag(true)
-                        Text("Inline PAC Code").tag(false)
-                    }
-                    .pickerStyle(.radioGroup)
-                    
-                    if useFileSource {
-                        HStack {
-                            TextField("Select a .pac file", text: $filePath)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 12))
-                                .disabled(true)
-                            
-                            Button("Browse") {
-                                showFilePicker = true
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    } else {
-                        TextEditor(text: $pacCode)
-                            .font(.system(size: 11, design: .monospaced))
-                            .frame(minHeight: 200)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.separatorColor, lineWidth: 1)
-                            )
-                    }
-                }
-            }
-            .formStyle(.grouped)
-            
-            Divider()
-            
-            HStack {
-                Spacer()
-                
-                Button("Cancel") {
-                    dismiss()
-                }
-                .keyboardShortcut(.escape)
-                
-                Button("Save") {
-                    saveConfig()
-                }
-                .keyboardShortcut(.return)
-                .buttonStyle(.borderedProminent)
-            }
-            .padding()
-        }
-        .frame(width: 500, height: 400)
-        .onAppear {
-            loadConfig()
-        }
-        .fileImporter(isPresented: $showFilePicker, allowedContentTypes: [UTType(filenameExtension: "pac") ?? .plainText]) { result in
-            if case .success(let url) = result {
-                filePath = url.path
-            }
-        }
-        .alert("Invalid PAC Code", isPresented: $showValidationError) {
-            Button("OK") {}
-        } message: {
-            Text(validationError)
-        }
-    }
-    
-    private func loadConfig() {
-        name = config.name
-        if let path = config.pacFilePath {
-            filePath = path
-            useFileSource = true
-        } else if let code = config.pacCode {
-            pacCode = code
-            useFileSource = false
-        } else {
-            useFileSource = true
-        }
-    }
-    
-    private func saveConfig() {
-        var updatedConfig = config
-        updatedConfig.name = name
-        
-        if useFileSource {
-            let path = filePath
-            if !path.isEmpty {
-                let url = URL(fileURLWithPath: path)
-                if let data = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
-                    updatedConfig.pacBookmarkData = data
-                }
-                updatedConfig.pacFilePath = path
-            }
-            updatedConfig.pacCode = nil
-        } else {
-            let code = pacCode.trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            guard !code.isEmpty else {
-                validationError = "Please enter PAC script content or switch to file-based source."
-                showValidationError = true
-                return
-            }
-            
-            if let error = validatePACCode(code) {
-                validationError = "The PAC script contains a syntax error:\n\n\(error)"
-                showValidationError = true
-                return
-            }
-            
-            updatedConfig.pacCode = code
-            updatedConfig.pacFilePath = nil
-            updatedConfig.pacBookmarkData = nil
-        }
-        
-        SettingsManager.shared.updateProxyConfiguration(updatedConfig)
-        dismiss()
-    }
-    
-    private func validatePACCode(_ code: String) -> String? {
-        let context = JSContext()!
-        context.evaluateScript(code)
-        if let exception = context.exception {
-            let message = exception.toString() ?? "Unknown error"
-            let line = exception.objectForKeyedSubscript("line")?.toString() ?? "?"
-            let column = exception.objectForKeyedSubscript("column")?.toString() ?? "?"
-            return "Line \(line), Column \(column): \(message)"
-        }
-        let checkResult = context.evaluateScript("typeof FindProxyForURL === 'function'")
-        if checkResult?.toBool() != true {
-            return "Missing required function: FindProxyForURL(url, host) must be defined."
-        }
-        return nil
     }
 }
 

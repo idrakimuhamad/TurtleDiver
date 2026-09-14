@@ -2,6 +2,27 @@ import Foundation
 import Cocoa
 import Combine
 
+// MARK: - Subprocess support
+
+/// A reference type wrapper around Data that is explicitly Sendable, allowing
+/// it to be captured in `@Sendable` closures for Swift 6 concurrency checking.
+final class SendableDataBuffer: @unchecked Sendable {
+    var data = Data()
+    func append(_ other: Data) { data.append(other) }
+}
+
+/// Failure of an `openconnect`/`stoken` subprocess.
+enum ProcessError: LocalizedError {
+    case exitStatus(Int32, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .exitStatus(let code, let stderr):
+            return "Process exited with code \(code): \(stderr)"
+        }
+    }
+}
+
 // MARK: - Connection Log File
 
 /// Writes a detailed, timestamped trace of the VPN connection I/O to a file.
@@ -242,25 +263,6 @@ class VPNManager: ObservableObject {
             return
         }
         
-        // Setup proxy if enabled
-        if settings.useProxy, let proxyConfig = settings.selectedProxy {
-            DispatchQueue.main.async {
-                self.debugOutput += "Setting up proxy: \(proxyConfig.name)...\n"
-            }
-            Task {
-                do {
-                    try await ProxyManager.shared.setupProxy(for: proxyConfig, adminPassword: settings.adminPassword)
-                    await MainActor.run {
-                        self.debugOutput += "Proxy configured successfully\n"
-                    }
-                } catch {
-                    await MainActor.run {
-                        self.debugOutput += "Warning: Failed to setup proxy: \(error.localizedDescription)\n"
-                    }
-                }
-            }
-        }
-        
         Task {
             await self.executeVPNConnection()
         }
@@ -278,14 +280,6 @@ class VPNManager: ObservableObject {
                 logOutput: debugOutput
             )
             ConnectionHistoryManager.shared.updateAttempt(attempt)
-        }
-        
-        // Teardown proxy if it was enabled
-        let settings = SettingsManager.shared
-        if settings.useProxy {
-            Task {
-                await ProxyManager.shared.teardownProxy(adminPassword: settings.adminPassword)
-            }
         }
         
         // Synchronous cleanup to ensure no processes are left behind
@@ -336,14 +330,7 @@ class VPNManager: ObservableObject {
             debugOutput += "Disconnecting VPN...\n"
         }
         
-        // Teardown proxy if it was enabled
         let settings = SettingsManager.shared
-        if settings.useProxy {
-            Task {
-                await ProxyManager.shared.teardownProxy(adminPassword: settings.adminPassword)
-            }
-            debugOutput += "Proxy teardown complete\n"
-        }
         
         // Log disconnection attempt
         if let id = currentAttemptId {

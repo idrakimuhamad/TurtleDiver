@@ -1,49 +1,6 @@
 import Foundation
 import Combine
 
-// MARK: - Proxy Configuration
-
-struct ProxyConfiguration: Codable, Identifiable {
-    let id: UUID
-    var name: String
-    var pacFilePath: String?
-    var pacBookmarkData: Data?
-    var pacCode: String?
-    var isActive: Bool
-    
-    init(id: UUID = UUID(), name: String, pacFilePath: String? = nil, pacBookmarkData: Data? = nil, pacCode: String? = nil, isActive: Bool = false) {
-        self.id = id
-        self.name = name
-        self.pacFilePath = pacFilePath
-        self.pacBookmarkData = pacBookmarkData
-        self.pacCode = pacCode
-        self.isActive = isActive
-    }
-    
-    var resolvedPACURL: URL? {
-        if let bookmarkData = pacBookmarkData {
-            var isStale = false
-            if let url = try? URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale) {
-                return url
-            }
-        }
-        if let path = pacFilePath {
-            return URL(fileURLWithPath: path)
-        }
-        return nil
-    }
-    
-    var pacContent: String? {
-        if let code = pacCode {
-            return code
-        }
-        if let url = resolvedPACURL {
-            return try? String(contentsOf: url, encoding: .utf8)
-        }
-        return nil
-    }
-}
-
 enum AppTheme: String, CaseIterable {
     case system = "system"
     case light = "light"
@@ -80,9 +37,8 @@ class SettingsManager: ObservableObject {
         static let stokenTokenFilePath = "stokenTokenFilePath"
         static let stokenTokenBookmarkData = "stokenTokenBookmarkData"
         static let useTunneling = "useTunneling"
-        static let proxyConfigurations = "proxyConfigurations"
-        static let useProxy = "useProxy"
-        static let selectedProxyID = "selectedProxyID"
+        static let useProxyEngine = "useProxyEngine"
+        static let dashboardExpanded = "mainWindowDashboardExpanded"
     }
     
     func resetAllSettings() async {
@@ -194,60 +150,17 @@ class SettingsManager: ObservableObject {
         didSet { defaults.set(useTunneling, forKey: Keys.useTunneling) }
     }
     
-    // MARK: - Proxy Configuration Properties
-    
-    var proxyConfigurations: [ProxyConfiguration] {
-        get {
-            guard let data = defaults.data(forKey: Keys.proxyConfigurations),
-                  let configs = try? JSONDecoder().decode([ProxyConfiguration].self, from: data) else {
-                return []
-            }
-            return configs
-        }
-        set {
-            if let data = try? JSONEncoder().encode(newValue) {
-                defaults.set(data, forKey: Keys.proxyConfigurations)
-            }
-        }
+    /// Master switch for the proxy engine (local HTTP/SOCKS5 listeners +
+    /// rule-based routing).
+    @Published var useProxyEngine: Bool = false {
+        didSet { defaults.set(useProxyEngine, forKey: Keys.useProxyEngine) }
     }
-    
-    @Published var useProxy: Bool = false {
-        didSet { defaults.set(useProxy, forKey: Keys.useProxy) }
-    }
-    
-    @Published var selectedProxyID: UUID? = nil {
-        didSet { defaults.set(selectedProxyID?.uuidString, forKey: Keys.selectedProxyID) }
-    }
-    
-    var selectedProxy: ProxyConfiguration? {
-        guard let id = selectedProxyID else { return nil }
-        return proxyConfigurations.first { $0.id == id }
-    }
-    
-    func addProxyConfiguration(_ config: ProxyConfiguration) {
-        var configs = proxyConfigurations
-        configs.append(config)
-        proxyConfigurations = configs
-        objectWillChange.send()
-    }
-    
-    func updateProxyConfiguration(_ config: ProxyConfiguration) {
-        var configs = proxyConfigurations
-        if let index = configs.firstIndex(where: { $0.id == config.id }) {
-            configs[index] = config
-            proxyConfigurations = configs
-        }
-        objectWillChange.send()
-    }
-    
-    func deleteProxyConfiguration(id: UUID) {
-        var configs = proxyConfigurations
-        configs.removeAll { $0.id == id }
-        proxyConfigurations = configs
-        if selectedProxyID == id {
-            selectedProxyID = nil
-        }
-        objectWillChange.send()
+
+    /// Main-window presentation state: `false` = compact controls only,
+    /// `true` = the expanded dashboard. Persisted so the window reopens the way
+    /// the user left it — the window itself sizes from this in `AppDelegate`.
+    @Published var dashboardExpanded: Bool = false {
+        didSet { defaults.set(dashboardExpanded, forKey: Keys.dashboardExpanded) }
     }
     
     func updateStokenTokenURL(_ url: URL) {
@@ -270,10 +183,8 @@ class SettingsManager: ObservableObject {
         // Load persisted values
         debugMode = defaults.bool(forKey: Keys.debugMode)
         useTunneling = defaults.bool(forKey: Keys.useTunneling)
-        useProxy = defaults.bool(forKey: Keys.useProxy)
-        if let str = defaults.string(forKey: Keys.selectedProxyID), let uuid = UUID(uuidString: str) {
-            selectedProxyID = uuid
-        }
+        useProxyEngine = defaults.bool(forKey: Keys.useProxyEngine)
+        dashboardExpanded = defaults.bool(forKey: Keys.dashboardExpanded)
         
         // Load theme
         if let raw = defaults.string(forKey: "appTheme"), let t = AppTheme(rawValue: raw) {

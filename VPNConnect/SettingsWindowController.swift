@@ -4,7 +4,10 @@ import SwiftUI
 // MARK: - Window Controller
 
 class SettingsWindowController: NSWindowController, NSWindowDelegate {
-    
+
+    /// Route to navigate to on the next `showWindow` (menu bar deep links).
+    var pendingRoute: SettingsRoute?
+
     convenience init() {
         let settingsView = SettingsView()
         let hostingController = NSHostingController(rootView: settingsView)
@@ -24,7 +27,8 @@ class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Recreate the hosting controller with a fresh SettingsView
         // to reset the NavigationStack to the root menu — otherwise
         // it remembers the last navigated screen across open/close.
-        let settingsView = SettingsView()
+        let settingsView = SettingsView(initialRoute: pendingRoute)
+        pendingRoute = nil
         let hostingController = NSHostingController(rootView: settingsView)
         window?.contentViewController = hostingController
         window?.title = "Settings"
