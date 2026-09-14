@@ -7,12 +7,38 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		7C0FFEE20000000000000001 /* ProxyEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000011 /* ProxyEngine.swift */; };
+		7C0FFEE20000000000000002 /* HTTPProxyServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000012 /* HTTPProxyServer.swift */; };
+		7C0FFEE20000000000000003 /* SOCKS5Server.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000013 /* SOCKS5Server.swift */; };
+		7C0FFEE20000000000000004 /* RelayConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000014 /* RelayConnection.swift */; };
+		7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000011 /* SystemProxyManager.swift */; };
+		7C0FFEE50000000000000001 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000011 /* DashboardView.swift */; };
+		7C0FFEE50000000000000002 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000012 /* ProfilesView.swift */; };
+		7C0FFEE50000000000000003 /* RulesEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000013 /* RulesEditorView.swift */; };
+		7C0FFEE50000000000000004 /* PolicyViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000014 /* PolicyViews.swift */; };
+		7C0FFEE50000000000000005 /* RoutingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000015 /* RoutingView.swift */; };
+		7C0FFEE50000000000000006 /* MainWindowLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000016 /* MainWindowLayout.swift */; };
+		7C0FFEE50000000000000007 /* RequestsCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000017 /* RequestsCard.swift */; };
+		7C0FFEE20000000000000005 /* DisplayFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000015 /* DisplayFormat.swift */; };
+		7C0FFEE30000000000000002 /* VPNRuleGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */; };
+		1A2B3C7E1234567890ABCDEF /* EngineController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C7F1234567890ABCDEF /* EngineController.swift */; };
+		7C0FFEE10000000000000001 /* IPAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000011 /* IPAddress.swift */; };
+		7C0FFEE10000000000000002 /* DNSResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000012 /* DNSResolver.swift */; };
+		7C0FFEE10000000000000003 /* ProcessPeerResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */; };
+		7C0FFEE10000000000000004 /* RuleMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000014 /* RuleMatcher.swift */; };
+		7C0FFEE10000000000000005 /* PACRuleConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000015 /* PACRuleConverter.swift */; };
+		7C0FFEE00000000000000005 /* TCPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000015 /* TCPClient.swift */; };
+		7C0FFEE00000000000000006 /* LatencyTester.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000016 /* LatencyTester.swift */; };
+		7C0FFEE00000000000000007 /* PolicyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000017 /* PolicyStore.swift */; };
+		7C0FFEE00000000000000001 /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000011 /* Profile.swift */; };
+		7C0FFEE00000000000000002 /* ProfileParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000012 /* ProfileParser.swift */; };
+		7C0FFEE00000000000000003 /* ProfileSerializer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000013 /* ProfileSerializer.swift */; };
+		7C0FFEE00000000000000004 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000014 /* ProfileManager.swift */; };
 		1A2B3C4D1234567890ABCDEF /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4C1234567890ABCDEF /* AppDelegate.swift */; };
 		1A2B3C511234567890ABCDEF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A2B3C501234567890ABCDEF /* Assets.xcassets */; };
 		1A2B3C5F1234567890ABCDEF /* VPNManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C701234567890ABCDEF /* VPNManager.swift */; };
 		1A2B3C611234567890ABCDEF /* SettingsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C601234567890ABCDEF /* SettingsManager.swift */; };
 		1A2B3C631234567890ABCDEF /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C621234567890ABCDEF /* SettingsWindowController.swift */; };
-		1A2B3C651234567890ABCDEF /* ProxyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C641234567890ABCDEF /* ProxyManager.swift */; };
 		1A2B3C691234567890ABCDEF /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C681234567890ABCDEF /* MainView.swift */; };
 		1A2B3C711234567890ABCDEF /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C6A1234567890ABCDEF /* SettingsView.swift */; };
 		1A2B3C721234567890ABCDEF /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C6B1234567890ABCDEF /* main.swift */; };
@@ -21,6 +47,33 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		7C0FFEE20000000000000011 /* ProxyEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyEngine.swift; sourceTree = "<group>"; };
+		7C0FFEE20000000000000012 /* HTTPProxyServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPProxyServer.swift; sourceTree = "<group>"; };
+		7C0FFEE20000000000000013 /* SOCKS5Server.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOCKS5Server.swift; sourceTree = "<group>"; };
+		7C0FFEE20000000000000014 /* RelayConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayConnection.swift; sourceTree = "<group>"; };
+		7C0FFEE20000000000000015 /* DisplayFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayFormat.swift; sourceTree = "<group>"; };
+		7C0FFEE30000000000000011 /* SystemProxyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyManager.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000011 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000012 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000013 /* RulesEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesEditorView.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000014 /* PolicyViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyViews.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000015 /* RoutingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingView.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000016 /* MainWindowLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowLayout.swift; sourceTree = "<group>"; };
+		7C0FFEE50000000000000017 /* RequestsCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestsCard.swift; sourceTree = "<group>"; };
+		7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNRuleGenerator.swift; sourceTree = "<group>"; };
+		1A2B3C7F1234567890ABCDEF /* EngineController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineController.swift; sourceTree = "<group>"; };
+		7C0FFEE10000000000000011 /* IPAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPAddress.swift; sourceTree = "<group>"; };
+		7C0FFEE10000000000000012 /* DNSResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DNSResolver.swift; sourceTree = "<group>"; };
+		7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessPeerResolver.swift; sourceTree = "<group>"; };
+		7C0FFEE10000000000000014 /* RuleMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleMatcher.swift; sourceTree = "<group>"; };
+		7C0FFEE10000000000000015 /* PACRuleConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PACRuleConverter.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000015 /* TCPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TCPClient.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000016 /* LatencyTester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTester.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000017 /* PolicyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyStore.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000011 /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Profile.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000012 /* ProfileParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileParser.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000013 /* ProfileSerializer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSerializer.swift; sourceTree = "<group>"; };
+		7C0FFEE00000000000000014 /* ProfileManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileManager.swift; sourceTree = "<group>"; };
 		1A2B3C491234567890ABCDEF /* VPNConnect.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VPNConnect.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A2B3C4C1234567890ABCDEF /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		1A2B3C501234567890ABCDEF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -28,7 +81,6 @@
 		1A2B3C561234567890ABCDEF /* VPNConnect.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = VPNConnect.entitlements; sourceTree = "<group>"; };
 		1A2B3C601234567890ABCDEF /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
 		1A2B3C621234567890ABCDEF /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
-		1A2B3C641234567890ABCDEF /* ProxyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyManager.swift; sourceTree = "<group>"; };
 		1A2B3C681234567890ABCDEF /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		1A2B3C6A1234567890ABCDEF /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		1A2B3C6B1234567890ABCDEF /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -67,6 +119,12 @@
 		1A2B3C4B1234567890ABCDEF /* VPNConnect */ = {
 			isa = PBXGroup;
 			children = (
+				7C0FFEE00000000000000020 /* Profile */,
+				7C0FFEE10000000000000020 /* Rules */,
+				7C0FFEE20000000000000020 /* Engine */,
+				7C0FFEE40000000000000020 /* System */,
+				7C0FFEE60000000000000020 /* Views */,
+				1A2B3C7F1234567890ABCDEF /* EngineController.swift */,
 				1A2B3C4C1234567890ABCDEF /* AppDelegate.swift */,
 				1A2B3C6B1234567890ABCDEF /* main.swift */,
 				1A2B3C701234567890ABCDEF /* VPNManager.swift */,
@@ -74,7 +132,6 @@
 				1A2B3C751234567890ABCDEF /* KeychainHelper.swift */,
 				1A2B3C601234567890ABCDEF /* SettingsManager.swift */,
 				1A2B3C621234567890ABCDEF /* SettingsWindowController.swift */,
-				1A2B3C641234567890ABCDEF /* ProxyManager.swift */,
 				1A2B3C681234567890ABCDEF /* MainView.swift */,
 				1A2B3C6A1234567890ABCDEF /* SettingsView.swift */,
 				1A2B3C501234567890ABCDEF /* Assets.xcassets */,
@@ -82,6 +139,66 @@
 				1A2B3C561234567890ABCDEF /* VPNConnect.entitlements */,
 			);
 			path = VPNConnect;
+			sourceTree = "<group>";
+		};
+		7C0FFEE00000000000000020 /* Profile */ = {
+			isa = PBXGroup;
+			children = (
+				7C0FFEE00000000000000011 /* Profile.swift */,
+				7C0FFEE00000000000000012 /* ProfileParser.swift */,
+				7C0FFEE00000000000000013 /* ProfileSerializer.swift */,
+				7C0FFEE00000000000000014 /* ProfileManager.swift */,
+				7C0FFEE00000000000000015 /* TCPClient.swift */,
+				7C0FFEE00000000000000016 /* LatencyTester.swift */,
+				7C0FFEE00000000000000017 /* PolicyStore.swift */,
+			);				path = Profile;
+				sourceTree = "<group>";
+			};
+		7C0FFEE10000000000000020 /* Rules */ = {
+			isa = PBXGroup;
+			children = (
+				7C0FFEE10000000000000011 /* IPAddress.swift */,
+				7C0FFEE10000000000000012 /* DNSResolver.swift */,
+				7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */,
+				7C0FFEE10000000000000014 /* RuleMatcher.swift */,
+				7C0FFEE10000000000000015 /* PACRuleConverter.swift */,
+			);
+			path = Rules;
+			sourceTree = "<group>";
+		};
+		7C0FFEE20000000000000020 /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				7C0FFEE20000000000000011 /* ProxyEngine.swift */,
+				7C0FFEE20000000000000012 /* HTTPProxyServer.swift */,
+				7C0FFEE20000000000000013 /* SOCKS5Server.swift */,
+				7C0FFEE20000000000000014 /* RelayConnection.swift */,
+				7C0FFEE20000000000000015 /* DisplayFormat.swift */,
+			);
+			path = Engine;
+			sourceTree = "<group>";
+		};
+		7C0FFEE40000000000000020 /* System */ = {
+			isa = PBXGroup;
+			children = (
+				7C0FFEE30000000000000011 /* SystemProxyManager.swift */,
+				7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */,
+			);
+			path = System;
+			sourceTree = "<group>";
+		};
+		7C0FFEE60000000000000020 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				7C0FFEE50000000000000011 /* DashboardView.swift */,
+				7C0FFEE50000000000000012 /* ProfilesView.swift */,
+				7C0FFEE50000000000000013 /* RulesEditorView.swift */,
+				7C0FFEE50000000000000014 /* PolicyViews.swift */,
+				7C0FFEE50000000000000015 /* RoutingView.swift */,
+				7C0FFEE50000000000000016 /* MainWindowLayout.swift */,
+				7C0FFEE50000000000000017 /* RequestsCard.swift */,
+			);
+			path = Views;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -157,12 +274,38 @@
 				1A2B3C5F1234567890ABCDEF /* VPNManager.swift in Sources */,
 				1A2B3C611234567890ABCDEF /* SettingsManager.swift in Sources */,
 				1A2B3C631234567890ABCDEF /* SettingsWindowController.swift in Sources */,
-				1A2B3C651234567890ABCDEF /* ProxyManager.swift in Sources */,
 				1A2B3C691234567890ABCDEF /* MainView.swift in Sources */,
 				1A2B3C711234567890ABCDEF /* SettingsView.swift in Sources */,
 				1A2B3C721234567890ABCDEF /* main.swift in Sources */,
 				1A2B3C741234567890ABCDEF /* ToggleableSecureTextField.swift in Sources */,
 				1A2B3C761234567890ABCDEF /* KeychainHelper.swift in Sources */,
+				7C0FFEE00000000000000001 /* Profile.swift in Sources */,
+				7C0FFEE00000000000000002 /* ProfileParser.swift in Sources */,
+				7C0FFEE00000000000000003 /* ProfileSerializer.swift in Sources */,
+				7C0FFEE00000000000000004 /* ProfileManager.swift in Sources */,
+				7C0FFEE00000000000000005 /* TCPClient.swift in Sources */,
+				7C0FFEE00000000000000006 /* LatencyTester.swift in Sources */,
+				7C0FFEE00000000000000007 /* PolicyStore.swift in Sources */,
+				7C0FFEE10000000000000001 /* IPAddress.swift in Sources */,
+				7C0FFEE10000000000000002 /* DNSResolver.swift in Sources */,
+				7C0FFEE10000000000000003 /* ProcessPeerResolver.swift in Sources */,
+				7C0FFEE10000000000000004 /* RuleMatcher.swift in Sources */,
+				7C0FFEE10000000000000005 /* PACRuleConverter.swift in Sources */,
+				7C0FFEE20000000000000001 /* ProxyEngine.swift in Sources */,
+				7C0FFEE20000000000000002 /* HTTPProxyServer.swift in Sources */,
+				7C0FFEE20000000000000003 /* SOCKS5Server.swift in Sources */,
+				7C0FFEE20000000000000004 /* RelayConnection.swift in Sources */,
+				7C0FFEE20000000000000005 /* DisplayFormat.swift in Sources */,
+				7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */,
+				7C0FFEE30000000000000002 /* VPNRuleGenerator.swift in Sources */,
+				1A2B3C7E1234567890ABCDEF /* EngineController.swift in Sources */,
+				7C0FFEE50000000000000001 /* DashboardView.swift in Sources */,
+				7C0FFEE50000000000000002 /* ProfilesView.swift in Sources */,
+				7C0FFEE50000000000000003 /* RulesEditorView.swift in Sources */,
+				7C0FFEE50000000000000004 /* PolicyViews.swift in Sources */,
+				7C0FFEE50000000000000005 /* RoutingView.swift in Sources */,
+				7C0FFEE50000000000000006 /* MainWindowLayout.swift in Sources */,
+				7C0FFEE50000000000000007 /* RequestsCard.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -298,7 +441,7 @@
 				CODE_SIGN_ENTITLEMENTS = VPNConnect/VPNConnect.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = KT7QU923S8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -311,7 +454,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.idraki.turtle.vpn;
 				PRODUCT_NAME = TurtleDiver;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -328,7 +471,7 @@
 				CODE_SIGN_ENTITLEMENTS = VPNConnect/VPNConnect.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = KT7QU923S8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -341,7 +484,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.0;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.idraki.turtle.vpn;
 				PRODUCT_NAME = TurtleDiver;
 				SWIFT_EMIT_LOC_STRINGS = YES;
