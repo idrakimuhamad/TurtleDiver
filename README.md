@@ -178,6 +178,23 @@ The application consists of several key components:
   the system proxy
 - All network traffic is handled through standard macOS networking APIs
 
+### Known issue: credentials in the launch pipeline
+
+`VPNManager` starts openconnect through `/bin/bash -c` and feeds the
+credentials through the shell pipeline
+(`printf '<pin>\n<password>' | sudo openconnect …`). The credentials are
+`printf` arguments, so they are part of that process's command line and any
+process running as the same user can read them with `ps` — and they end up in
+crash reports. They are **redacted in the app's own logs**
+(`~/Library/Logs/TurtleDiver/vpn.log`, owner-only, truncated on each connect)
+and never written to `debugOutput`.
+
+Fixing it properly means dropping the shell string: cache the sudo timestamp
+with a `Process` whose stdin carries the admin password, then run
+`sudo openconnect` directly and write the PIN/password into its stdin from
+Swift. That touches the one flow the app cannot afford to break, so it is
+deliberately left as a separate change with a real-VPN test.
+
 ## Troubleshooting
 
 ### Connection Issues

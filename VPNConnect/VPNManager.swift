@@ -28,15 +28,29 @@ enum ProcessError: LocalizedError {
 /// Writes a detailed, timestamped trace of the VPN connection I/O to a file.
 /// Use this to debug credential flow issues that are not visible in the UI debug panel.
 final class VpnConnectionLogger: @unchecked Sendable {
-    static let logPath = "/tmp/turtlediver-vpn.log"
+    /// Connection log. Under `~/Library/Logs` (where Console.app picks it up)
+    /// rather than a predictable `/tmp` name, and created owner-only: it holds
+    /// the (redacted) credential lines and raw openconnect output.
+    static var logPath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/TurtleDiver", isDirectory: true)
+            .appendingPathComponent("vpn.log")
+            .path
+    }
     
+    private let path: String
     private let queue = DispatchQueue(label: "com.turtlediver.vpn-log", qos: .utility)
     private var fileHandle: FileHandle?
     
-    init() {
+    init(path: String = VpnConnectionLogger.logPath) {
+        self.path = path
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         // Truncate the log file on each connection
-        FileManager.default.createFile(atPath: Self.logPath, contents: nil, attributes: nil)
-        if let handle = FileHandle(forWritingAtPath: Self.logPath) {
+        FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
+        // ...and tighten the mode even if an older build left it world-readable.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        if let handle = FileHandle(forWritingAtPath: path) {
             fileHandle = handle
         }
         write("=== VPN Connection Log ===")
@@ -482,7 +496,11 @@ class VPNManager: ObservableObject {
         log.write("Tunneling: \(withTunneling)")
         log.write("openconnect path: \(openconnectPath)")
         log.write("Arguments: \(arguments)")
-        log.write("Command: printf '<admin_pwd>\\n<PIN>\\n<PASS>' | sudo -S -v && sudo openconnect <args> (matches working vpn.sh)")
+        // The real pipeline embeds the three credentials in the shell's argv
+        // (see the note in README → Security Notes), so what is logged is the
+        // shape of the command, not its text. Individual credentials are
+        // recorded below in redacted form by `logSend`.
+        log.write("Pipeline: PATH export; sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts; sudo -S -v; printf '<pin>\\n<vpn-password>' | sudo <openconnectPath> <arguments>")
         log.logSend("Admin password (for sudo)", value: settings.adminPassword)
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)

@@ -96,6 +96,19 @@ final class ProfileSerializerTests: XCTestCase {
         XCTAssertTrue(text.contains("FINAL,DIRECT"), "Empty profile should default to FINAL,DIRECT")
     }
 
+    /// The generated header used to promise "Hand-edit freely; the app reloads
+    /// on change", which is only half true: the app reloads the file, but the
+    /// next in-app change rewrites it from the model, dropping comments and
+    /// unknown options. The header has to say so.
+    func testHeaderDoesNotPromiseThatHandEditsSurvive() {
+        let text = ProfileSerializer.serialize(Profile(name: "X"))
+        let header = text.split(separator: "\n").prefix { $0.hasPrefix("#") }.joined(separator: "\n")
+
+        XCTAssertFalse(header.contains("Hand-edit freely"), header)
+        XCTAssertTrue(header.lowercased().contains("rewritten"), header)
+        XCTAssertTrue(header.lowercased().contains("not preserved"), header)
+    }
+
     func testQuotingRoundTripForSpecialValues() throws {
         var profile = Profile(name: "Q")
         profile.rules = [
