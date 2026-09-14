@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OSLog
 
 // The app target compiles these files into one module; the SPM target
 // `TurtleDiverAppGlue` compiles them standalone, so the engine modules are
@@ -93,6 +94,8 @@ final class EngineController: ObservableObject {
     let systemProxy: SystemProxyManager
     private let profileManager: ProfileManager
     private let settings: SettingsManager
+    /// Injected so tests never touch the login keychain.
+    private let secrets: SecretStore
     private var cancellables = Set<AnyCancellable>()
 
     /// The DIRECT rules the VPN tie-in currently has overlaid onto the
@@ -113,10 +116,12 @@ final class EngineController: ObservableObject {
     init(
         profileManager: ProfileManager = .shared,
         settings: SettingsManager = .shared,
-        systemProxy: SystemProxyManager? = nil
+        systemProxy: SystemProxyManager? = nil,
+        secrets: SecretStore = KeychainBackedSecrets()
     ) {
         self.profileManager = profileManager
         self.settings = settings
+        self.secrets = secrets
         self.systemProxy = systemProxy ?? SystemProxyManager(
             runner: SystemProxyManager.defaultRunner(adminPasswordProvider: {
                 SettingsManager.shared.adminPassword
@@ -143,8 +148,11 @@ final class EngineController: ObservableObject {
         observeVPNStatus()
 
         // The sweep itself shells out to `networksetup`, so it is kept off the
-        // main thread. It is one-shot (a no-op on every later launch).
-        self.legacyPACCleanup = Task { [systemProxy = self.systemProxy] in
+        // main thread. It is one-shot (a no-op on every later launch). The
+        // credential/PAC-key purge follows in the same task: it reads the
+        // Keychain, which can block.
+        self.legacyPACCleanup = Task { [systemProxy = self.systemProxy, secrets] in
+            await Self.runLegacyDefaultsPurge(settings, secrets: secrets)
             await Self.runLegacyPACCleanup(systemProxy)
         }
 
@@ -339,6 +347,23 @@ final class EngineController: ObservableObject {
     /// synchronize on it (production never needs to block on it).
     func awaitLegacyPACCleanup() async {
         await legacyPACCleanup?.value
+    }
+
+    private nonisolated static func runLegacyDefaultsPurge(
+        _ settings: SettingsManager,
+        secrets: SecretStore
+    ) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let purged = settings.purgeLegacyDefaults(secrets: secrets)
+                if !purged.isEmpty {
+                    Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.idraki.turtle.vpn",
+                           category: "settings")
+                        .info("purged \(purged.count, privacy: .public) legacy defaults key(s)")
+                }
+                continuation.resume()
+            }
+        }
     }
 
     private nonisolated static func applyProxyWork(

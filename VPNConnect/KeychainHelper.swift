@@ -2,6 +2,23 @@ import Foundation
 import Security
 import OSLog
 
+// MARK: - Secret store
+
+/// The Keychain surface the app needs, as a protocol so tests can inject an
+/// in-memory implementation instead of touching the login keychain.
+protocol SecretStore: Sendable {
+    func retrieve(account: String) -> String?
+    func store(password: String, account: String)
+    func delete(account: String)
+}
+
+/// The production store: the macOS Keychain via `KeychainHelper`.
+struct KeychainBackedSecrets: SecretStore, Sendable {
+    func retrieve(account: String) -> String? { KeychainHelper.retrieve(account: account) }
+    func store(password: String, account: String) { KeychainHelper.store(password: password, account: account) }
+    func delete(account: String) { KeychainHelper.delete(account: account) }
+}
+
 // MARK: - Keychain Helper
 
 /// Stores and retrieves sensitive credentials using the macOS Keychain.
@@ -18,6 +35,10 @@ enum KeychainHelper {
     static let adminPasswordAccount = "adminPassword"
     static let vpnPasswordAccount = "vpnPassword"
     static let vpnPasscodeAccount = "vpnPasscode"
+
+    /// The accounts whose names doubled as `UserDefaults` keys before the move
+    /// to the Keychain, in the order a migration should attempt them.
+    static let credentialAccounts = [adminPasswordAccount, vpnPasswordAccount, vpnPasscodeAccount]
 
     /// Logger for Keychain operations (visible in Console.app).
     private static let log = Logger(subsystem: serviceName, category: "keychain")

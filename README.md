@@ -168,8 +168,14 @@ The application consists of several key components:
 
 ## Security Notes
 
-- VPN credentials are stored in macOS Keychain via UserDefaults
-- The application requires sudo privileges for VPN connection
+- Credentials (VPN password, passcode and the admin/sudo password) live in the
+  macOS **Keychain**, never in `UserDefaults`. A launch-time hygiene pass
+  migrates anything an older build left in the plist into the Keychain (the
+  Keychain value always wins), then deletes the dead credential and PAC-era
+  keys — so a plaintext password no longer sits in
+  `~/Library/Preferences/com.idraki.turtle.vpn.plist`.
+- The application requires sudo privileges for VPN connection and for setting
+  the system proxy
 - All network traffic is handled through standard macOS networking APIs
 
 ## Troubleshooting
@@ -225,7 +231,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 296 tests (core engine + app glue)
+swift test          # 306 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

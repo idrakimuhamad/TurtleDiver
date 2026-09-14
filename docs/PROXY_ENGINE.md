@@ -135,6 +135,13 @@ into a `TurtleDiverAppGlue` target and asserts that the Dashboard/menu engine
 toggle persists `useProxyEngine`, that a fresh controller auto-starts from it,
 and that starting the engine publishes the policy list immediately (the
 Policy Health card used to come up empty until the first reload).
+`Tests/TurtleDiverAppTests/SecretHygieneTests.swift` (10 tests) covers the
+launch-time cleanup of `UserDefaults`: a credential left in the plist by an
+older build is moved into the Keychain *before* its key is dropped, an existing
+Keychain entry always wins over the stale copy, blank values are not stored, no
+credential is ever written back to disk, live keys (`activeProfileName`,
+`appTheme`, `systemProxyEnabled`, `VPNConnectConnectionHistory`, …) are left
+alone, and the pass is idempotent (and self-heals if a dead key reappears).
 `Tests/TurtleDiverAppTests/SystemProxyIntentTests.swift` (10 tests) covers the
 system-proxy toggle: enabling it writes `system-proxy = true` into the active
 profile, and — the regression it was written for — a later profile rewrite

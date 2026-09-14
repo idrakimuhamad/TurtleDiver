@@ -15,11 +15,14 @@ enum AppTheme: String, CaseIterable {
     }
 }
 
-class SettingsManager: ObservableObject {
+/// `@unchecked Sendable`: every stored property is either an immutable
+/// reference or a thread-safe store (`UserDefaults`, the Keychain), and the
+/// launch-time hygiene pass below is the only thing that touches it off the
+/// main thread — it never mutates `@Published` state.
+class SettingsManager: ObservableObject, @unchecked Sendable {
     static let shared = SettingsManager()
     
-    private let defaults = UserDefaults.standard
-    
+    private let defaults: UserDefaults    
     @Published var theme: AppTheme {
         didSet {
             defaults.set(theme.rawValue, forKey: "appTheme")
@@ -39,6 +42,45 @@ class SettingsManager: ObservableObject {
         static let useTunneling = "useTunneling"
         static let useProxyEngine = "useProxyEngine"
         static let dashboardExpanded = "mainWindowDashboardExpanded"
+    }
+
+    /// `UserDefaults` keys that older builds wrote and nothing reads any more:
+    /// credentials now live in the Keychain, and the PAC-era proxy selection is
+    /// gone. Leaving them in the plist means a plaintext password sitting next
+    /// to a pile of keys that no longer mean anything.
+    static let legacyDefaultsKeys = [
+        "adminPassword", "vpnPassword", "vpnPasscode",
+        "useProxy", "proxyConfigurations", "selectedProxyID", "migratedFromPAC",
+    ]
+
+    /// Launch-time hygiene pass: move any credential still stored in
+    /// `UserDefaults` into the Keychain (only when the Keychain has nothing —
+    /// the Keychain always wins), then delete every dead key.
+    ///
+    /// It never writes a credential back to `UserDefaults`, and it is
+    /// deliberately *not* gated behind a one-shot flag: the checks are a
+    /// handful of dictionary lookups, only a credential key that is actually
+    /// present costs a Keychain read, and running it on every launch means it
+    /// self-heals if something writes one of these keys again. Returning the
+    /// keys it removed keeps it testable; production ignores the result.
+    @discardableResult
+    func purgeLegacyDefaults(secrets: SecretStore = KeychainBackedSecrets()) -> [String] {
+        // Read-through migration first: if a credential is still only in the
+        // plist, save it to the Keychain before removing it.
+        for account in KeychainHelper.credentialAccounts {
+            guard let legacy = defaults.string(forKey: account),
+                  !legacy.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            if secrets.retrieve(account: account)?.isEmpty ?? true {
+                secrets.store(password: legacy, account: account)
+            }
+        }
+
+        var purged: [String] = []
+        for key in Self.legacyDefaultsKeys where defaults.object(forKey: key) != nil {
+            defaults.removeObject(forKey: key)
+            purged.append(key)
+        }
+        return purged
     }
     
     func resetAllSettings() async {
@@ -179,7 +221,10 @@ class SettingsManager: ObservableObject {
         return nil
     }
     
-    private init() {
+    /// Internal (not private) so tests can drive the manager against a
+    /// throwaway `UserDefaults` suite instead of the user's real plist.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         // Load persisted values
         debugMode = defaults.bool(forKey: Keys.debugMode)
         useTunneling = defaults.bool(forKey: Keys.useTunneling)
