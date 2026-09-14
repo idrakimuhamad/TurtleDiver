@@ -28,6 +28,11 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   between launches, and the window expands itself when the tunnel comes up or
   when you switch the proxy engine on. The VPN/engine/system-proxy switches sit
   in the main window, so the everyday loop never needs Settings
+- **Settings** (1.4.0): a native sidebar-and-detail window — **Connection**
+  (VPN, Profiles), **Proxy Engine** (Dashboard, Policies, Rules, Routing),
+  **Monitoring** (History) and **Application** (Appearance, Advanced) — with a
+  searchable sidebar, a remembered pane, and an **Advanced** pane for engine
+  ports, log files, storage locations and resetting the app's settings
 
 ## Prerequisites
 
@@ -74,8 +79,9 @@ Click **Disconnect** to terminate the VPN connection.
 
 ### Debug Mode
 
-**Debug Output** in the main window (or Settings → General) reveals the live log
-in the expanded dashboard.
+**Debug Output** in the main window reveals the live log in the expanded
+dashboard. The Dashboard pane in Settings carries the same engine and
+system-proxy switches.
 
 ### Main window: compact ↔ expanded (1.4.0)
 
@@ -105,6 +111,39 @@ Two details worth knowing:
   window; it keeps its top edge and horizontal centre and is clamped to the
   visible screen (`MainWindowLayout`). Manual resizes are never overridden by
   VPN status changes.
+
+### Settings (1.4.0)
+
+**TurtleDiver > Settings** (⌘,) is a sidebar-and-detail window, like the rest of
+macOS: pick a pane on the left, the pane itself never pushes another screen, and
+the window reopens on the pane you were last in (`settingsPane`). The sidebar is
+searchable — typing `log`, `stoken` or `listener` filters it by title,
+subtitle and keywords.
+
+| Group | Panes |
+| --- | --- |
+| Connection | **VPN** (credentials, software token, split tunneling), **Profiles** |
+| Proxy Engine | **Dashboard** (engine + system-proxy switches, policy health, requests), **Policies**, **Rules**, **Routing** |
+| Monitoring | **History** (past connection attempts, with each attempt's log) |
+| Application | **Appearance**, **Advanced** |
+
+Two panes are worth calling out:
+
+- **VPN** is the only pane with an explicit **Save / Revert** (⌘S) bar, pinned to
+the bottom of the pane. Everything else applies immediately, but credentials go
+to the Keychain and writing a half-typed password on every keystroke would both
+be noisy and lose the previous value. The pane also has an **Administrator
+password (sudo)** field — that one was previously only settable by hand.
+- **Advanced** reports the proxy engine's status and listening addresses, the
+log files (`~/Library/Logs/TurtleDiver/vpn.log` — openconnect output per
+connection, with credentials redacted to their length; `…/launch.log` — app
+startup), the profiles folder, whether each credential is in the Keychain
+(presence only, never the value), and the destructive **Reset All Settings**
+(profiles on disk are left alone).
+
+Settings uses the same visual language as the dashboard: 10 pt cards,
+hairline-separated rows, one shared right edge for controls, monospaced paths
+and ports, and a status pill per row.
 
 ### Proxy Engine (1.3.0)
 
@@ -235,12 +274,14 @@ VPNConnect/
 ├── EngineController.swift         # Engine + system-proxy lifecycle
 ├── VPNManager.swift               # VPN connection logic
 ├── SettingsManager.swift          # Settings management
-├── SettingsView.swift             # Settings window (incl. Routing)
+├── SettingsView.swift             # Settings window shell (sidebar + detail)
+├── SettingsWindowController.swift  # Settings window (size, deep links)
 ├── Engine/                        # HTTP + SOCKS5 listeners, proxy engine
 ├── Profile/                       # Profile model, parser, policy store
 ├── Rules/                         # Rule matching, PAC conversion, DNS/IP utils
 ├── System/                        # System proxy, vpn-slice rule generation
-├── Views/                         # Dashboard, Routing, Profiles, Rules editors
+├── Views/                         # Dashboard, Routing, Profiles, Rules editors,
+│                                  #   Settings panes + design system
 ├── Assets.xcassets                # App icons and assets
 └── Info.plist                     # App configuration
 ```
@@ -248,7 +289,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 306 tests (core engine + app glue)
+swift test          # 350 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

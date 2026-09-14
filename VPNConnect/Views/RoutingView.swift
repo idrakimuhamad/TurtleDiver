@@ -39,7 +39,6 @@ struct RoutingView: View {
             }
             .searchable(text: $searchText, placement: .toolbar, prompt: "Filter assignments")
         }
-        .navigationTitle("Routing")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -90,6 +89,7 @@ struct RoutingView: View {
                     addAssignment()
                 } label: {
                     Image(systemName: "plus.circle.fill")
+                        .foregroundStyle(canAdd ? Color.accentColor : Color.secondary)
                 }
                 .buttonStyle(.borderless)
                 .disabled(!canAdd)

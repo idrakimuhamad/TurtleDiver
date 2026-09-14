@@ -54,7 +54,9 @@ let package = Package(
                 "KeychainHelper.swift",
                 "SettingsManager.swift",
                 "VPNManager.swift",
-                "Views/MainWindowLayout.swift"
+                "Views/MainWindowLayout.swift",
+                "Views/SettingsCatalog.swift",
+                "Views/SettingsDraft.swift"
             ]
         ),
         .testTarget(

@@ -5,7 +5,13 @@ import SwiftUI
 // MARK: - Startup Logger
 
 enum StartupLog {
-    private static let logPath = "/tmp/TurtleDiver-launch.log"
+    /// Next to the VPN connection log, for the same two reasons: `/tmp` names
+    /// are predictable (another user can pre-create the file), and
+    /// `~/Library/Logs` is where Console.app looks.
+    static let logPath: String = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/TurtleDiver", isDirectory: true)
+        .appendingPathComponent("launch.log")
+        .path
     private static let queue = DispatchQueue(label: "com.turtlediver.startup-log")
     
     static func write(_ message: String) {
@@ -20,13 +26,19 @@ enum StartupLog {
                 }
                 handle.closeFile()
             } else {
-                // First write — create the file
+                // First write — create the file, owner-only.
                 try? line.write(toFile: logPath, atomically: false, encoding: .utf8)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                       ofItemAtPath: logPath)
             }
         }
     }
     
     static func reset() {
+        try? FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: logPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
         try? FileManager.default.removeItem(atPath: logPath)
         write("=== Launch Log ===")
         write("App version: \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")

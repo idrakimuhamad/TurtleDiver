@@ -23,7 +23,7 @@ struct ProfilesView: View {
                     VStack(spacing: 8) {
                         Image(systemName: "doc.text")
                             .font(.system(size: 28))
-                            .foregroundColor(.tertiary)
+                            .foregroundStyle(.tertiary)
                         Text("No profiles")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
@@ -56,7 +56,6 @@ struct ProfilesView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Profiles")
         .onAppear { refresh() }
         .alert("New Profile", isPresented: $showNewAlert) {
             TextField("Profile name", text: $newName)
@@ -108,7 +107,11 @@ struct ProfilesView: View {
                     }
                 }
                 let profile = manager.loadProfile(named: name)
-                Text(profile.map { "\($0.proxies.count) proxies · \($0.groups.count) groups · \($0.rules.count) rules" } ?? "unreadable")
+                Text(verbatim: profile.map {
+                    SettingsDisplay.profileSummary(proxies: $0.proxies.count,
+                                                   groups: $0.groups.count,
+                                                   rules: $0.rules.count)
+                } ?? "unreadable")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }

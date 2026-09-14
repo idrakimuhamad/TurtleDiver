@@ -45,7 +45,6 @@ struct RulesEditorView: View {
             }
             .searchable(text: $searchText, placement: .toolbar, prompt: "Filter rules")
         }
-        .navigationTitle("Rules")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {

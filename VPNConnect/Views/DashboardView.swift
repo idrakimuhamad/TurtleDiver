@@ -16,7 +16,6 @@ struct DashboardView: View {
             requestSection
         }
         .formStyle(.grouped)
-        .navigationTitle("Dashboard")
         .onAppear { controller.refreshRequests() }
     }
 
@@ -50,11 +49,11 @@ struct DashboardView: View {
 
             if controller.engineRunning {
                 LabeledContent("HTTP") {
-                    Text(controller.httpPort.map { "127.0.0.1:\($0)" } ?? "off")
+                    Text(verbatim: controller.httpPort.map { "127.0.0.1:\($0)" } ?? "off")
                         .font(.system(size: 12, design: .monospaced))
                 }
                 LabeledContent("SOCKS5") {
-                    Text(controller.socks5Port.map { "127.0.0.1:\($0)" } ?? "off")
+                    Text(verbatim: controller.socks5Port.map { "127.0.0.1:\($0)" } ?? "off")
                         .font(.system(size: 12, design: .monospaced))
                 }
             }

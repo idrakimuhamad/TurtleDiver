@@ -146,7 +146,7 @@ alone, and the pass is idempotent (and self-heals if a dead key reappears).
 system-proxy toggle: enabling it writes `system-proxy = true` into the active
 profile, and — the regression it was written for — a later profile rewrite
 (connecting the VPN injects the vpn-slice DIRECT rules and saves) no longer
-turns the system proxy back off (296 tests total). It also pins the behaviour
+turns the system proxy back off. It also pins the behaviour
 of stopping the app: `stopEngine()` / `shutdown()` still point macOS away from
 the listener they are about to close, but they leave the stored intent alone,
 so the next launch re-arms the proxy from the profile instead of asking the
@@ -157,6 +157,20 @@ dropped. The controller is driven against a throwaway profile directory,
 `UserDefaults` suite and recording `networksetup` runner (which also records
 `Thread.isMainThread`), so the suite never touches the user's profiles or
 system proxy.
+
+`Tests/TurtleDiverAppTests/SettingsCatalogTests.swift` (13 tests) and
+`Tests/TurtleDiverAppTests/VPNConfigurationDraftTests.swift` (25 tests) cover
+the 1.4.0 Settings window without a window: the pane catalogue
+(`SettingsCatalog` — one item per route, stable group order, terse
+titles/keywords, every SF Symbol resolvable, case- and diacritic-insensitive
+search, unknown stored values falling back to the default pane), the persisted
+pane choice, the VPN pane's dirty detection (`VPNConfigurationDraft` — a
+credential's whitespace is significant, a cosmetic vpn-slice list difference is
+not), and the pure display helpers that keep machine values out of
+`LocalizedStringKey` (`SettingsDisplay.listener(host:port:)` never renders
+`Optional(…)`, `abbreviateHome(_:home:)` is boundary-safe, `profileSummary`
+pluralises, `connectionStatus(_:)` shortens stored statuses so a pill cannot
+wrap mid-word). Total: **350 tests**.
 
 ### System-proxy ownership vs. a legacy PAC
 

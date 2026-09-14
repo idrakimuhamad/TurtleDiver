@@ -220,7 +220,7 @@ private struct WideRequestRow: View {
                 .frame(width: 60, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(entry.host):\(entry.port)")
+                Text(verbatim: "\(entry.host):\(entry.port)")
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -291,7 +291,7 @@ private struct StackedRequestRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 1) {
-                Text("\(entry.host):\(entry.port)")
+                Text(verbatim: "\(entry.host):\(entry.port)")
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)

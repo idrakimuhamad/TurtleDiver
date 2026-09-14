@@ -42,6 +42,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let useTunneling = "useTunneling"
         static let useProxyEngine = "useProxyEngine"
         static let dashboardExpanded = "mainWindowDashboardExpanded"
+        static let settingsPane = "settingsPane"
     }
 
     /// `UserDefaults` keys that older builds wrote and nothing reads any more:
@@ -204,6 +205,13 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
     @Published var dashboardExpanded: Bool = false {
         didSet { defaults.set(dashboardExpanded, forKey: Keys.dashboardExpanded) }
     }
+
+    /// Which Settings pane was open last (raw `SettingsRoute`). Settings is a
+    /// place you jump between, so reopening it on the last pane beats always
+    /// landing back on the first one; unknown values fall back to the default.
+    @Published var settingsPane: String = "" {
+        didSet { defaults.set(settingsPane, forKey: Keys.settingsPane) }
+    }
     
     func updateStokenTokenURL(_ url: URL) {
         stokenTokenFilePath = url.path
@@ -230,6 +238,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         useTunneling = defaults.bool(forKey: Keys.useTunneling)
         useProxyEngine = defaults.bool(forKey: Keys.useProxyEngine)
         dashboardExpanded = defaults.bool(forKey: Keys.dashboardExpanded)
+        settingsPane = defaults.string(forKey: Keys.settingsPane) ?? SettingsCatalog.defaultRoute.rawValue
         
         // Load theme
         if let raw = defaults.string(forKey: "appTheme"), let t = AppTheme(rawValue: raw) {

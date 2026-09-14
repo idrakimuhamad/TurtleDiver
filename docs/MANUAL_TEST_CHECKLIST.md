@@ -6,7 +6,7 @@ release.
 
 ## 0. Setup
 
-- [ ] `swift test` passes (296 tests green).
+- [ ] `swift test` passes (350 tests green).
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
 
@@ -47,6 +47,43 @@ release.
 - [ ] Live Log (debug output on, tunnel connected): `[SEND]` lines are purple,
       `[HANDLER]` blue, stderr lines grey; a line containing *error* is red and
       *warning* amber — colour follows the line, not the stream.
+
+## 0c. Settings window (1.4.0)
+
+- [ ] ⌘, opens Settings as a **sidebar-and-detail** window (860×620 content,
+      min 800×560): searchable sidebar, pane title + description on the left of
+      the detail, no push-navigation.
+- [ ] The sidebar groups are Connection (VPN, Profiles) / Proxy Engine
+      (Dashboard, Policies, Rules, Routing) / Monitoring (History) /
+      Application (Appearance, Advanced); the footer shows the engine dot,
+      `v1.4.0` and the active profile.
+- [ ] Open a pane, close the window, reopen → it lands on the *same* pane
+      (`plutil -p ~/Library/Preferences/com.idraki.turtle.vpn.plist | grep
+      settingsPane`).
+- [ ] Type `log` / `stoken` / `listener` in the sidebar search → the list
+      filters by title, subtitle and keywords; clearing restores every pane.
+- [ ] Every pane opens at the top: the title is fully visible under the
+      toolbar, never clipped by the scroll-edge blur (Advanced was the
+      reproducer).
+- [ ] **VPN** pane: credentials are pre-filled from the active profile, the
+      reveal buttons work, `Administrator password (sudo)` is present, and the
+      **Save/Revert** bar is pinned to the bottom of the pane (scroll the pane:
+      the bar stays). Editing a field → *Unsaved changes* + enabled buttons;
+      ⌘S saves; Revert restores the loaded values and re-disables the buttons.
+- [ ] **Advanced** pane: engine status pill and both listeners, the log paths
+      (`~/Library/Logs/TurtleDiver/{vpn,launch}.log`) and profiles folder with
+      working Reveal/Open buttons, Keychain presence pills (IN KEYCHAIN / NOT
+      SET — never a value), and **Reset…** clears settings + credentials after a
+      confirmation while leaving the `.conf` files on disk.
+- [ ] **History** pane: status pills stay on one line (e.g. `APP EXITED`,
+      `DISCONNECTED`) and durations are right-aligned; expanding an attempt
+      shows its log.
+- [ ] **Profiles** pane: the summary pluralises correctly
+      (`2 proxies · 1 group · 35 rules`).
+- [ ] Machine values are never grouped or wrapped in `Optional(…)`: the HTTP
+      listener reads `127.0.0.1:6152`, request hosts read `host:443`.
+- [ ] Deep links from the menu bar (Open Dashboard…) still land on the right
+      pane.
 
 ## 1. Profile lifecycle
 

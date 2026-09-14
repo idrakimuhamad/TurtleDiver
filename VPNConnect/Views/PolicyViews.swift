@@ -19,7 +19,6 @@ struct PoliciesView: View {
             proxiesSection
             groupsSection
         }
-        .navigationTitle("Policies")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
