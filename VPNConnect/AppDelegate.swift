@@ -74,29 +74,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
         
         // 5. Observe debug mode for window resize
-        SettingsManager.shared.$debugMode
+        StartupLog.write("Step 5: Initializing proxy engine controller...")
+        _ = EngineController.shared // auto-starts the engine when enabled
+        StartupLog.write("Step 5 done.")
+        
+        // 5b. Keep the main window sized to its presentation state: compact
+        // controls by default, the full dashboard when expanded. The view
+        // switches instantly, the frame animates here.
+        SettingsManager.shared.$dashboardExpanded
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] debugMode in
-                self?.resizeWindowForDebugMode(debugMode)
+            .sink { [weak self] _ in
+                self?.resizeWindowForContent()
             }
             .store(in: &cancellables)
         
-        // 6. Observe content-affecting settings and VPN status for dynamic window height.
-        // When the connection state changes (e.g. connected → duration visible) or
-        // optional features are toggled, resize the window to fit all visible content
-        // without clipping.
-        Publishers.Merge4(
-            SettingsManager.shared.$useTunneling.map { _ in },
-            SettingsManager.shared.$useProxy.map { _ in },
-            VPNManager.shared.$status.map { _ in },
-            Just(()) // fire once on launch
-        )
-        .debounce(for: 0.2, scheduler: DispatchQueue.main)
-        .sink { [weak self] _ in
-            self?.resizeWindowForContent()
-        }
-        .store(in: &cancellables)
-            
         // 7. Apply initial theme
         applyTheme(SettingsManager.shared.theme)
         StartupLog.write("Step 7: Theme applied")
@@ -121,17 +112,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hostingView = NSHostingView(rootView: mainView)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         StartupLog.write("  setupMainWindow: hostingView created")
-        
+
+        let initialSize = MainWindowLayout.targetSize(
+            expanded: SettingsManager.shared.dashboardExpanded,
+            screen: NSScreen.main?.frame.size
+        )
+
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 550),
+            contentRect: NSRect(origin: .zero, size: initialSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.contentView = hostingView
-        window.title = "VPN Connect"
-        window.minSize = NSSize(width: 360, height: 480)
-        window.maxSize = NSSize(width: 860, height: 680)
+        window.title = "TurtleDiver"
+        // The window's own header carries the app name, exactly like the
+        // compact/expanded designs; the title stays for the Window menu.
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: MainWindowLayout.compactWidth, height: 480)
+        window.maxSize = NSSize(width: 1400, height: 1100)
         window.isReleasedWhenClosed = false
         window.center()
         StartupLog.write("  setupMainWindow: window created, frame: \(NSStringFromRect(window.frame))")
@@ -205,74 +204,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showSettings() {
+        openSettingsRoute(nil)
+    }
+
+    /// Opens Settings, optionally deep-linking to a route (menu bar actions;
+    /// nil = root menu).
+    func openSettingsRoute(_ route: SettingsRoute?) {
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController()
         }
+        settingsWindowController?.pendingRoute = route
         settingsWindowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     
     func applicationWillTerminate(_ aNotification: Notification) {
+        EngineController.shared.shutdown()
         VPNManager.shared.cleanupOnTermination()
     }
     
-    /// Calculates the ideal content height based on which UI elements are visible,
-    /// then resizes the window accordingly with animation.
+    /// Sizes the window to the current presentation state (compact controls or
+    /// expanded dashboard), keeping the top edge and the horizontal centre
+    /// anchored and animating the change.
+    ///
+    /// Deliberately *not* driven by VPN status or by other content changes: the
+    /// window is resizable, and snapping it back on every state change would
+    /// fight a user who just dragged its corner. Only the compact ↔ expanded
+    /// decision (and launch) resizes.
     func resizeWindowForContent() {
         guard let window = window else { return }
-        
-        // Base height for always-visible items (top badge, icon, status, host,
-        // spacer, button, proxy section, debug toggle, paddings/spacings).
-        let baseHeight: CGFloat = 550
-        
-        // Extra height for each conditional element
-        let sm = SettingsManager.shared
-        let tunnelingExtra: CGFloat = sm.useTunneling ? 40 : 0
-        let isConnected: Bool
-        switch VPNManager.shared.status {
-        case .connected: isConnected = true
-        default: isConnected = false
-        }
-        let proxyBadgeExtra: CGFloat = (isConnected && sm.useProxy && sm.selectedProxy != nil) ? 40 : 0
-        let durationExtra: CGFloat = isConnected ? 64 : 0
-        
-        let targetHeight = baseHeight + tunnelingExtra + proxyBadgeExtra + durationExtra
-        let clampedHeight = min(max(targetHeight, window.minSize.height), 680)
-        
+
+        let screen = window.screen ?? NSScreen.main
+        let target = MainWindowLayout.targetSize(
+            expanded: SettingsManager.shared.dashboardExpanded,
+            screen: screen?.frame.size
+        )
         let currentFrame = window.frame
-        let currentContentHeight = window.contentRect(forFrameRect: currentFrame).size.height
-        guard abs(currentContentHeight - clampedHeight) > 10 else { return } // skip small changes
-        
-        let newContentSize = NSSize(width: window.contentRect(forFrameRect: currentFrame).size.width, height: clampedHeight)
-        let newFrameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: newContentSize))
-        
+        let currentContent = window.contentRect(forFrameRect: currentFrame).size
+        guard abs(currentContent.width - target.width) > 8 || abs(currentContent.height - target.height) > 8 else {
+            return // already the right size (or close enough)
+        }
+
+        let newFrameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: target))
         var newFrame = currentFrame
         newFrame.size = newFrameRect.size
+        // Keep the top edge and the horizontal centre where they were.
         newFrame.origin.y = currentFrame.origin.y + (currentFrame.size.height - newFrame.size.height)
-        // Keep centered horizontally
         newFrame.origin.x = currentFrame.origin.x - (newFrame.size.width - currentFrame.size.width) / 2
-        
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.38
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.2, 0.64, 1.0)
-            window.animator().setFrame(newFrame, display: true)
+
+        // Never park the window off-screen when growing near a display edge.
+        if let visible = screen?.visibleFrame {
+            newFrame.origin.x = min(max(newFrame.origin.x, visible.minX), max(visible.maxX - newFrame.width, visible.minX))
+            newFrame.origin.y = min(max(newFrame.origin.y, visible.minY), max(visible.maxY - newFrame.height, visible.minY))
         }
-    }
-    
-    func resizeWindowForDebugMode(_ enabled: Bool) {
-        guard let window = window else { return }
-        let targetWidth: CGFloat = enabled ? 800 : 360
-        
-        // Calculate new frame — keep the window anchored at top-left
-        let currentFrame = window.frame
-        let newContentSize = NSSize(width: targetWidth, height: window.contentRect(forFrameRect: currentFrame).size.height)
-        let newFrameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: newContentSize))
-        
-        var newFrame = currentFrame
-        newFrame.size = newFrameRect.size
-        newFrame.origin.x = currentFrame.origin.x - (newFrame.size.width - currentFrame.size.width) / 2
-        newFrame.origin.y = currentFrame.origin.y + (currentFrame.size.height - newFrame.size.height)
-        
+
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.38
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.2, 0.64, 1.0)
@@ -342,9 +327,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-class MenuBarManager: NSObject {
+@MainActor
+final class MenuBarManager: NSObject {
     private var statusItem: NSStatusItem!
     private var cancellables = Set<AnyCancellable>()
+    private var lastKnownStatus: VPNStatus = .disconnected
     
     override init() {
         StartupLog.write("MenuBarManager.init: creating status item...")
@@ -369,8 +356,34 @@ class MenuBarManager: NSObject {
         VPNManager.shared.$status
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
-                self?.updateStatusItem(for: status)
-                self?.updateMenu(status: status)
+                MainActor.assumeIsolated {
+                    self?.lastKnownStatus = status
+                    self?.updateStatusItem(for: status)
+                    self?.updateMenu(status: status)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Engine toggle changes the icon dot and menu items.
+        EngineController.shared.$engineRunning
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.updateStatusItem(for: self.lastKnownStatus)
+                    self.updateMenu(status: self.lastKnownStatus)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Policy health/selection changes refresh the menu contents.
+        EngineController.shared.$policySummaries
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.updateMenu(status: self.lastKnownStatus)
+                }
             }
             .store(in: &cancellables)
     }
@@ -382,8 +395,7 @@ class MenuBarManager: NSObject {
         // Since we configured it as a template image in Assets.xcassets, 
         // we can set contentTintColor to indicate status if desired.
         
-        let icon = NSImage(named: "MenuBarIcon")
-        button.image = icon
+        button.image = Self.currentIcon(engineOn: EngineController.shared.engineRunning)
         
         switch status {
         case .connected:
@@ -403,7 +415,7 @@ class MenuBarManager: NSObject {
             // Let's try to distinguish connected state by using default (high contrast)
             // and disconnected by using secondary label color?
             // Or maybe just keep it simple as requested.
-            button.contentTintColor = NSColor.secondaryLabelColor
+            button.contentTintColor = EngineController.shared.engineRunning ? nil : NSColor.secondaryLabelColor
             
         case .connecting, .disconnecting:
             // Maybe orange?
@@ -421,7 +433,7 @@ class MenuBarManager: NSObject {
     
     private func updateMenu(status: VPNStatus) {
         let menu = NSMenu()
-        
+
         // 1. Connection Status Item
         let statusTitle: String
         switch status {
@@ -429,29 +441,142 @@ class MenuBarManager: NSObject {
         case .disconnected: statusTitle = "Status: Disconnected"
         case .connecting: statusTitle = "Status: Connecting..."
         case .disconnecting: statusTitle = "Status: Disconnecting..."
-        case .error: statusTitle = "Status: Error"
+        case .error(let message): statusTitle = "Status: Error — \(message)"
         }
-        
-        // The first item shows status and opens main window
+
         let statusMenuItem = NSMenuItem(title: statusTitle, action: #selector(openMainWindow), keyEquivalent: "")
         statusMenuItem.target = self
         menu.addItem(statusMenuItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
-        // 2. Settings
+
+        // 2. VPN connect / disconnect
+        switch status {
+        case .connected:
+            let item = NSMenuItem(title: "Disconnect VPN", action: #selector(toggleVPN), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        case .disconnected, .error:
+            let item = NSMenuItem(title: "Connect VPN", action: #selector(toggleVPN), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        case .connecting, .disconnecting:
+            let item = NSMenuItem(title: "VPN busy…", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 3. Proxy engine section
+        let engine = EngineController.shared
+        let engineToggle = NSMenuItem(
+            title: engine.engineRunning ? "Disable Proxy Engine" : "Enable Proxy Engine",
+            action: #selector(toggleEngine), keyEquivalent: "")
+        engineToggle.target = self
+        menu.addItem(engineToggle)
+
+        if engine.engineRunning {
+            let ports = [engine.httpPort.map { "HTTP \($0)" }, engine.socks5Port.map { "SOCKS \($0)" }]
+                .compactMap { $0 }.joined(separator: " · ")
+            let portsItem = NSMenuItem(title: ports.isEmpty ? "Listening" : "Listening — \(ports)", action: nil, keyEquivalent: "")
+            portsItem.isEnabled = false
+            menu.addItem(portsItem)
+        }
+
+        // The system proxy is the switch users reach for most often, and it is
+        // invisible otherwise: surface it here so it can be checked/flipped
+        // without opening the Dashboard.
+        let systemProxyItem = NSMenuItem(
+            title: engine.systemProxyBusy ? "Applying Proxy Settings…" : "Use as System Proxy",
+            action: #selector(toggleSystemProxy), keyEquivalent: "")
+        systemProxyItem.target = self
+        systemProxyItem.state = engine.systemProxyOn ? .on : .off
+        systemProxyItem.isEnabled = engine.engineRunning && !engine.systemProxyBusy
+        menu.addItem(systemProxyItem)
+
+        menu.addItem(profileSubmenu())
+        if let groupItem = selectGroupSubmenu() {
+            menu.addItem(groupItem)
+        }
+
+        let testItem = NSMenuItem(title: "Test Latency Now", action: #selector(testLatency), keyEquivalent: "")
+        testItem.target = self
+        testItem.isEnabled = engine.engineRunning
+        menu.addItem(testItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // 4. Dashboard + Settings
+        let dashboardItem = NSMenuItem(title: "Open Dashboard…", action: #selector(openDashboard), keyEquivalent: "")
+        dashboardItem.target = self
+        menu.addItem(dashboardItem)
+
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
-        // 3. Quit
+
+        // 5. Quit
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-        
+
         statusItem.menu = menu
+    }
+
+    /// Status-bar icon: base asset with a distinct look while the engine is
+    /// listening (asset catalog ships `MenuBarIcon` / `MenuBarIconEngine`;
+    /// falls back to the base icon when the engine variant is missing).
+    private static func currentIcon(engineOn: Bool) -> NSImage? {
+        if engineOn, let engineIcon = NSImage(named: "MenuBarIconEngine") {
+            return engineIcon
+        }
+        return NSImage(named: "MenuBarIcon")
+    }
+
+    /// Profile picker submenu; the checkmarked entry is active.
+    private func profileSubmenu() -> NSMenuItem {
+        let container = NSMenuItem(title: "Profile", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Profile")
+        let manager = ProfileManager.shared
+        let active = manager.activeProfile.name
+        for name in manager.listProfileNames() {
+            let item = NSMenuItem(title: name, action: #selector(switchProfile(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = name
+            item.state = name == active ? .on : .off
+            submenu.addItem(item)
+        }
+        container.submenu = submenu
+        return container
+    }
+
+    /// One submenu per `select` group with the persisted choice checkmarked.
+    private func selectGroupSubmenu() -> NSMenuItem? {
+        let engine = EngineController.shared
+        let groups = ProfileManager.shared.activeProfile.groups.filter { $0.type == .select }
+        guard !groups.isEmpty else { return nil }
+
+        let container = NSMenuItem(title: "Policy Groups", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Policy Groups")
+        for group in groups {
+            let groupItem = NSMenuItem(title: group.name, action: nil, keyEquivalent: "")
+            let groupMenu = NSMenu(title: group.name)
+            let current = engine.engine.policyStore.selection(forGroup: group.name) ?? group.policies.first
+            for member in group.policies {
+                let item = NSMenuItem(title: member, action: #selector(selectPolicyMember(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = ["group": group.name, "member": member]
+                item.state = member == current ? .on : .off
+                groupMenu.addItem(item)
+            }
+            groupItem.submenu = groupMenu
+            submenu.addItem(groupItem)
+        }
+        container.submenu = submenu
+        return container
     }
     
     @objc private func openMainWindow() {
@@ -477,5 +602,49 @@ class MenuBarManager: NSObject {
         
         // Terminate the app. applicationWillTerminate in AppDelegate will handle cleanup.
         NSApp.terminate(nil)
+    }
+
+    // MARK: Engine actions
+
+    @objc private func toggleEngine() {
+        let engine = EngineController.shared
+        engine.setEngineEnabled(!engine.engineRunning)
+    }
+
+    @objc private func toggleSystemProxy() {
+        let engine = EngineController.shared
+        Task { await engine.setSystemProxyEnabled(!engine.systemProxyOn) }
+    }
+
+    @objc private func switchProfile(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        _ = ProfileManager.shared.activateProfile(named: name)
+    }
+
+    @objc private func selectPolicyMember(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: String],
+              let group = info["group"], let member = info["member"] else { return }
+        EngineController.shared.engine.policyStore.setSelection(member, forGroup: group)
+    }
+
+    @objc private func testLatency() {
+        EngineController.shared.engine.policyStore.testAllPolicies()
+    }
+
+    @objc private func openDashboard() {
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.openSettingsRoute(.dashboard)
+        }
+    }
+
+    @objc private func toggleVPN() {
+        switch VPNManager.shared.status {
+        case .connected:
+            VPNManager.shared.disconnect()
+        case .disconnected, .error:
+            VPNManager.shared.connect()
+        default:
+            break
+        }
     }
 }
