@@ -35,6 +35,8 @@ iOSInjectionProject/
 # OSX
 #
 .DS_Store
+*.textClipping
+*.crash
 .AppleDouble
 .LSOverride
 
