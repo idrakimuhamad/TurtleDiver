@@ -216,6 +216,25 @@ The application consists of several key components:
 - The application requires sudo privileges for VPN connection and for setting
   the system proxy
 - All network traffic is handled through standard macOS networking APIs
+- App output does not live in `/tmp` any more: the connection and launch logs
+  are `~/Library/Logs/TurtleDiver/{vpn,launch}.log` (owner-only, `0600`) so
+  nobody can pre-create a predictable path, and credentials are redacted to
+  their length before they are ever written.
+
+### Known issue: a predictable PID file
+
+`VPNManager` still records the openconnect child PID in
+`/tmp/turtlediver.pid`, and reads it back to adopt a surviving process after a
+restart. `/tmp` is world-writable, so another local user could pre-create that
+name (as a file or a symlink) before the app runs — the worst case is a
+clobbered user file or a stale PID being probed. It carries no credentials.
+
+The fix is the same one the logs already got — move the file to
+`~/Library/Application Support/TurtleDiver/run/openconnect.pid` (`0600`) and
+keep reading the old `/tmp` path once as a migration fallback (adoption also
+has a `pgrep` tier, so it degrades safely). Left for a session with a real VPN
+available, because a wrong change here could leave an orphaned openconnect
+running.
 
 ### Known issue: credentials in the launch pipeline
 
