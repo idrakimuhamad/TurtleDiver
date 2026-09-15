@@ -90,6 +90,7 @@ let package = Package(
                 "Rules/ProcessPeerResolver.swift",
                 "Rules/RuleSetStore.swift",
                 "Rules/RuleMatcher.swift",
+                "System/OpenConnectLaunch.swift",
                 "System/SystemProxyManager.swift",
                 "System/VPNRuleGenerator.swift"
             ],

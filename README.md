@@ -265,38 +265,33 @@ The application consists of several key components:
   are `~/Library/Logs/TurtleDiver/{vpn,launch}.log` (owner-only, `0600`) so
   nobody can pre-create a predictable path, and credentials are redacted to
   their length before they are ever written.
+- Credentials never reach a command line. `VPNManager` used to build
+  `echo <admin-password> | sudo … && printf '<pin>\n<password>' | sudo
+  openconnect …` and hand it to `bash -c`, which put all three secrets in that
+  process's argv — readable with `ps`/`pgrep -f` by any process running as the
+  same user, and copied into crash reports. The script that runs now is a
+  constant: it `read`s the credentials from its standard input into unexported
+  shell variables, so no credential material is ever part of an argument list.
+  openconnect still receives exactly the same standard input the `printf`
+  pipeline used to give it. See `OpenConnectLaunch.swift`; the flow is covered
+  end-to-end by `OpenConnectLaunchTests` against a fake `sudo`/`openconnect`
+  pair, and the file is created `0600`.
 
-### Known issue: a predictable PID file
+### Fixed: a predictable PID file
 
-`VPNManager` still records the openconnect child PID in
-`/tmp/turtlediver.pid`, and reads it back to adopt a surviving process after a
+`VPNManager` used to tell openconnect to record its PID in
+`/tmp/turtlediver.pid`, and read it back to adopt a surviving process after a
 restart. `/tmp` is world-writable, so another local user could pre-create that
-name (as a file or a symlink) before the app runs — the worst case is a
-clobbered user file or a stale PID being probed. It carries no credentials.
+name — as a plain file, or as a symlink pointing at a file of theirs, which the
+app would then delete or openconnect (running as root) would write through.
 
-The fix is the same one the logs already got — move the file to
-`~/Library/Application Support/TurtleDiver/run/openconnect.pid` (`0600`) and
-keep reading the old `/tmp` path once as a migration fallback (adoption also
-has a `pgrep` tier, so it degrades safely). Left for a session with a real VPN
-available, because a wrong change here could leave an orphaned openconnect
-running.
-
-### Known issue: credentials in the launch pipeline
-
-`VPNManager` starts openconnect through `/bin/bash -c` and feeds the
-credentials through the shell pipeline
-(`printf '<pin>\n<password>' | sudo openconnect …`). The credentials are
-`printf` arguments, so they are part of that process's command line and any
-process running as the same user can read them with `ps` — and they end up in
-crash reports. They are **redacted in the app's own logs**
-(`~/Library/Logs/TurtleDiver/vpn.log`, owner-only, truncated on each connect)
-and never written to `debugOutput`.
-
-Fixing it properly means dropping the shell string: cache the sudo timestamp
-with a `Process` whose stdin carries the admin password, then run
-`sudo openconnect` directly and write the PIN/password into its stdin from
-Swift. That touches the one flow the app cannot afford to break, so it is
-deliberately left as a separate change with a real-VPN test.
+It is now
+`~/Library/Application Support/TurtleDiver/run/openconnect.pid`, in a directory
+created `0700`. The old `/tmp` path is never read or written; a stale one is
+deleted before each connection starts. A surviving openconnect is adopted through
+the existing `pgrep` tier instead — which is the tier that does the work anyway,
+because these files are written by a root process, so the `kill(pid, 0)` liveness
+probe answers `EPERM` and no PID tier can be trusted to adopt it.
 
 ## Troubleshooting
 
@@ -353,7 +348,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 440 tests (core engine + app glue)
+swift test          # 462 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

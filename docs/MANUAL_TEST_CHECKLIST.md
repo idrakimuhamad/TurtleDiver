@@ -6,7 +6,7 @@ release.
 
 ## 0. Setup
 
-- [ ] `swift test` passes (440 tests green).
+- [ ] `swift test` passes (462 tests green).
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
 
@@ -222,3 +222,37 @@ release.
 - [ ] A PAC left armed at `http://127.0.0.1:8765/proxy.pac` by an old build is
       turned off on launch (`networksetup -getautoproxyurl <svc>` → `Enabled: No`),
       while a real corporate PAC is left untouched.
+
+## 9. Credential handling (1.5.0) — verified against a real connect
+
+The launch path no longer puts a credential in an argument list. Everything
+except the last step below is covered by `OpenConnectLaunchTests` (which runs
+both plans against a fake `sudo`/`sed`/`openconnect` trio, so no real sudo,
+`/etc/hosts` or network is touched); these steps confirm the real thing.
+
+Verified 2026-09-15 against a real connect to `vpn.rhbgroup.com`: openconnect's
+argv held only options (`--force-dpd=10 --reconnect-timeout=604800
+--user=<id> --pid-file …/run/openconnect.pid -s …/vpn-slice <host> …`) with no
+credential-shaped token, the log recorded `Credential stdin: 43 bytes, 3 lines`
+(= 8+1, 12+1, 20+1) and an argv-free `Pipeline:` line, and vpn-slice went on to
+resolve its host list.
+
+- [ ] Connect the VPN from the app → the tunnel comes up exactly as before
+      (the shell now `read`s the three credentials from stdin, and openconnect
+      still gets `PIN\npassword` on its own stdin).
+- [ ] `pgrep -x openconnect` → take the PID, then check the command line
+      **without printing it**:
+      `ps -p <pid> -o command= | tr ' ' '\n' | grep -cE '^(<admin>|<pin>|<password>)'`
+      → `0`. (Never `pgrep -f`/`ps` with args on a machine with real
+      credentials: the *pre-1.5.0* build printed them.)
+- [ ] `ps -p <pid> -o command=` still shows `--force-dpd=10 … vpn.rhbgroup.com`
+      → the connection is genuinely openconnect with the usual options.
+- [ ] `stat -f %Lp ~/Library/Application\ Support/TurtleDiver/run` → `700`, and
+      `/tmp/turtlediver.pid` is gone once a new connection starts. (The pid file
+      itself is normally *absent*: openconnect only writes `--pid-file` when it
+      daemonises, and this app does not pass `--background`. The app writes the
+      file itself when it adopts a surviving openconnect, so it is usually the
+      safe *path* that matters here, not a file.)
+- [ ] Disconnect → openconnect exits, and the app still adopts/kills a
+      surviving tunnel (the PID tier only matches a same-user process, so a
+      root openconnect is found by the `pgrep` tier as before).

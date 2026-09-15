@@ -1,6 +1,12 @@
 import Foundation
 import Cocoa
 import Combine
+#if canImport(TurtleDiverSystem)
+// The openconnect launch plan and PID-file paths live in the System module in
+// the SPM test harness (VPNConnect/System/OpenConnectLaunch.swift). In the app
+// target everything is one module, so the import is guarded away.
+import TurtleDiverSystem
+#endif
 
 // MARK: - Subprocess support
 
@@ -212,7 +218,10 @@ class VPNManager: ObservableObject {
     /// prompt round, preventing duplicate writes when the server sends
     /// multiple "PASSCODE:" lines in the same batch.
     private var passcodePromptCount = 0
-    private let pidFilePath = "/tmp/turtlediver.pid"
+    /// Where openconnect records its PID. Computed rather than stored because
+    /// it now depends on the user's Application Support directory — see
+    /// `OpenConnectPidFile` for why it left `/tmp`.
+    private var pidFilePath: String { OpenConnectPidFile.path.path }
     private var currentAttemptId: UUID?
     
     /// Incremented on each `connect()` call so stale termination handlers
@@ -469,25 +478,25 @@ class VPNManager: ObservableObject {
         }
         
         let openconnectPath = binaryPath("openconnect") ?? "openconnect"
-        let defaultPaths = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        let pathEnv = "export PATH=\(shellEscape(defaultPaths)):$PATH"
-        let ocEscaped = shellEscape(openconnectPath)
-        let argsEscaped = arguments.map(shellEscape).joined(separator: " ")
-        let adminPwdEscaped = shellEscape(settings.adminPassword)
-        let pinEscaped = shellEscape(pin)
-        let passEscaped = shellEscape(settings.vpnPassword)
-        
-        // Build command matching the working vpn.sh script:
-        // 1. Pre-cache sudo password via `echo <pwd> | sudo -S -v`
-        // 2. Pipe credentials directly to `sudo openconnect` (no -S — all stdin goes to openconnect)
-        // This avoids sudo -S consuming credential data meant for openconnect, matching the
-        // working script where `printf "$PIN\n$PASSWORD" | sudo openconnect ...` passes all stdin to openconnect.
-        // Credential order: PIN (passcode+tokencode) first, VPN password second.
-        // Build the shell command:
-        //   1. Clean up stale vpn-slice entries from /etc/hosts (same sudo session)
-        //   2. Cache sudo credentials so openconnect doesn't prompt later
-        //   3. Pipe PIN+password to openconnect via sudo
-        let shellCommand = "\(pathEnv); echo \(adminPwdEscaped) | sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts 2>/dev/null; echo \(adminPwdEscaped) | sudo -S -v && printf '%s\\n%s\\n' \(pinEscaped) \(passEscaped) | sudo \(ocEscaped) \(argsEscaped)"
+        // The three credentials are *not* interpolated into this string. A
+        // process's argv is readable by any process running as the same user
+        // (`ps`, `pgrep -f`) and is copied into crash reports; the previous
+        // `echo <password> | sudo …` pipeline therefore leaked the admin
+        // password, the PIN and the VPN password to every process on the
+        // machine. They now travel down a pipe that the script reads into
+        // unexported shell variables — see `OpenConnectLaunchPlan`.
+        OpenConnectPidFile.prepareDirectory()
+        OpenConnectPidFile.discardLegacyFile()
+        let plan = OpenConnectCommand.launchPlan(
+            openconnectPath: openconnectPath,
+            arguments: arguments,
+            adminPassword: settings.adminPassword,
+            pin: pin,
+            vpnPassword: settings.vpnPassword
+        )
+        // Shape, for the log and for debugging — it is the same script every
+        // time, and it contains nothing secret.
+        let shellCommand = plan.script
         
         // Connection file logger
         let log = VpnConnectionLogger()
@@ -496,11 +505,12 @@ class VPNManager: ObservableObject {
         log.write("Tunneling: \(withTunneling)")
         log.write("openconnect path: \(openconnectPath)")
         log.write("Arguments: \(arguments)")
-        // The real pipeline embeds the three credentials in the shell's argv
-        // (see the note in README → Security Notes), so what is logged is the
-        // shape of the command, not its text. Individual credentials are
-        // recorded below in redacted form by `logSend`.
-        log.write("Pipeline: PATH export; sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts; sudo -S -v; printf '<pin>\\n<vpn-password>' | sudo <openconnectPath> <arguments>")
+        // The pipeline's *shape* is logged, never its credential bytes: they
+        // are not in the command line at all any more, they are written to
+        // openconnect's stdin from `plan.standardInput`. Individual
+        // credentials are recorded below in redacted form by `logSend`.
+        log.write("Pipeline: \(shellCommand)")
+        log.write("Credential stdin: \(plan.standardInput.count) bytes, \(OpenConnectCommand.credentialLineCount) lines")
         log.logSend("Admin password (for sudo)", value: settings.adminPassword)
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
@@ -518,8 +528,13 @@ class VPNManager: ObservableObject {
         
         let outPipe = Pipe()
         let errPipe = Pipe()
+        // The credentials' route into the process. Three short lines fit in the
+        // pipe buffer, so the write below cannot block even if the script is
+        // slow to reach its first `read`.
+        let inPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
+        proc.standardInput = inPipe
         
         // Reset flags
         self.passcodePromptCount = 0
@@ -641,6 +656,16 @@ class VPNManager: ObservableObject {
             }
             
             self.startConnectionTimer(timeoutSeconds: 90)
+            
+            // Feed the credentials. Written after `run()` so the child cannot
+            // miss them, and closed so a failed `read` fails fast instead of
+            // waiting on a pipe nobody will write to.
+            do {
+                try inPipe.fileHandleForWriting.write(contentsOf: plan.standardInput)
+            } catch {
+                log.write("[TERM] writing credentials to stdin failed: \(error.localizedDescription)")
+            }
+            try? inPipe.fileHandleForWriting.close()
             
             // Start polling for connection success via PID file.
             // Since we now run bash directly (not through osascript),
@@ -1241,11 +1266,6 @@ class VPNManager: ObservableObject {
         }
     }
     
-    private func shellEscape(_ s: String) -> String {
-        if s.isEmpty { return "''" }
-        return "'" + s.replacingOccurrences(of: "'", with: "'\\\"'\\\"'") + "'"
-    }
-    
     // MARK: - /etc/hosts Cleanup
     
     /// Removes any stale vpn-slice entries from /etc/hosts.
@@ -1265,20 +1285,25 @@ class VPNManager: ObservableObject {
             return
         }
         
-        let adminPwdEscaped = shellEscape(adminPwd)
-        let sedCommand = "echo \(adminPwdEscaped) | sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts"
+        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: adminPwd)
         
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = ["-c", sedCommand]
+        task.arguments = ["-c", plan.script]
         
         let outPipe = Pipe()
         let errPipe = Pipe()
+        let inPipe = Pipe()
         task.standardOutput = outPipe
         task.standardError = errPipe
+        // Same rule as the connect path: the admin password goes down the pipe,
+        // never into this command line.
+        task.standardInput = inPipe
         
         do {
             try task.run()
+            try? inPipe.fileHandleForWriting.write(contentsOf: plan.standardInput)
+            try? inPipe.fileHandleForWriting.close()
             task.waitUntilExit()
             if task.terminationStatus == 0 {
                 debugOutput += "Cleaned up stale vpn-slice entries from /etc/hosts\n"
