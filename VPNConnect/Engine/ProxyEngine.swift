@@ -278,7 +278,7 @@ public final class ProxyEngine: @unchecked Sendable {
     /// Starts listeners per the profile's `http-listen` / `socks5-listen`
     /// settings. `http-listen` / `socks5-listen` accept `host:port`; empty
     /// disables that listener.
-    public func start(profile: Profile) throws {
+    public func start(profile: Profile, ruleSets: [String: [ProfileRule]]? = nil) throws {
         lock.lock()
         if running {
             lock.unlock()
@@ -308,7 +308,7 @@ public final class ProxyEngine: @unchecked Sendable {
             }
         }
 
-        matcher.updateProfile(profile)
+        matcher.updateProfile(profile, ruleSets: ruleSets)
         policyStore.updateProfile(profile)
 
         lock.lock()
@@ -342,8 +342,11 @@ public final class ProxyEngine: @unchecked Sendable {
 
     /// Re-applies a (possibly edited) profile: matcher + policy store hot
     /// swap. Listener addresses only change on `start(profile:)`.
-    public func reload(profile: Profile) {
-        matcher.updateProfile(profile)
+    /// - Parameter ruleSets: cached rules per set name. `nil` keeps the
+    ///   expansions the matcher already has, so an unrelated profile edit does
+    ///   not disturb them.
+    public func reload(profile: Profile, ruleSets: [String: [ProfileRule]]? = nil) {
+        matcher.updateProfile(profile, ruleSets: ruleSets)
         policyStore.updateProfile(profile)
     }
 

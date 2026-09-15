@@ -120,7 +120,19 @@ public enum RuleType: String, CaseIterable, Codable, Sendable {
     case destPort = "DEST-PORT"
     case srcIP = "SRC-IP"
     case protocolRule = "PROTOCOL"
+    /// `RULE-SET,<name>,<policy>`: expand a cached remote list in place. Written
+    /// by the Rule Sets pane, never by hand-picked in the rule editor.
+    case ruleSet = "RULE-SET"
     case final = "FINAL"
+
+    /// Types offered by the rule editor: everything except the ones that are
+    /// either generated (`RULE-SET`) or reserved (`GEOIP`).
+    public static var editorCases: [RuleType] {
+        allCases.filter { $0 != .ruleSet }
+    }
+
+    /// True for rules whose value is a policy name rather than a match value.
+    public var takesNoValue: Bool { self == .final }
 }
 
 /// One ordered rule from the `[Rule]` section: `TYPE,value,policy[,options]`.
@@ -133,20 +145,29 @@ public struct ProfileRule: Codable, Equatable, Identifiable, Sendable {
     public var policy: String
     /// `no-resolve` option: skip this rule if matching would require a DNS lookup.
     public var noResolve: Bool
+    /// Name of the remote rule set this rule was expanded from, when it was.
+    /// Written by the matcher, never by the parser: it is provenance for the
+    /// request log and the Rules pane, not part of the profile text.
+    public var ruleSet: String?
 
     public init(
         id: UUID = UUID(),
         type: RuleType,
         value: String,
         policy: String,
-        noResolve: Bool = false
+        noResolve: Bool = false,
+        ruleSet: String? = nil
     ) {
         self.id = id
         self.type = type
         self.value = value
         self.policy = policy
         self.noResolve = noResolve
+        self.ruleSet = ruleSet
     }
+
+    /// Stable identity of the *rule text*, used to dedupe expanded rule sets.
+    var dedupeKey: String { "\(type.rawValue)|\(value.lowercased())|\(noResolve)" }
 }
 
 // MARK: - General Settings
@@ -209,19 +230,33 @@ public struct Profile: Codable, Equatable, Sendable {
     public var proxies: [ProxyDefinition]
     public var groups: [ProxyGroup]
     public var rules: [ProfileRule]
+    /// `[Rule Set]` entries; referenced from `rules` by name.
+    public var ruleSets: [RemoteRuleSet]
 
     public init(
         name: String,
         general: GeneralSettings = GeneralSettings(),
         proxies: [ProxyDefinition] = [],
         groups: [ProxyGroup] = [],
-        rules: [ProfileRule] = []
+        rules: [ProfileRule] = [],
+        ruleSets: [RemoteRuleSet] = []
     ) {
         self.name = name
         self.general = general
         self.proxies = proxies
         self.groups = groups
         self.rules = rules
+        self.ruleSets = ruleSets
+    }
+
+    /// The declared set with this name, if any.
+    public func ruleSet(named name: String) -> RemoteRuleSet? {
+        ruleSets.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    /// Names referenced by `RULE-SET` rules.
+    public var referencedRuleSetNames: [String] {
+        rules.filter { $0.type == .ruleSet }.map(\.value)
     }
 
     /// Every policy name that exists in this profile: built-ins, proxies, groups.
@@ -240,6 +275,9 @@ public struct Profile: Codable, Equatable, Sendable {
         case groupEmpty(String)
         case duplicateRuleID(Int)
         case ruleUnknownPolicy(index: Int, policy: String)
+        case ruleSetUnknown(index: Int, name: String)
+        case ruleSetDuplicateName(String)
+        case ruleSetInsecureURL(name: String, url: String)
         case invalidPort(name: String, port: Int)
         case invalidListener(String)
         case invalidCIDR(String)
@@ -264,6 +302,12 @@ public struct Profile: Codable, Equatable, Sendable {
                 return "More than one FINAL rule (first at rule #\(index)); FINAL must appear at most once, last"
             case .ruleUnknownPolicy(let index, let policy):
                 return "Rule #\(index + 1) references unknown policy \"\(policy)\""
+            case .ruleSetUnknown(let index, let name):
+                return "Rule #\(index + 1) references undeclared rule set \"\(name)\""
+            case .ruleSetDuplicateName(let name):
+                return "Duplicate rule set name: \"\(name)\""
+            case .ruleSetInsecureURL(let name, let url):
+                return "Rule set \"\(name)\" must use an https:// URL (got \"\(url)\")"
             case .invalidPort(let name, let port):
                 return "Proxy \"\(name)\" has invalid port \(port) (expected 1–65535)"
             case .invalidListener(let value):
@@ -339,6 +383,22 @@ public struct Profile: Codable, Equatable, Sendable {
         for (index, rule) in rules.enumerated() where rule.type != .final {
             if !allPolicyNames.contains(rule.policy) {
                 errors.append(.ruleUnknownPolicy(index: index, policy: rule.policy))
+            }
+        }
+
+        // --- Rule sets: unique names, https only, and every reference resolves ---
+        var declared = Set<String>()
+        for set in ruleSets {
+            if !declared.insert(set.name.lowercased()).inserted {
+                errors.append(.ruleSetDuplicateName(set.name))
+            }
+            if !RemoteRuleSet.isAllowedURLString(set.url) {
+                errors.append(.ruleSetInsecureURL(name: set.name, url: set.url))
+            }
+        }
+        for (index, rule) in rules.enumerated() where rule.type == .ruleSet {
+            if ruleSet(named: rule.value) == nil {
+                errors.append(.ruleSetUnknown(index: index, name: rule.value))
             }
         }
 

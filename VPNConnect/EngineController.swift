@@ -87,6 +87,10 @@ final class EngineController: ObservableObject {
     @Published private(set) var requests: [RequestEntry] = []
     /// Latest policy health snapshot for the dashboard badges.
     @Published private(set) var policySummaries: [PolicySummary] = []
+    /// One row per `[Rule Set]` entry, for the Rule Sets pane.
+    @Published private(set) var ruleSetSummaries: [RuleSetSummary] = []
+    /// Names whose refresh is in flight right now.
+    @Published private(set) var ruleSetsRefreshing: Set<String> = []
 
     // MARK: Collaborators
 
@@ -97,6 +101,16 @@ final class EngineController: ObservableObject {
     /// Injected so tests never touch the login keychain.
     private let secrets: SecretStore
     private var cancellables = Set<AnyCancellable>()
+
+    /// Cached remote rule lists. Injected so tests never read or write the
+    /// user's cache directory.
+    let ruleSets: RuleSetStore
+    /// Last refresh failure per lowercased set name.
+    private var ruleSetErrors: [String: String] = [:]
+    /// Signature of the sets the matcher currently has expanded, so an
+    /// unrelated profile edit does not re-read the cache from disk.
+    private var appliedRuleSetSignature = ""
+    private var ruleSetTask: Task<Void, Never>?
 
     /// The DIRECT rules the VPN tie-in currently has overlaid onto the
     /// active profile (needed to remove exactly them later).
@@ -117,11 +131,13 @@ final class EngineController: ObservableObject {
         profileManager: ProfileManager = .shared,
         settings: SettingsManager = .shared,
         systemProxy: SystemProxyManager? = nil,
-        secrets: SecretStore = KeychainBackedSecrets()
+        secrets: SecretStore = KeychainBackedSecrets(),
+        ruleSets: RuleSetStore? = nil
     ) {
         self.profileManager = profileManager
         self.settings = settings
         self.secrets = secrets
+        self.ruleSets = ruleSets ?? RuleSetStore()
         self.systemProxy = systemProxy ?? SystemProxyManager(
             runner: SystemProxyManager.defaultRunner(adminPasswordProvider: {
                 SettingsManager.shared.adminPassword
@@ -159,6 +175,99 @@ final class EngineController: ObservableObject {
         if settings.useProxyEngine {
             startEngine()
         }
+
+        // Load whatever is already cached (off the main thread) so cached rule
+        // sets work with no network at all, then refresh the stale ones.
+        reloadRuleSets()
+    }
+
+    // MARK: Remote rule sets
+
+    /// Reads the cached lists off the main thread, hands them to the matcher and
+    /// rebuilds the pane's summaries. Idempotent; called at launch, on a profile
+    /// switch, and after the Rule Sets pane edits a set.
+    func reloadRuleSets(refreshStale: Bool = true) {
+        let profile = profileManager.activeProfile
+        let signature = Self.ruleSetSignature(of: profile.ruleSets)
+        let store = ruleSets
+
+        Task { [weak self] in
+            let rules = await Task.detached(priority: .utility) { store.rulesBySet(for: profile) }.value
+            guard let self else { return }
+            self.engine.reload(profile: self.profileManager.activeProfile, ruleSets: rules)
+            self.appliedRuleSetSignature = signature
+            self.refreshRuleSetSummaries()
+
+            // Opt-in: only sets that declare an interval are worth refreshing
+            // on their own, and never while another refresh is running.
+            if refreshStale, self.settings.ruleSetAutoRefresh, self.ruleSetsRefreshing.isEmpty {
+                self.refreshRuleSets(self.ruleSets.staleSets(in: self.profileManager.activeProfile))
+            }
+        }
+    }
+
+    /// Refreshes one set (the pane's Refresh button).
+    func refreshRuleSet(named name: String) {
+        let profile = profileManager.activeProfile
+        refreshRuleSets(profile.ruleSets.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame })
+    }
+
+    /// Refreshes every declared set.
+    func refreshAllRuleSets() {
+        refreshRuleSets(profileManager.activeProfile.ruleSets)
+    }
+
+    /// Drops a cached copy; the next refresh fetches it from scratch.
+    func removeRuleSetCache(named name: String) {
+        guard let set = profileManager.activeProfile.ruleSets.first(where: {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }) else { return }
+        ruleSets.removeCache(for: set)
+        ruleSetErrors[set.name.lowercased()] = nil
+        reloadRuleSets(refreshStale: false)
+    }
+
+    private func refreshRuleSets(_ targets: [RemoteRuleSet]) {
+        guard !targets.isEmpty else { return }
+        ruleSetsRefreshing.formUnion(targets.map(\.name))
+        let store = ruleSets
+
+        ruleSetTask = Task { [weak self] in
+            // Network + file writes happen off the main thread; the HTTP
+            // transport is synchronous on purpose.
+            let outcomes = await Task.detached(priority: .utility) {
+                targets.map { ($0.name, store.refresh($0)) }
+            }.value
+
+            guard let self else { return }
+            for (name, outcome) in outcomes {
+                let key = name.lowercased()
+                self.ruleSetsRefreshing.remove(name)
+                switch outcome {
+                case .updated, .notModified:
+                    self.ruleSetErrors[key] = nil
+                case .unavailable(let message):
+                    self.ruleSetErrors[key] = message
+                }
+            }
+            self.reloadRuleSets(refreshStale: false)
+        }
+    }
+
+    private func refreshRuleSetSummaries() {
+        let profile = profileManager.activeProfile
+        ruleSetSummaries = RuleSetSummary.summaries(
+            for: profile,
+            entries: ruleSets.entries(for: profile),
+            errors: ruleSetErrors
+        )
+    }
+
+    /// Identity of the declared sets; a change means the matcher must be given
+    /// a fresh expansion.
+    nonisolated static func ruleSetSignature(of sets: [RemoteRuleSet]) -> String {
+        sets.map { "\($0.name)=\($0.url)#\($0.interval.map(String.init) ?? "-")" }
+            .joined(separator: "|")
     }
 
     // MARK: Engine lifecycle
@@ -457,7 +566,11 @@ final class EngineController: ObservableObject {
             }
         }
 
-        engine.reload(profile: profileManager.activeProfile)
+        if Self.ruleSetSignature(of: profile.ruleSets) != appliedRuleSetSignature {
+            reloadRuleSets(refreshStale: false)
+        } else {
+            engine.reload(profile: profileManager.activeProfile)
+        }
 
         // A profile switch can toggle the system-proxy flag.
         let wantsSystemProxy = profile.general.systemProxy

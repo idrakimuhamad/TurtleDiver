@@ -53,8 +53,12 @@ public struct ProfileParseResult: Sendable {
 /// Auto = url-test, ProxyA, ProxyB, url=http://..., interval=600
 /// Pick = select, Auto, DIRECT
 ///
+/// [Rule Set]
+/// Sukkaw = https://example.com/surge/ruleset.conf, interval=86400
+///
 /// [Rule]
 /// DOMAIN-SUFFIX,apple.com,DIRECT
+/// RULE-SET,Sukkaw,ProxyA
 /// IP-CIDR,10.0.0.0/8,Corp,no-resolve
 /// FINAL,SomeProxy
 /// ```
@@ -63,6 +67,7 @@ public enum ProfileParser {
     /// Section names accepted (case-insensitive).
     private enum Section: String {
         case general, proxy = "proxy", proxyGroup = "proxy group", rule
+        case ruleSet = "rule set"
     }
 
     public static func parse(_ text: String, name: String) -> ProfileParseResult {
@@ -71,6 +76,7 @@ public enum ProfileParser {
         var proxies: [ProxyDefinition] = []
         var groups: [ProxyGroup] = []
         var rules: [ProfileRule] = []
+        var ruleSets: [RemoteRuleSet] = []
         var currentSection: Section?
         var sawGeneral = false
 
@@ -118,6 +124,9 @@ public enum ProfileParser {
 
             case .rule:
                 parseRuleLine(line, lineNo: lineNo, into: &rules, diagnostics: &diagnostics)
+
+            case .ruleSet:
+                parseRuleSetLine(line, lineNo: lineNo, into: &ruleSets, diagnostics: &diagnostics)
             }
         }
 
@@ -132,7 +141,8 @@ public enum ProfileParser {
             general: general,
             proxies: proxies,
             groups: groups,
-            rules: rules
+            rules: rules,
+            ruleSets: ruleSets
         )
         return ProfileParseResult(profile: profile, diagnostics: diagnostics)
     }
@@ -350,6 +360,33 @@ public enum ProfileParser {
         } else {
             groups.append(group)
         }
+    }
+
+    /// `[Rule Set]` lines are `Name = url[, interval=seconds]`.
+    private static func parseRuleSetLine(
+        _ line: String, lineNo: Int,
+        into ruleSets: inout [RemoteRuleSet],
+        diagnostics: inout [ProfileDiagnostic]
+    ) {
+        guard let (name, value) = splitKeyValue(line) else {
+            diagnostics.append(ProfileDiagnostic(line: lineNo, message: "Rule set line needs \"Name = url\""))
+            return
+        }
+        guard !name.contains(",") else {
+            diagnostics.append(ProfileDiagnostic(line: lineNo, message: "Rule set name \"\(name)\" cannot contain a comma"))
+            return
+        }
+        if ruleSets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            diagnostics.append(ProfileDiagnostic(line: lineNo, message: "Duplicate rule set \"\(name)\"; the first one is used", severity: .warning))
+            return
+        }
+
+        let (parsed, error) = RemoteRuleSet.parseValue(value, name: name)
+        if let error {
+            diagnostics.append(ProfileDiagnostic(line: lineNo, message: error))
+            return
+        }
+        if let parsed { ruleSets.append(parsed) }
     }
 
     private static func parseRuleLine(

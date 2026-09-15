@@ -43,6 +43,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let useProxyEngine = "useProxyEngine"
         static let dashboardExpanded = "mainWindowDashboardExpanded"
         static let settingsPane = "settingsPane"
+        static let ruleSetAutoRefresh = "ruleSetAutoRefresh"
     }
 
     /// `UserDefaults` keys that older builds wrote and nothing reads any more:
@@ -212,6 +213,14 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
     @Published var settingsPane: String = "" {
         didSet { defaults.set(settingsPane, forKey: Keys.settingsPane) }
     }
+
+    /// Opt-in: refresh rule sets whose own `interval` has elapsed, in the
+    /// background. Off by default — a remote list decides where traffic goes,
+    /// so a fetch should be something the user asked for until they say
+    /// otherwise. Sets without an interval are never fetched on their own.
+    @Published var ruleSetAutoRefresh: Bool = false {
+        didSet { defaults.set(ruleSetAutoRefresh, forKey: Keys.ruleSetAutoRefresh) }
+    }
     
     func updateStokenTokenURL(_ url: URL) {
         stokenTokenFilePath = url.path
@@ -239,6 +248,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         useProxyEngine = defaults.bool(forKey: Keys.useProxyEngine)
         dashboardExpanded = defaults.bool(forKey: Keys.dashboardExpanded)
         settingsPane = defaults.string(forKey: Keys.settingsPane) ?? SettingsCatalog.defaultRoute.rawValue
+        ruleSetAutoRefresh = defaults.bool(forKey: Keys.ruleSetAutoRefresh)
         
         // Load theme
         if let raw = defaults.string(forKey: "appTheme"), let t = AppTheme(rawValue: raw) {

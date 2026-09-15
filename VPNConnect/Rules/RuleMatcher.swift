@@ -119,6 +119,14 @@ public final class RuleMatcher: @unchecked Sendable {
     private let lock = NSLock()
     private var rules: [ProfileRule]
     private var defaultPolicy: String
+    /// Rules of every remote rule set the profile declares, keyed by the
+    /// lowercased set name (the store fills this in; the matcher only expands).
+    private var ruleSets: [String: [ProfileRule]] = [:]
+    /// Every set name the profile declares, whether or not it is cached yet.
+    private var declaredRuleSets: Set<String> = []
+    /// Names referenced by a `RULE-SET` rule that had no cached rules. The
+    /// reference stays inert (it can never match) rather than defaulting.
+    private var unresolvedRuleSets: [String] = []
 
     /// Statistics for the dashboard: how many connections were decided with
     /// and without DNS resolution.
@@ -126,11 +134,16 @@ public final class RuleMatcher: @unchecked Sendable {
 
     public init(
         profile: Profile,
-        resolver: DNSResolving = CachingDNSResolver()
+        resolver: DNSResolving = CachingDNSResolver(),
+        ruleSets: [String: [ProfileRule]] = [:]
     ) {
-        self.rules = profile.rules
-        self.defaultPolicy = Self.defaultPolicy(for: profile)
         self.resolver = resolver
+        self.defaultPolicy = Self.defaultPolicy(for: profile)
+        self.ruleSets = Self.keyed(ruleSets)
+        self.declaredRuleSets = Set(profile.ruleSets.map { $0.name.lowercased() })
+        let expansion = Self.expand(profile.rules, ruleSets: self.ruleSets, declared: self.declaredRuleSets)
+        self.rules = expansion.rules
+        self.unresolvedRuleSets = expansion.unresolved
     }
 
     /// Surge behavior when no rule matches and no FINAL exists: DIRECT.
@@ -138,14 +151,101 @@ public final class RuleMatcher: @unchecked Sendable {
         profile.rules.last(where: { $0.type == .final })?.policy ?? BuiltinPolicy.direct.rawValue
     }
 
+    // MARK: Rule-set expansion
+
+    public struct RuleExpansion: Equatable, Sendable {
+        public var rules: [ProfileRule]
+        /// Referenced set names with no cached rules (declared or not).
+        public var unresolved: [String]
+        /// Referenced set names that `[Rule Set]` does not declare at all.
+        public var undeclared: [String]
+    }
+
+    /// Replaces every `RULE-SET,<name>,<policy>` rule with the rules of that
+    /// set, in place, so "first match wins" still means what it says.
+    ///
+    /// The reference's policy wins over any policy written in the list itself —
+    /// one list can then feed several policies. A reference whose set is not
+    /// cached expands to nothing: it can never match, which is the safe failure
+    /// (falling back to its policy would route traffic the user did not ask
+    /// for, and the UI reports the set as "not downloaded").
+    public static func expand(
+        _ rules: [ProfileRule],
+        ruleSets: [String: [ProfileRule]],
+        declared: Set<String> = []
+    ) -> RuleExpansion {
+        var out: [ProfileRule] = []
+        out.reserveCapacity(rules.count)
+        var unresolved: [String] = []
+        var undeclared: [String] = []
+
+        for rule in rules {
+            guard rule.type == .ruleSet else {
+                out.append(rule)
+                continue
+            }
+            let name = rule.value
+            let key = name.lowercased()
+            guard let members = ruleSets[key], !members.isEmpty else {
+                unresolved.append(name)
+                if !declared.isEmpty, !declared.contains(key) { undeclared.append(name) }
+                continue
+            }
+            let policy = rule.policy.isEmpty ? (members.first?.policy ?? "") : rule.policy
+            guard !policy.isEmpty else {
+                unresolved.append(name)
+                continue
+            }
+            for member in members {
+                out.append(ProfileRule(
+                    type: member.type,
+                    value: member.value,
+                    policy: policy,
+                    noResolve: member.noResolve,
+                    ruleSet: name
+                ))
+            }
+        }
+
+        return RuleExpansion(rules: out, unresolved: unresolved, undeclared: undeclared)
+    }
+
+    private static func keyed(_ ruleSets: [String: [ProfileRule]]) -> [String: [ProfileRule]] {
+        var keyed: [String: [ProfileRule]] = [:]
+        for (name, rules) in ruleSets { keyed[name.lowercased()] = rules }
+        return keyed
+    }
+
     /// Hot-swaps the rule list (profile change). DNS caches live in the
     /// injected resolver; clear it here so fresh rules see fresh DNS.
-    public func updateProfile(_ profile: Profile) {
+    ///
+    /// - Parameter ruleSets: cached rules per set name. `nil` (the default)
+    ///   keeps the expansions already in hand, so a profile edit does not
+    ///   silently disable every rule set until the next refresh.
+    public func updateProfile(_ profile: Profile, ruleSets newRuleSets: [String: [ProfileRule]]? = nil) {
         lock.lock()
-        rules = profile.rules
+        if let newRuleSets { ruleSets = Self.keyed(newRuleSets) }
+        declaredRuleSets = Set(profile.ruleSets.map { $0.name.lowercased() })
+        let expansion = Self.expand(profile.rules, ruleSets: ruleSets, declared: declaredRuleSets)
+        rules = expansion.rules
+        unresolvedRuleSets = expansion.unresolved
         defaultPolicy = Self.defaultPolicy(for: profile)
         lock.unlock()
         (resolver as? CachingDNSResolver)?.clearCache()
+    }
+
+    /// Names of `RULE-SET` references with no cached rules behind them.
+    public var unresolvedRuleSetNames: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return unresolvedRuleSets
+    }
+
+    /// Rule count after expansion (what the matcher actually scans).
+    public var expandedRuleCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return rules.count
     }
 
     // MARK: Matching
@@ -287,6 +387,10 @@ public final class RuleMatcher: @unchecked Sendable {
             }
         case .final:
             return rule
+        case .ruleSet:
+            // Expanded before the scan; a reference that survived (no cached
+            // rules) must stay inert rather than match everything.
+            return nil
         }
     }
 

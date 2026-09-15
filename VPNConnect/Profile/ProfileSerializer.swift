@@ -51,6 +51,15 @@ public enum ProfileSerializer {
         }
         out.append("")
 
+        out.append("[Rule Set]")
+        if profile.ruleSets.isEmpty {
+            out.append("# No remote rule sets defined")
+        }
+        for set in profile.ruleSets {
+            out.append(ruleSetLine(set))
+        }
+        out.append("")
+
         out.append("[Rule]")
         if profile.rules.isEmpty {
             out.append("FINAL,DIRECT")
@@ -81,6 +90,12 @@ public enum ProfileSerializer {
         if let url = group.testURL { parts.append("url=\(quoteIfNeeded(url))") }
         if let interval = group.interval { parts.append("interval=\(interval)") }
         return "\(group.name) = " + parts.joined(separator: ", ")
+    }
+
+    static func ruleSetLine(_ set: RemoteRuleSet) -> String {
+        var line = "\(set.name) = \(set.url)"
+        if let interval = set.interval { line += ", interval=\(interval)" }
+        return line
     }
 
     static func ruleLine(_ rule: ProfileRule) -> String {
