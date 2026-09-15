@@ -137,9 +137,10 @@ struct SettingsView: View {
     private var detailPane: some View {
         paneContent
             // Invisible, but it fixes the titlebar's height for every pane — see
-            // `SettingsToolbarSpacer` for why that matters.
+            // `SettingsToolbarSpacer` for why that matters and why it is not
+            // centred in the toolbar.
             .toolbar {
-                ToolbarItem(placement: .principal) { SettingsToolbarSpacer() }
+                ToolbarItem(placement: .navigation) { SettingsToolbarSpacer() }
             }
     }
 

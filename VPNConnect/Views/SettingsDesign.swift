@@ -30,6 +30,13 @@ enum SettingsStyle {
 /// toolbar's item row for a pane whose items are short (Policies is the one
 /// that does it: 58 pt of chrome instead of 86 pt), and no item height fixes
 /// it. Measurements and the open question live in `docs/SETTINGS_LAYOUT.md`.
+///
+/// It is positioned in the *navigation* section rather than `.principal` on
+/// purpose: a `.principal` item puts an empty cluster in the middle of the
+/// toolbar, and macOS (26/Tahoe) draws a pair of hairlines around it — a
+/// visible ~1 pt wide, 30 pt tall mark in the centre of the titlebar. Any
+/// toolbar item contributes its height, so the leading section does the same
+/// job with nothing to see.
 struct SettingsToolbarSpacer: View {
     static let height: CGFloat = 30
 
