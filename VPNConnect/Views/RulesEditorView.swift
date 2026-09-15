@@ -5,6 +5,10 @@ import SwiftUI
 /// Ordered rule list for the active profile: drag to reorder, per-type value
 /// fields, inline policy picker, search filter, add/remove. Edits are saved
 /// through `ProfileManager.saveAndActivate` so the engine hot-swaps.
+///
+/// `RULE-SET` rows appear here like any other rule but are read-only: they stand
+/// for a whole downloaded list, so they are added, edited and removed in the
+/// Rule Sets pane.
 struct RulesEditorView: View {
     @ObservedObject private var bridge = ProfileModelBridge.shared
     private var manager: ProfileManager { ProfileManager.shared }
@@ -41,6 +45,9 @@ struct RulesEditorView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                } footer: {
+                    Text("First match wins. RULE-SET rules are managed in Rule Sets.")
+                        .font(.system(size: 10))
                 }
             }
             .searchable(text: $searchText, placement: .toolbar, prompt: "Filter rules")
@@ -168,14 +175,24 @@ private struct RuleRowView: View {
                 .foregroundColor(.secondary)
                 .font(.system(size: 11))
 
-            Picker("", selection: $rule.type) {
-                ForEach(RuleType.allCases, id: \.self) { type in
-                    Text(type.rawValue).tag(type)
+            // A RULE-SET rule is written by the Rule Sets pane (and can hold
+            // hundreds of imported rules), so its type is shown, not offered:
+            // converting it here would throw away the reference it stands for.
+            if rule.type == .ruleSet {
+                Text(verbatim: RuleType.ruleSet.rawValue)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .frame(width: 140, alignment: .leading)
+            } else {
+                Picker("", selection: $rule.type) {
+                    ForEach(RuleType.editorCases, id: \.self) { type in
+                        Text(type.rawValue).tag(type)
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 140, alignment: .leading)
+                .controlSize(.small)
             }
-            .labelsHidden()
-            .frame(width: 140, alignment: .leading)
-            .controlSize(.small)
 
             if rule.type == .final {
                 Text("—")
@@ -229,6 +246,7 @@ private struct RuleRowView: View {
         case .destPort: return "443, 8000-9000"
         case .srcIP: return "192.168.1.0/24"
         case .protocolRule: return "https"
+        case .ruleSet: return "RuleSetName"
         case .final: return ""
         }
     }

@@ -1,5 +1,6 @@
 import XCTest
 @testable import TurtleDiverAppGlue
+import TurtleDiverCore
 
 /// The VPN pane decides whether to light up "Unsaved changes" with
 /// `VPNConfigurationDraft.differs(from:)`, and turns the slice text area into a
@@ -196,5 +197,121 @@ extension SettingsDisplayTests {
     func testProfileSummaryDoesNotAddThousandsSeparators() {
         XCTAssertEqual(SettingsDisplay.profileSummary(proxies: 0, groups: 0, rules: 1200),
                        "0 proxies · 0 groups · 1200 rules")
+    }
+}
+
+/// The Rule Sets pane renders counts, ages and cadences; all three are derived
+/// so that a machine value never reaches `Text` raw.
+final class RuleSetDisplayTests: XCTestCase {
+
+    private func summary(
+        ruleCount: Int? = nil,
+        interval: Int? = nil,
+        fetchedAt: Date? = nil,
+        isStale: Bool = false,
+        error: String? = nil
+    ) -> RuleSetSummary {
+        RuleSetSummary(
+            name: "Ads",
+            url: "https://example.com/ads.conf",
+            interval: interval,
+            ruleCount: ruleCount,
+            fetchedAt: fetchedAt,
+            isStale: isStale,
+            error: error
+        )
+    }
+
+    func testNotDownloadedIsAWarningNotAnError() {
+        let status = SettingsDisplay.ruleSetStatus(summary())
+        XCTAssertEqual(status.title, "Not downloaded")
+        XCTAssertEqual(status.tone, .warn)
+    }
+
+    func testDownloadedShowsTheRuleCount() {
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 6152)).title, "6152 rules")
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 6152)).tone, .ok)
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 1)).title, "1 rule")
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 0)).title, "0 rules")
+    }
+
+    /// A count of 6152 must not become "6,152" through a localised `Text`.
+    func testRuleCountHasNoGroupingSeparator() {
+        XCTAssertFalse(SettingsDisplay.ruleSetStatus(summary(ruleCount: 6152)).title.contains(","))
+    }
+
+    func testStaleOutranksTheCountButNotAFailure() {
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 10, interval: 3600, isStale: true)).title,
+                       "Stale")
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 10, error: "HTTP 500")).title, "Error")
+        XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 10, error: "HTTP 500")).tone, .error)
+    }
+
+    func testAgeIsCoarse() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        func age(_ seconds: TimeInterval) -> String {
+            SettingsDisplay.ruleSetAge(summary(fetchedAt: now.addingTimeInterval(-seconds)), now: now)
+        }
+        XCTAssertEqual(age(0), "Updated just now")
+        XCTAssertEqual(age(89), "Updated just now")
+        XCTAssertEqual(age(120), "Updated 2 min ago")
+        XCTAssertEqual(age(3600 * 5), "Updated 5 h ago")
+        XCTAssertEqual(age(86400), "Updated 1 day ago")
+        XCTAssertEqual(age(86400 * 3), "Updated 3 days ago")
+    }
+
+    /// A clock that moved backwards must not produce "-4 h ago".
+    func testAFutureTimestampReadsAsJustNow() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(SettingsDisplay.ruleSetAge(summary(fetchedAt: now.addingTimeInterval(600)), now: now),
+                       "Updated just now")
+    }
+
+    func testNeverDownloadedSaysSo() {
+        XCTAssertEqual(SettingsDisplay.ruleSetAge(summary()), "Never downloaded")
+    }
+
+    func testRefreshCadenceIsWords() {
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: nil), "Refreshes when you ask")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 0), "Refreshes when you ask")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 3600), "Refreshes every hour")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 7200), "Refreshes every 2 hours")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 86400), "Refreshes every day")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 604800), "Refreshes every 7 days")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 900), "Refreshes every 15 minutes")
+        XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 45), "Refreshes every 45 s")
+    }
+}
+
+/// The picker offers four cadences; a profile written by hand may hold anything.
+final class RuleSetIntervalTests: XCTestCase {
+
+    func testManualMeansNoInterval() {
+        XCTAssertNil(RuleSetInterval.manual.seconds)
+        XCTAssertEqual(RuleSetInterval.daily.seconds, 86400)
+    }
+
+    func testNilAndNonPositiveMapToManual() {
+        XCTAssertEqual(RuleSetInterval.closest(to: nil), .manual)
+        XCTAssertEqual(RuleSetInterval.closest(to: 0), .manual)
+        XCTAssertEqual(RuleSetInterval.closest(to: -60), .manual)
+    }
+
+    func testKnownIntervalsRoundTrip() {
+        for choice in RuleSetInterval.allCases {
+            XCTAssertEqual(RuleSetInterval.closest(to: choice.seconds), choice)
+        }
+    }
+
+    func testHandWrittenIntervalsSnapToTheNearestChoice() {
+        XCTAssertEqual(RuleSetInterval.closest(to: 7200), .hourly)
+        XCTAssertEqual(RuleSetInterval.closest(to: 90000), .daily)
+        XCTAssertEqual(RuleSetInterval.closest(to: 999_999), .weekly)
+    }
+
+    func testEveryChoiceHasATitle() {
+        for choice in RuleSetInterval.allCases {
+            XCTAssertFalse(choice.title.isEmpty)
+        }
     }
 }

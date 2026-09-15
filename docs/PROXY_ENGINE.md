@@ -170,7 +170,7 @@ not), and the pure display helpers that keep machine values out of
 `LocalizedStringKey` (`SettingsDisplay.listener(host:port:)` never renders
 `Optional(…)`, `abbreviateHome(_:home:)` is boundary-safe, `profileSummary`
 pluralises, `connectionStatus(_:)` shortens stored statuses so a pill cannot
-wrap mid-word). Total: **354 tests**.
+wrap mid-word). Total: **428 tests**.
 
 ### System-proxy ownership vs. a legacy PAC
 
@@ -210,6 +210,40 @@ The legacy PAC *feature* itself (the `python3 -m http.server` on port 8765, the
   PAC, leaving other PACs alone) once, on a background queue, guarded by the
   `legacyPACCleaned` default. `EngineController.awaitLegacyPACCleanup()` awaits
   it, which is how the app tests assert it stays off the main thread.
+
+## Remote rule sets
+
+`[Rule Set]` declarations (`VPNConnect/Profile/RuleSet.swift`, model/parse) plus
+`VPNConnect/Rules/RuleSetStore.swift` (transport, cache, staleness) let a rule
+reference a downloaded list:
+
+```
+[Rule Set]
+Ads = https://example.com/ads.conf, interval=86400
+[Rule]
+RULE-SET,Ads,REJECT
+```
+
+- `RuleMatcher.expand(_:ruleSets:declared:)` splices a cached list in at the
+  position of the reference; the reference's policy wins and each expanded rule
+  is stamped with its set name (`ProfileRule.ruleSet`) for provenance.
+- A reference to a set with no cached copy expands to **nothing**, and the set is
+  reported in `RuleMatcher.unresolvedRuleSetNames` — a missing list never
+  silently becomes a catch-all.
+- `RuleSetStore.refresh(_:)` is HTTPS-only, sends conditional requests
+  (`If-None-Match` / `If-Modified-Since`), enforces an 8 MB body cap, UTF-8, and
+  `RuleSetParser.maxRules = 100_000`, and keeps the last good copy on any
+  failure. The body is written before the sidecar, so a crash cannot leave an
+  entry that promises rules which are not there; both files are mode `0600`.
+- The cache file name is `<slug>-<FNV-1a-64(url)>.rules`; the sidecar stores the
+  URL, so a changed URL can never serve the old list.
+- `EngineController.reloadRuleSets(refreshStale:)` reads the cache off the main
+  thread, reloads the matcher, rebuilds the pane's summaries and — only when
+  `ruleSetAutoRefresh` is on (default **off**) — refreshes sets that declare an
+  interval.
+
+Covered by `RuleSetTests` (35), `RuleSetStoreTests` (20) and
+`RuleSetControllerTests` (6).
 
 ## PAC → rules import
 

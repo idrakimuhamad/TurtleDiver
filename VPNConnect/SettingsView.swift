@@ -155,7 +155,7 @@ struct SettingsView: View {
             HistoryView()
         case .advanced:
             AdvancedView()
-        case .dashboard, .policies, .rules, .routing, .profiles:
+        case .dashboard, .policies, .rules, .routing, .ruleSets, .profiles:
             // These panes own their tables and toolbars; they only need the
             // shared header above them.
             SettingsListPane(title: item.title, subtitle: item.subtitle) {
@@ -164,6 +164,7 @@ struct SettingsView: View {
                 case .policies: PoliciesView()
                 case .rules: RulesEditorView()
                 case .routing: RoutingView()
+                case .ruleSets: RuleSetsView()
                 default: ProfilesView()
                 }
             }

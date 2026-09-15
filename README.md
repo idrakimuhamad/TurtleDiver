@@ -21,6 +21,11 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   friendly list (quick-add, inline edit, drag-reorder), plus a **PAC import
   wizard** that converts an existing `FindProxyForURL` script into rules and
   proxy policies
+- **Rule Sets** (1.5.0): subscribe to a remote rule list over HTTPS and
+  reference it from a rule (`RULE-SET,Ads,REJECT`); the list is downloaded once,
+  cached at mode `0600`, spliced in at the reference's position, and shown with
+  its source URL, rule count, age and skipped-line count. Refresh is manual
+  unless a set declares an `interval`
 - **Main window** (1.4.0): one window in two states — compact controls by
   default (status, session timer, connect button, the four switches) and a
   **Show Dashboard** link that expands it in place into the live dashboard
@@ -29,7 +34,8 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   when you switch the proxy engine on. The VPN/engine/system-proxy switches sit
   in the main window, so the everyday loop never needs Settings
 - **Settings** (1.4.0): a native sidebar-and-detail window — **Connection**
-  (VPN, Profiles), **Proxy Engine** (Dashboard, Policies, Rules, Routing),
+  (VPN, Profiles), **Proxy Engine** (Dashboard, Policies, Rules, Routing,
+  Rule Sets),
   **Monitoring** (History) and **Application** (Appearance, Advanced) — with a
   searchable sidebar, a remembered pane, and an **Advanced** pane for engine
   ports, log files, storage locations and resetting the app's settings
@@ -123,7 +129,7 @@ subtitle and keywords.
 | Group | Panes |
 | --- | --- |
 | Connection | **VPN** (credentials, software token, split tunneling), **Profiles** |
-| Proxy Engine | **Dashboard** (engine + system-proxy switches, policy health, requests), **Policies**, **Rules**, **Routing** |
+| Proxy Engine | **Dashboard** (engine + system-proxy switches, policy health, requests), **Policies**, **Rules**, **Routing**, **Rule Sets** |
 | Monitoring | **History** (past connection attempts, with each attempt's log) |
 | Application | **Appearance**, **Advanced** |
 
@@ -170,6 +176,41 @@ first match wins, with the active profile's `FINAL` as catch-all. *Import PAC*
 in the toolbar pastes or loads a `.pac` file, previews the proxies, groups,
 rules and diagnostics it would create, and applies them to the active profile.
 
+### Rule Sets (1.5.0)
+
+Settings → **Rule Sets** subscribes to a remote rule list — the Surge-style
+`RULE-SET` feature, without the feed-reader baggage:
+
+```ini
+[Rule Set]
+Ads = https://example.com/ads.conf, interval=86400
+
+[Rule]
+RULE-SET,Ads,REJECT
+```
+
+The pane adds, edits and removes those declarations, and owns the one button
+that touches the network. A downloaded list is spliced into the rule list *at
+the position of the reference*, so a `DOMAIN` rule written above
+`RULE-SET,Ads,…` still wins, and the policy comes from the reference (never
+from the list). Each row shows its source URL, rule count, age and how many
+lines were skipped as unparseable.
+
+Supply chain rules, because a remote list decides where traffic goes:
+
+- **https only** — an `http://` or `file://` URL is refused, and no request
+  leaves the machine.
+- **8 MB cap**, UTF-8 only, `maxRules = 100_000`; `FINAL` and nested `RULE-SET`
+  lines are skipped, not honoured.
+- **Never executed** — the body is parsed as text, exactly like a local profile.
+- **Refresh is opt-in** (`ruleSetAutoRefresh`, off by default): only sets that
+  declare an `interval` are fetched on their own, and only on launch. Every
+  download is otherwise your idea.
+- **A failed refresh keeps the last good copy**, and a `RULE-SET` reference with
+  no cached list stays **inert** — it does not silently fall back to its policy.
+- Cache files live in `~/Library/Application Support/TurtleDiver/RuleSets/` at
+  mode `0600`, named after the URL hash; changing the URL invalidates the cache.
+
 ### Migrating from the old PAC mode
 
 The PAC-based proxy mode (`Use Proxy`, Settings → *Proxy (PAC)*, a bundled
@@ -204,6 +245,8 @@ The application consists of several key components:
 - **Profile / ProfileManager**: Surge-compatible `.conf` profiles under
   `~/Library/Application Support/TurtleDiver/Profiles`
 - **Engine**: HTTP and SOCKS5 listeners, relay, rule matching
+- **RuleSetStore**: remote `[Rule Set]` download/cache (HTTPS only, 8 MB cap,
+  keeps the last good copy, `0600` files)
 - **System**: `SystemProxyManager` (snapshot/apply/restore) and the vpn-slice
   DIRECT-rule overlay
 
@@ -310,7 +353,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 354 tests (core engine + app glue)
+swift test          # 428 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

@@ -6,7 +6,7 @@ release.
 
 ## 0. Setup
 
-- [ ] `swift test` passes (354 tests green).
+- [ ] `swift test` passes (428 tests green).
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
 
@@ -48,13 +48,33 @@ release.
       `[HANDLER]` blue, stderr lines grey; a line containing *error* is red and
       *warning* amber — colour follows the line, not the stream.
 
+## 0b2. Rule Sets (1.5.0)
+
+- [ ] Settings → **Rule Sets**: add `Ads = <an https URL>` with *Only when I ask*;
+      the row appears as `Not downloaded` and **nothing is fetched**.
+- [ ] Press its ↻: a progress spinner, then a rule count pill and
+      *Updated just now*; `~/Library/Application Support/TurtleDiver/RuleSets/`
+      holds `<slug>-<hash>.rules` + `.json`, both mode `0600`
+      (`ls -l@`).
+- [ ] Add `RULE-SET,Ads,REJECT` in **Rules** (it renders as a read-only type) →
+      a host in the list is rejected, a host above it in `[Rule]` still wins.
+- [ ] Delete the downloaded copy (⋯ → *Remove downloaded copy*) → the reference
+      matches nothing and the row says `Not downloaded`; the engine keeps
+      working, nothing falls back to `REJECT` globally.
+- [ ] Break the URL (or point it at an `http://` host) → Refresh reports an
+      error pill, the last good copy is still used, and no request is made for
+      the `http` case.
+- [ ] *Delete Rule Set* (⋯) warns how many `RULE-SET` rules it will take with it,
+      then removes both the declaration and its cache.
+- [ ] *Refresh automatically* stays **off** across a relaunch (it is opt-in).
+
 ## 0c. Settings window (1.4.0)
 
 - [ ] ⌘, opens Settings as a **sidebar-and-detail** window (860×620 content,
       min 800×560): searchable sidebar, pane title + description on the left of
       the detail, no push-navigation.
 - [ ] The sidebar groups are Connection (VPN, Profiles) / Proxy Engine
-      (Dashboard, Policies, Rules, Routing) / Monitoring (History) /
+      (Dashboard, Policies, Rules, Routing, Rule Sets) / Monitoring (History) /
       Application (Appearance, Advanced); the footer shows the engine dot,
       `v1.4.0` and the active profile.
 - [ ] The sidebar can hold its width: drag the divider as far left as it goes

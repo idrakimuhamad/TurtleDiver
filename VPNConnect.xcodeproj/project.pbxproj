@@ -24,6 +24,9 @@
 		7C0FFEE20000000000000007 /* SettingsDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000017 /* SettingsDraft.swift */; };
 		7C0FFEE20000000000000008 /* SettingsDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000018 /* SettingsDesign.swift */; };
 		7C0FFEE20000000000000009 /* AdvancedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000019 /* AdvancedView.swift */; };
+		7C0FFEE80000000000000001 /* RuleSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000011 /* RuleSet.swift */; };
+		7C0FFEE80000000000000002 /* RuleSetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000012 /* RuleSetStore.swift */; };
+		7C0FFEE80000000000000003 /* RuleSetsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000013 /* RuleSetsView.swift */; };
 		7C0FFEE30000000000000002 /* VPNRuleGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */; };
 		1A2B3C7E1234567890ABCDEF /* EngineController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C7F1234567890ABCDEF /* EngineController.swift */; };
 		7C0FFEE10000000000000001 /* IPAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000011 /* IPAddress.swift */; };
@@ -60,6 +63,9 @@
 		7C0FFEE20000000000000017 /* SettingsDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDraft.swift; sourceTree = "<group>"; };
 		7C0FFEE20000000000000018 /* SettingsDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDesign.swift; sourceTree = "<group>"; };
 		7C0FFEE20000000000000019 /* AdvancedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvancedView.swift; sourceTree = "<group>"; };
+		7C0FFEE80000000000000011 /* RuleSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSet.swift; sourceTree = "<group>"; };
+		7C0FFEE80000000000000012 /* RuleSetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSetStore.swift; sourceTree = "<group>"; };
+		7C0FFEE80000000000000013 /* RuleSetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSetsView.swift; sourceTree = "<group>"; };
 		7C0FFEE30000000000000011 /* SystemProxyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyManager.swift; sourceTree = "<group>"; };
 		7C0FFEE50000000000000011 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		7C0FFEE50000000000000012 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
@@ -159,6 +165,7 @@
 				7C0FFEE00000000000000015 /* TCPClient.swift */,
 				7C0FFEE00000000000000016 /* LatencyTester.swift */,
 				7C0FFEE00000000000000017 /* PolicyStore.swift */,
+				7C0FFEE80000000000000011 /* RuleSet.swift */,
 			);				path = Profile;
 				sourceTree = "<group>";
 			};
@@ -170,6 +177,7 @@
 				7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */,
 				7C0FFEE10000000000000014 /* RuleMatcher.swift */,
 				7C0FFEE10000000000000015 /* PACRuleConverter.swift */,
+				7C0FFEE80000000000000012 /* RuleSetStore.swift */,
 			);
 			path = Rules;
 			sourceTree = "<group>";
@@ -205,6 +213,7 @@
 				7C0FFEE50000000000000015 /* RoutingView.swift */,
 				7C0FFEE50000000000000016 /* MainWindowLayout.swift */,
 				7C0FFEE50000000000000017 /* RequestsCard.swift */,
+				7C0FFEE80000000000000013 /* RuleSetsView.swift */,
 				7C0FFEE20000000000000016 /* SettingsCatalog.swift */,
 				7C0FFEE20000000000000017 /* SettingsDraft.swift */,
 				7C0FFEE20000000000000018 /* SettingsDesign.swift */,
@@ -322,6 +331,9 @@
 				7C0FFEE50000000000000005 /* RoutingView.swift in Sources */,
 				7C0FFEE50000000000000006 /* MainWindowLayout.swift in Sources */,
 				7C0FFEE50000000000000007 /* RequestsCard.swift in Sources */,
+				7C0FFEE80000000000000001 /* RuleSet.swift in Sources */,
+				7C0FFEE80000000000000002 /* RuleSetStore.swift in Sources */,
+				7C0FFEE80000000000000003 /* RuleSetsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -457,7 +469,7 @@
 				CODE_SIGN_ENTITLEMENTS = VPNConnect/VPNConnect.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = KT7QU923S8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -470,7 +482,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.5.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.idraki.turtle.vpn;
 				PRODUCT_NAME = TurtleDiver;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -487,7 +499,7 @@
 				CODE_SIGN_ENTITLEMENTS = VPNConnect/VPNConnect.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEVELOPMENT_TEAM = KT7QU923S8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -500,7 +512,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.0;
+				MARKETING_VERSION = 1.5.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.idraki.turtle.vpn;
 				PRODUCT_NAME = TurtleDiver;
 				SWIFT_EMIT_LOC_STRINGS = YES;

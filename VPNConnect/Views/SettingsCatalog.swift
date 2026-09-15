@@ -15,6 +15,7 @@ public enum SettingsRoute: String, Hashable, CaseIterable, Identifiable, Sendabl
     case policies
     case rules
     case routing
+    case ruleSets
     case history
     case appearance
     case advanced
@@ -125,6 +126,16 @@ public enum SettingsCatalog {
             tint: .green,
             group: .engine,
             keywords: ["quick", "add", "domain", "subnet", "ip", "pac", "import", "assign"]
+        ),
+        SettingsItem(
+            route: .ruleSets,
+            title: "Rule Sets",
+            subtitle: "Remote rule lists — download them once, then use them like local rules",
+            symbol: "arrow.down.circle.fill",
+            tint: .orange,
+            group: .engine,
+            keywords: ["remote", "subscribe", "subscription", "url", "list", "download",
+                       "refresh", "interval", "cache", "rule-set", "ruleset"]
         ),
         SettingsItem(
             route: .history,

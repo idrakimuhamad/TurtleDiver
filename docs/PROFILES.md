@@ -131,7 +131,40 @@ last. Supported types:
 | `DEST-PORT` | port, range, list | e.g. `443`, `5000-6000`, `80,443,8443`. |
 | `SRC-IP` | CIDR | Client address. |
 | `PROTOCOL` | `http`/`https`/… | Heuristic: well-known ports map to their canonical service until listeners expose the negotiated protocol. |
+| `RULE-SET` | rule-set name | Expands to a downloaded remote list (see below). Managed in Settings → Rule Sets; read-only in the Rules editor. |
 | `FINAL` | — | `FINAL,policy` only. |
+
+### Remote rule sets
+
+```ini
+[Rule Set]
+Ads = https://example.com/ads.conf, interval=86400
+```
+
+`Name = url[, interval=N]` — the name is referenced from a rule, the URL must be
+`https`, and `interval` (seconds, omitted = manual refresh only) is the opt-in
+cadence for the automatic refresh. The list itself is a rule list **without** a
+section header, one `TYPE,value[,policy][,no-resolve]` per line:
+
+```
+# comments (#, ;, //) and blank lines are ignored
+DOMAIN-SUFFIX,doubleclick.net
+IP-CIDR,203.0.113.0/24,no-resolve
+127.0.0.1 localhost
+```
+
+- **The reference's policy wins.** `RULE-SET,Ads,REJECT` rejects every host in
+  `Ads`, whatever policies the list mentions — but a per-member policy is kept
+  when the reference is written without one.
+- **Order is preserved.** The list is spliced in at the position of the
+  reference, so a rule written above it still shadows it.
+- **Unresolved references are inert.** If the list has never been downloaded
+  (or its cache was removed), `RULE-SET,Ads,REJECT` matches nothing — it does
+  not become a catch-all `REJECT`.
+- `FINAL` and nested `RULE-SET` lines inside a downloaded list are skipped and
+  counted, as are lines that do not parse.
+- Validation rejects duplicate names, non-`https` URLs, and references to
+  undeclared sets.
 
 ### Matching semantics
 
