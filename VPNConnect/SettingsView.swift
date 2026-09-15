@@ -62,13 +62,16 @@ struct SettingsView: View {
                     Section {
                         ForEach(SettingsCatalog.items(in: group)) { sidebarRow($0) }
                     } header: {
+                        // `listSectionSpacing` is iOS-only; padding the header
+                        // is what gives the groups room to breathe on macOS.
                         Text(group.title)
+                            .padding(.top, 10)
                     }
                 }
             }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 196, ideal: 214, max: 264)
+        .navigationSplitViewColumnWidth(min: 208, ideal: 228, max: 280)
         .searchable(text: $query, placement: .sidebar, prompt: "Search settings")
         .safeAreaInset(edge: .bottom, spacing: 0) { footer }
     }
@@ -76,10 +79,11 @@ struct SettingsView: View {
     private func sidebarRow(_ item: SettingsItem) -> some View {
         Label {
             Text(item.title)
+                .padding(.leading, 1)
         } icon: {
-            SettingsIconChip(symbol: item.symbol, tint: item.tint)
+            SettingsIconChip(symbol: item.symbol, tint: item.tint, size: 21)
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, 3)
         .tag(item.route)
     }
 
@@ -101,8 +105,8 @@ struct SettingsView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
         }
         .background(.bar)
     }
