@@ -386,4 +386,112 @@ final class RuleSetTests: XCTestCase {
         )
         XCTAssertEqual(profile.validate(), [])
     }
+
+    // MARK: - Referencing from the Rule Sets pane
+
+    func testSetReferenceInsertsBeforeFinal() {
+        var profile = Profile(name: "T", rules: [
+            rule("a.com"),
+            ProfileRule(type: .final, value: "", policy: "DIRECT"),
+        ])
+        XCTAssertTrue(profile.setRuleSetReference(named: "Ads", policy: "REJECT"))
+        XCTAssertEqual(profile.rules.map(\.type), [.domain, .ruleSet, .final])
+        XCTAssertEqual(profile.rules[1].value, "Ads")
+        XCTAssertEqual(profile.rules[1].policy, "REJECT")
+    }
+
+    func testSetReferenceAppendsWhenThereIsNoFinal() {
+        var profile = Profile(name: "T", rules: [rule("a.com")])
+        XCTAssertTrue(profile.setRuleSetReference(named: "Ads", policy: "DIRECT"))
+        XCTAssertEqual(profile.rules.map(\.value), ["a.com", "Ads"])
+    }
+
+    func testSetReferenceReplacesThePolicyAndDropsDuplicates() {
+        var profile = Profile(name: "T", rules: [
+            ProfileRule(type: .ruleSet, value: "Ads", policy: "DIRECT"),
+            rule("a.com"),
+            ProfileRule(type: .ruleSet, value: "ads", policy: "DIRECT"),
+            ProfileRule(type: .final, value: "", policy: "DIRECT"),
+        ])
+        XCTAssertTrue(profile.setRuleSetReference(named: "Ads", policy: "REJECT"))
+        let references = profile.rules.filter { $0.type == .ruleSet }
+        XCTAssertEqual(references.count, 1, "a set means one rule")
+        XCTAssertEqual(references[0].policy, "REJECT")
+        XCTAssertEqual(profile.rules.map(\.type), [.ruleSet, .domain, .final])
+    }
+
+    func testSetReferenceIsIdempotent() {
+        var profile = Profile(name: "T", rules: [
+            ProfileRule(type: .ruleSet, value: "Ads", policy: "REJECT"),
+        ])
+        XCTAssertFalse(profile.setRuleSetReference(named: "Ads", policy: "REJECT"),
+                       "an unchanged reference must not rewrite the profile")
+        XCTAssertFalse(profile.setRuleSetReference(named: "ads", policy: "REJECT"),
+                       "the existing reference is matched case-insensitively")
+        XCTAssertEqual(profile.rules[0].value, "Ads", "so the spelling is left alone")
+        XCTAssertTrue(profile.setRuleSetReference(named: "ads", policy: "DIRECT"))
+        XCTAssertEqual(profile.rules[0].policy, "DIRECT")
+    }
+
+    func testSetReferenceRemovesWithNil() {
+        var profile = Profile(name: "T", rules: [
+            ProfileRule(type: .ruleSet, value: "Ads", policy: "REJECT"),
+            rule("a.com"),
+        ])
+        XCTAssertTrue(profile.setRuleSetReference(named: "Ads", policy: nil))
+        XCTAssertEqual(profile.rules.map(\.value), ["a.com"])
+        XCTAssertFalse(profile.setRuleSetReference(named: "Ads", policy: nil))
+    }
+
+    // MARK: - Failure messages
+
+    /// A `URLError` reaches the store as a bridged `NSError`; interpolating one
+    /// prints the whole `UserInfo` dictionary into a settings row.
+    func testTransportErrorIsDescribedInOneSentence() {
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.cannotFindHost)), "Could not find that host")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.dnsLookupFailed)), "Could not find that host")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.notConnectedToInternet)), "No internet connection")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.timedOut)), "The server took too long to answer")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.cannotConnectToHost)), "Could not connect to that host")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.secureConnectionFailed)),
+                       "Could not establish a secure connection")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.httpTooManyRedirects)),
+                       "The server redirected too many times")
+        XCTAssertEqual(RuleSetStoreError.describe(URLError(.badServerResponse)),
+                       "Could not download the list (network error \(URLError.Code.badServerResponse.rawValue))")
+    }
+
+    func testTransportErrorNeverLeaksTheErrorDump() {
+        let text = RuleSetStoreError.describe(URLError(.cannotFindHost))
+        XCTAssertFalse(text.contains("UserInfo"))
+        XCTAssertFalse(text.contains("Domain="))
+        XCTAssertLessThan(text.count, 80, "it has to fit on one line in the row")
+    }
+
+    func testOtherErrorsKeepTheirOwnDescription() {
+        XCTAssertEqual(RuleSetStoreError.describe(RuleSetStoreError.transport("empty response body")),
+                       "empty response body")
+        XCTAssertEqual(RuleSetStoreError.describe(RuleSetStoreError.notUTF8),
+                       "Rule set is not valid UTF-8 text")
+    }
+
+    // MARK: - Summary → cache identity
+
+    /// The pane holds summaries, not declarations; dropping a cached copy needs
+    /// the name and the URL, which is what the cache file name is made of.
+    func testSummaryRebuildsTheCacheIdentity() {
+        let set = RemoteRuleSet(name: "Ads", url: "https://example.com/ads.list", interval: 3600)
+        let summary = RuleSetSummary(
+            name: set.name,
+            url: set.url,
+            interval: set.interval,
+            ruleCount: 12,
+            skippedCount: 1,
+            fetchedAt: Date(),
+            isStale: false,
+            error: nil
+        )
+        XCTAssertEqual(summary.declaration, set)
+        XCTAssertEqual(summary.declaration.cacheFileName, set.cacheFileName)
+    }
 }

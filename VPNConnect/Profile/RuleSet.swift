@@ -332,6 +332,14 @@ public struct RuleSetSummary: Equatable, Sendable, Identifiable {
 
     public var id: String { name }
     public var isDownloaded: Bool { ruleCount != nil }
+
+    /// The cache identity behind this row. The cache file name is derived from
+    /// the name and the URL, which the summary carries, so a caller that only
+    /// holds a summary can still drop (or re-fetch) the right files.
+    public var declaration: RemoteRuleSet {
+        RemoteRuleSet(name: name, url: url, interval: interval)
+    }
+
     /// Automatic refresh is off unless the set declares an interval.
     public var refreshesAutomatically: Bool { interval != nil }
 

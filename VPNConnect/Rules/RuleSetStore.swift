@@ -94,7 +94,7 @@ public struct URLSessionRuleSetTransport: RuleSetTransport {
         task.resume()
         if semaphore.wait(timeout: .now() + timeout + 5) == .timedOut {
             task.cancel()
-            throw RuleSetStoreError.transport("timed out after \(Int(timeout))s")
+            throw RuleSetStoreError.transport("The server took too long to answer (over \(Int(timeout))s)")
         }
         guard let outcome else { throw RuleSetStoreError.transport("no response") }
         return try outcome.get()
@@ -128,6 +128,43 @@ public enum RuleSetStoreError: LocalizedError, Equatable {
             return detail
         case .ruleLimitExceeded(let limit):
             return "Rule set has more than \(limit) rules; keeping the last good copy"
+        }
+    }
+
+    /// One short sentence for a failed request.
+    ///
+    /// A `URLError` arrives here as a bridged `NSError`, so interpolating it
+    /// prints the whole `UserInfo` dictionary — `_kCFStreamErrorDomainKey`,
+    /// session-task UUIDs and all. That is not something to put in a settings
+    /// row, so the interesting codes get a sentence of their own and the rest
+    /// get the code.
+    public static func describe(_ error: Error) -> String {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else {
+            return (error as? LocalizedError)?.errorDescription ?? "Could not download the list"
+        }
+        switch URLError.Code(rawValue: nsError.code) {
+        case .cannotFindHost, .dnsLookupFailed:
+            return "Could not find that host"
+        case .notConnectedToInternet:
+            return "No internet connection"
+        case .networkConnectionLost:
+            return "The network connection was lost"
+        case .timedOut:
+            return "The server took too long to answer"
+        case .cannotConnectToHost:
+            return "Could not connect to that host"
+        case .secureConnectionFailed, .serverCertificateUntrusted,
+             .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+             .serverCertificateHasUnknownRoot, .clientCertificateRejected,
+             .clientCertificateRequired:
+            return "Could not establish a secure connection"
+        case .unsupportedURL, .badURL:
+            return "That is not a usable URL"
+        case .httpTooManyRedirects:
+            return "The server redirected too many times"
+        default:
+            return "Could not download the list (network error \(nsError.code))"
         }
     }
 }
@@ -268,7 +305,7 @@ public struct RuleSetStore: Sendable {
                 lastModified: previous?.lastModified
             ))
         } catch {
-            return .unavailable(message: (error as? LocalizedError)?.errorDescription ?? "\(error)")
+            return .unavailable(message: RuleSetStoreError.describe(error))
         }
 
         if let finalURL = response.finalURL, finalURL.scheme?.lowercased() != "https" {

@@ -6,7 +6,7 @@ release.
 
 ## 0. Setup
 
-- [ ] `swift test` passes (428 tests green).
+- [ ] `swift test` passes (440 tests green).
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
 
@@ -56,17 +56,31 @@ release.
       *Updated just now*; `~/Library/Application Support/TurtleDiver/RuleSets/`
       holds `<slug>-<hash>.rules` + `.json`, both mode `0600`
       (`ls -l@`).
-- [ ] Add `RULE-SET,Ads,REJECT` in **Rules** (it renders as a read-only type) →
-      a host in the list is rejected, a host above it in `[Rule]` still wins.
+- [ ] Point the row at a policy: ⋯ → *Use in rules* → `REJECT` (the submenu
+      ticks the policy that is in force; *Not used* un-points it). The profile
+      gains `RULE-SET,Ads,REJECT` just above `FINAL`, the row loses its
+      `NOT USED` pill, and a host in the list is rejected (through the engine:
+      `curl -x http://127.0.0.1:6152 http://x-txtagstore.test/` → *403
+      Forbidden*, body `rejected by rule`) while a host above it in `[Rule]`
+      still wins (add `DIRECT` for the same host at the top of `[Rule]` → the
+      request goes out instead). Re-choosing a policy must **not move the
+      rule**: precedence is positional.
 - [ ] Delete the downloaded copy (⋯ → *Remove downloaded copy*) → the reference
       matches nothing and the row says `Not downloaded`; the engine keeps
       working, nothing falls back to `REJECT` globally.
-- [ ] Break the URL (or point it at an `http://` host) → Refresh reports an
-      error pill, the last good copy is still used, and no request is made for
-      the `http` case.
-- [ ] *Delete Rule Set* (⋯) warns how many `RULE-SET` rules it will take with it,
-      then removes both the declaration and its cache.
-- [ ] *Refresh automatically* stays **off** across a relaunch (it is opt-in).
+- [ ] Retarget a downloaded set (⋯ → *Edit…*, change the URL) → the old body is
+      deleted at once (the copy caches under a new name), the row says
+      `Not downloaded` until you press ↻, and no stale rules match meanwhile.
+- [ ] Break the URL (⋯ → *Edit…* → a host that does not exist, then ↻) → a red
+      `ERROR` pill and **one sentence** (*Could not find that host*), never an
+      `NSError` dump. A failed refresh of an unchanged URL keeps the copy it
+      already had (`RuleSetStoreTests.testFailedRefreshKeepsTheLastGoodCopy`),
+      and a URL that is not `https` is refused before any request is made.
+- [ ] *Delete Rule Set* (⋯) warns how many `RULE-SET` rules it will take with it
+      (0 → *The downloaded list is deleted too.*), then removes the declaration,
+      the rule **and both cache files** (`ls -A` on the cache directory).
+- [ ] *Refresh automatically* stays **off** across a relaunch (it is opt-in, and
+      no set declares an interval until you give it one).
 
 ## 0c. Settings window (1.4.0)
 

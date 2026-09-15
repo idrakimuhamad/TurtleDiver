@@ -145,7 +145,7 @@ final class RuleSetControllerTests: XCTestCase {
         let (controller, _) = makeController(sets: [set], store: store, httpPort: 16_172, socksPort: 16_173)
         await settle { controller.engine.matcher.expandedRuleCount == 2 }
 
-        controller.removeRuleSetCache(named: "Ads")
+        controller.removeRuleSetCache(for: set)
         await settle { controller.engine.matcher.expandedRuleCount == 1 }
 
         XCTAssertEqual(controller.engine.matcher.unresolvedRuleSetNames, ["Ads"])
@@ -174,6 +174,33 @@ final class RuleSetControllerTests: XCTestCase {
         XCTAssertTrue(controller.engine.matcher.unresolvedRuleSetNames.isEmpty)
         XCTAssertTrue(manager.activeProfile.validate().isEmpty)
         XCTAssertTrue(controller.ruleSetSummaries.isEmpty)
+    }
+
+    /// The pane's Delete removes the declaration *and* then asks for the cache
+    /// to go, in that order. A name lookup at that point finds nothing — the
+    /// declaration is already gone — so the controller has to be handed the set
+    /// itself, or the downloaded body survives a deletion that promised to
+    /// remove it.
+    func testDeletingTheDeclarationAlsoDropsItsCachedCopy() async throws {
+        let set = makeSet()
+        let store = RuleSetStore(directory: tempDir, transport: StubRuleSetTransport(body: "DOMAIN-SUFFIX,ads.example"))
+        _ = try store.refresh(set)
+
+        let (controller, manager) = makeController(sets: [set], store: store, httpPort: 16_202, socksPort: 16_203)
+        await settle { controller.engine.matcher.expandedRuleCount == 2 }
+        XCTAssertNotNil(store.cachedRules(for: set))
+
+        // Exactly what `RuleSetsView.delete(_:)` does, in its order.
+        var profile = manager.activeProfile
+        profile.ruleSets.removeAll { $0.id == set.id }
+        profile.rules.removeAll { $0.type == .ruleSet }
+        _ = manager.saveAndActivate(profile)
+        controller.removeRuleSetCache(for: set)
+
+        await settle { controller.ruleSetSummaries.isEmpty }
+        XCTAssertNil(store.cachedRules(for: set), "the dialog promises the downloaded list goes too")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.bodyURL(for: set).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.entryURL(for: set).path))
     }
 
     /// An unrelated edit must not quietly disable every rule set. The pane

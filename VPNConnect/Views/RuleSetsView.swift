@@ -59,8 +59,9 @@ struct RuleSetsView: View {
                     }
                 }
                 // A retargeted set caches under a new file; the old body would
-                // otherwise linger forever.
-                if edited.url != set.url { controller.removeRuleSetCache(named: edited.name) }
+                // otherwise linger forever. `set` is the pre-edit value, so this
+                // is the body that is now unreachable.
+                if edited.url != set.url { controller.removeRuleSetCache(for: set) }
                 controller.reloadRuleSets(refreshStale: false)
             }
         }
@@ -72,10 +73,7 @@ struct RuleSetsView: View {
             Button("Delete Rule Set", role: .destructive) { delete(set) }
             Button("Cancel", role: .cancel) { removing = nil }
         } message: { set in
-            let count = referencingRules(set).count
-            Text(count == 0
-                 ? "The downloaded list is deleted too."
-                 : "Its \(count) RULE-SET \(count == 1 ? "rule" : "rules") will be removed from [Rule] as well, and the downloaded list is deleted.")
+            Text(verbatim: SettingsDisplay.ruleSetDeleteMessage(referencing: referencingRules(set).count))
         }
         .onAppear { controller.reloadRuleSets() }
     }
@@ -118,7 +116,7 @@ struct RuleSetsView: View {
                 .font(.system(size: 12, weight: .regular))
                 .textCase(.uppercase)
         } footer: {
-            Text("https only — the list decides where your traffic goes, so it is never fetched over a plain connection, never executed, and refused above 8 MB. Adding a set does not download it.")
+            Text("https only, never run as code, refused above 8 MB. Adding a set does not download it.")
                 .font(.system(size: 10))
         }
     }
@@ -134,9 +132,12 @@ struct RuleSetsView: View {
                     RuleSetRowView(
                         summary: summary,
                         isRefreshing: controller.ruleSetsRefreshing.contains(summary.name),
+                        policyNames: manager.activeProfile.allPolicyNames,
+                        referencedPolicy: referencingRules(named: summary.name).first?.policy,
                         onRefresh: { controller.refreshRuleSet(named: summary.name) },
                         onEdit: { editing = declaredSet(named: summary.name) },
-                        onRemoveCache: { controller.removeRuleSetCache(named: summary.name) },
+                        onRemoveCache: { controller.removeRuleSetCache(for: summary.declaration) },
+                        onReference: { policy in reference(named: summary.name, policy: policy) },
                         onDelete: { removing = declaredSet(named: summary.name) }
                     )
                 }
@@ -152,9 +153,8 @@ struct RuleSetsView: View {
                 }
             }
         } footer: {
-            Text("Reference one with a RULE-SET rule: RULE-SET,\(controller.ruleSetSummaries.first?.name ?? "Name"),SomePolicy — then it behaves exactly like the rules you wrote yourself, and a Routing assignment above it still wins.")
+            Text("Choose ⋯ → Use in rules to point this list at a policy. Rules and Routing above it still win.")
                 .font(.system(size: 10))
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -220,8 +220,12 @@ struct RuleSetsView: View {
     }
 
     private func referencingRules(_ set: RemoteRuleSet) -> [ProfileRule] {
+        referencingRules(named: set.name)
+    }
+
+    private func referencingRules(named name: String) -> [ProfileRule] {
         manager.activeProfile.rules.filter {
-            $0.type == .ruleSet && $0.value.caseInsensitiveCompare(set.name) == .orderedSame
+            $0.type == .ruleSet && $0.value.caseInsensitiveCompare(name) == .orderedSame
         }
     }
 
@@ -267,6 +271,13 @@ struct RuleSetsView: View {
         if set.interval != nil { controller.refreshRuleSet(named: set.name) }
     }
 
+    /// Points `RULE-SET,<name>` at `policy` (nil removes it). This is the only
+    /// way to make a downloaded list do anything, so it lives in the row's
+    /// menu rather than expecting a hand edit of the profile file.
+    private func reference(named name: String, policy: String?) {
+        save { profile in profile.setRuleSetReference(named: name, policy: policy) }
+    }
+
     private func delete(_ set: RemoteRuleSet) {
         save { profile in
             profile.ruleSets.removeAll { $0.id == set.id }
@@ -274,7 +285,7 @@ struct RuleSetsView: View {
                 $0.type == .ruleSet && $0.value.caseInsensitiveCompare(set.name) == .orderedSame
             }
         }
-        controller.removeRuleSetCache(named: set.name)
+        controller.removeRuleSetCache(for: set)
         removing = nil
     }
 }
@@ -284,12 +295,23 @@ struct RuleSetsView: View {
 private struct RuleSetRowView: View {
     let summary: RuleSetSummary
     let isRefreshing: Bool
+    let policyNames: [String]
+    let referencedPolicy: String?
     let onRefresh: () -> Void
     let onEdit: () -> Void
     let onRemoveCache: () -> Void
+    let onReference: (String?) -> Void
     let onDelete: () -> Void
 
     private var status: SettingsDisplay.StatusLabel { SettingsDisplay.ruleSetStatus(summary) }
+
+    /// `""` is the picker's "Not used" tag; the profile stores `nil` for that.
+    private var referenceBinding: Binding<String> {
+        Binding(
+            get: { referencedPolicy ?? "" },
+            set: { onReference($0.isEmpty ? nil : $0) }
+        )
+    }
 
     private var tone: SettingsPill.Tone {
         switch status.tone {
@@ -312,7 +334,7 @@ private struct RuleSetRowView: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                 Text(verbatim: "\(SettingsDisplay.ruleSetAge(summary)) · \(SettingsDisplay.ruleSetRefresh(interval: summary.interval))"
-                     + (summary.skippedCount > 0 ? " · \(summary.skippedCount) lines skipped" : ""))
+                     + (summary.skippedCount > 0 ? " · \(SettingsDisplay.ruleSetSkipped(summary.skippedCount))" : ""))
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                 if let error = summary.error {
@@ -327,6 +349,10 @@ private struct RuleSetRowView: View {
                 if isRefreshing {
                     ProgressView().controlSize(.small)
                 }
+                if referencedPolicy == nil {
+                    SettingsPill(text: "Not used", tone: .neutral)
+                        .help("Nothing points at this list yet, so none of its rules are in play.")
+                }
                 SettingsPill(text: status.title, tone: tone)
                 Button(action: onRefresh) {
                     Image(systemName: "arrow.clockwise")
@@ -338,6 +364,16 @@ private struct RuleSetRowView: View {
                     Button("Edit…", action: onEdit)
                     Button("Remove downloaded copy", action: onRemoveCache)
                         .disabled(!summary.isDownloaded)
+                    Divider()
+                    Menu("Use in rules") {
+                        Picker("Use in rules", selection: referenceBinding) {
+                            Text("Not used").tag("")
+                            ForEach(policyNames, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .pickerStyle(.inline)
+                    }
                     Divider()
                     Button("Delete Rule Set", role: .destructive, action: onDelete)
                 } label: {
@@ -411,7 +447,7 @@ private struct RuleSetEditorSheet: View {
                     .foregroundColor(.orange)
             }
 
-            Text(verbatim: "Referenced from [Rule] as RULE-SET,\(name.isEmpty ? "Name" : name),<policy>.")
+            Text(verbatim: "Use ⋯ → Use in rules to point a policy at it, then it behaves like the rules you wrote yourself.")
                 .font(.system(size: 10.5))
                 .foregroundColor(.secondary)
 

@@ -218,10 +218,11 @@ final class EngineController: ObservableObject {
     }
 
     /// Drops a cached copy; the next refresh fetches it from scratch.
-    func removeRuleSetCache(named name: String) {
-        guard let set = profileManager.activeProfile.ruleSets.first(where: {
-            $0.name.caseInsensitiveCompare(name) == .orderedSame
-        }) else { return }
+    ///
+    /// Takes the set itself rather than a name on purpose: a caller that has
+    /// just deleted the declaration has already dropped it from the profile,
+    /// so a lookup would find nothing and leave the files behind.
+    func removeRuleSetCache(for set: RemoteRuleSet) {
         ruleSets.removeCache(for: set)
         ruleSetErrors[set.name.lowercased()] = nil
         reloadRuleSets(refreshStale: false)

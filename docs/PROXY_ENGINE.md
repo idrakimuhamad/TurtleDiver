@@ -170,7 +170,7 @@ not), and the pure display helpers that keep machine values out of
 `LocalizedStringKey` (`SettingsDisplay.listener(host:port:)` never renders
 `Optional(…)`, `abbreviateHome(_:home:)` is boundary-safe, `profileSummary`
 pluralises, `connectionStatus(_:)` shortens stored statuses so a pill cannot
-wrap mid-word). Total: **428 tests**.
+wrap mid-word). Total: **440 tests**.
 
 ### System-proxy ownership vs. a legacy PAC
 
@@ -241,9 +241,25 @@ RULE-SET,Ads,REJECT
   thread, reloads the matcher, rebuilds the pane's summaries and — only when
   `ruleSetAutoRefresh` is on (default **off**) — refreshes sets that declare an
   interval.
+- The reference is created from the row's ⋯ → *Use in rules* menu
+  (`Profile.setRuleSetReference(named:policy:)`): it replaces an existing rule
+  **in place** (moving it to just-above-`FINAL` would silently change which
+  rules outrank it), keeps at most one per set, and reports a no-op so the pane
+  can skip the write. A set with no reference — or none in force — shows a
+  `NOT USED` pill, because a downloaded list that nothing references does
+  nothing at all.
+- Failures reach the UI as one sentence (`RuleSetStoreError.describe(_:)`). A
+  `URLError` arrives as a bridged `NSError`, so interpolating it prints the
+  whole `UserInfo` dictionary into the row; the interesting codes get their own
+  sentence and the rest fall back to the code.
+- `EngineController.removeRuleSetCache(for:)` takes the set itself rather than a
+  name. A caller that has just deleted the declaration has already dropped it
+  from the profile, so a lookup would find nothing and leave the downloaded body
+  — and its sidecar — behind. Retargeting (⋯ → *Edit…*) drops the **pre-edit**
+  set's copy for the same reason: the old body caches under the old URL's name.
 
-Covered by `RuleSetTests` (35), `RuleSetStoreTests` (20) and
-`RuleSetControllerTests` (6).
+Covered by `RuleSetTests` (44), `RuleSetStoreTests` (20) and
+`RuleSetControllerTests` (7).
 
 ## PAC → rules import
 

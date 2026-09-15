@@ -88,6 +88,26 @@ public enum SettingsDisplay {
         return StatusLabel(title: "\(count) \(count == 1 ? "rule" : "rules")", tone: .ok)
     }
 
+    /// The skipped-rule diagnostic in the row's detail line, pluralised.
+    public static func ruleSetSkipped(_ count: Int) -> String {
+        count == 1 ? "1 line skipped" : "\(count) lines skipped"
+    }
+
+    /// The body of the "Delete Rule Set" confirmation.
+    ///
+    /// The count is the whole point of the sentence: it is the only warning
+    /// that a `RULE-SET` rule the user wrote is about to disappear with it.
+    public static func ruleSetDeleteMessage(referencing count: Int) -> String {
+        switch count {
+        case 0:
+            return "The downloaded list is deleted too."
+        case 1:
+            return "The RULE-SET rule that uses it is removed from [Rule] as well, and the downloaded list is deleted."
+        default:
+            return "The \(count) RULE-SET rules that use it are removed from [Rule] as well, and the downloaded list is deleted."
+        }
+    }
+
     /// How old the cached copy is. Coarse on purpose: the exact minute a list
     /// was fetched does not change what the user should do about it.
     public static func ruleSetAge(_ summary: RuleSetSummary, now: Date = Date()) -> String {

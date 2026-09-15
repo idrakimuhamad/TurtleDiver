@@ -235,6 +235,22 @@ final class RuleSetDisplayTests: XCTestCase {
         XCTAssertEqual(SettingsDisplay.ruleSetStatus(summary(ruleCount: 0)).title, "0 rules")
     }
 
+    /// The skipped-rule diagnostic sits next to the age on one line.
+    func testRuleSetSkippedIsPluralised() {
+        XCTAssertEqual(SettingsDisplay.ruleSetSkipped(1), "1 line skipped")
+        XCTAssertEqual(SettingsDisplay.ruleSetSkipped(2), "2 lines skipped")
+        XCTAssertEqual(SettingsDisplay.ruleSetSkipped(0), "0 lines skipped")
+    }
+
+    /// The delete dialog has to name the rule it is about to take with the set.
+    func testRuleSetDeleteMessageNamesTheRuleCount() {
+        XCTAssertEqual(SettingsDisplay.ruleSetDeleteMessage(referencing: 0),
+                       "The downloaded list is deleted too.")
+        XCTAssertEqual(SettingsDisplay.ruleSetDeleteMessage(referencing: 1),
+                       "The RULE-SET rule that uses it is removed from [Rule] as well, and the downloaded list is deleted.")
+        XCTAssertTrue(SettingsDisplay.ruleSetDeleteMessage(referencing: 2).contains("The 2 RULE-SET rules"))
+    }
+
     /// A count of 6152 must not become "6,152" through a localised `Text`.
     func testRuleCountHasNoGroupingSeparator() {
         XCTAssertFalse(SettingsDisplay.ruleSetStatus(summary(ruleCount: 6152)).title.contains(","))

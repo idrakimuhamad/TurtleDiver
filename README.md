@@ -353,7 +353,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 428 tests (core engine + app glue)
+swift test          # 440 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

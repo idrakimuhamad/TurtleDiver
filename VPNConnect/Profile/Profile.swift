@@ -259,6 +259,45 @@ public struct Profile: Codable, Equatable, Sendable {
         rules.filter { $0.type == .ruleSet }.map(\.value)
     }
 
+    /// Points `RULE-SET,<name>` at `policy`, or removes the reference when
+    /// `policy` is nil. An existing reference is replaced rather than
+    /// duplicated, the rule is placed before `FINAL` so the catch-all stays
+    /// last, and a no-op returns false so callers can skip a write.
+    @discardableResult
+    public mutating func setRuleSetReference(named name: String, policy: String?) -> Bool {
+        let matches: (ProfileRule) -> Bool = {
+            $0.type == .ruleSet && $0.value.caseInsensitiveCompare(name) == .orderedSame
+        }
+
+        guard let policy else {
+            let before = rules.count
+            rules.removeAll(where: matches)
+            return rules.count != before
+        }
+
+        let referencing = rules.filter(matches)
+        guard !(referencing.count == 1 && referencing[0].policy == policy) else { return false }
+
+        if let index = rules.firstIndex(where: matches) {
+            // Replace in place: an existing reference sits where the user (or a
+            // previous version) put it, and moving it down to just before FINAL
+            // would quietly change which rules outrank it.
+            rules[index].policy = policy
+            var kept = false
+            rules.removeAll { rule in
+                guard matches(rule) else { return false }
+                defer { kept = true }
+                return kept
+            }
+            return true
+        }
+
+        let rule = ProfileRule(type: .ruleSet, value: name, policy: policy)
+        let index = rules.lastIndex(where: { $0.type == .final }) ?? rules.count
+        rules.insert(rule, at: index)
+        return true
+    }
+
     /// Every policy name that exists in this profile: built-ins, proxies, groups.
     public var allPolicyNames: [String] {
         BuiltinPolicy.names + proxies.map(\.name) + groups.map(\.name)
