@@ -90,10 +90,18 @@ struct SettingsPaneHeader: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.system(size: 18, weight: .semibold))
+            // The subtitle may wrap, but never to more than two lines and
+            // never at the expense of the pane's minimum height: the window's
+            // very first layout pass proposes a degenerate width, and a
+            // `.fixedSize(vertical: true)` subtitle answered that by unfolding
+            // to one line per word. The pane then reported that height as its
+            // minimum and kept it, which is what used to push the sidebar's
+            // search field under the titlebar on the one pane that happened to
+            // be on screen during that pass. See `docs/SETTINGS_LAYOUT.md` §3.
             Text(subtitle)
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
         }
     }
 }

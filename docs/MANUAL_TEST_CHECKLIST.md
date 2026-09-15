@@ -109,9 +109,12 @@ release.
 - [ ] Deep links from the menu bar (Open Dashboard…) still land on the right
       pane.
 - [ ] Switching panes does not move the window chrome: the sidebar's search
-      field and the pane title stay at the same height on every pane
-      (**known issue:** Policies sits 28 pt higher — see
-      `docs/SETTINGS_LAYOUT.md`).
+      field and the pane title stay at the same height on every pane, including
+      **Policies** (its pane used to demand 676 pt of height in a 620 pt
+      window, which tucked the search field under the titlebar and pushed the
+      footer off the bottom edge — see `docs/SETTINGS_LAYOUT.md` §3). Check all
+      nine: the search field must sit just under the titlebar and the pane
+      title must be fully visible, on every pane.
 
 ## 1. Profile lifecycle
 

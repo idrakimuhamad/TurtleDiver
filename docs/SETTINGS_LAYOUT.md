@@ -1,9 +1,9 @@
 # Settings window geometry (1.4.0)
 
 The Settings window is a `NavigationSplitView` in a `NSWindow` whose content is
-860×620 (min 800×560) with `.unifiedCompact` chrome. Two pieces of its geometry
-are load-bearing enough to be worth writing down, because both were wrong once
-and both are easy to "fix" back into being wrong.
+860×620 (min 800×560) with `.unifiedCompact` chrome. Three pieces of its
+geometry are load-bearing enough to be worth writing down, because all three
+were wrong once and all three are easy to "fix" back into being wrong.
 
 ## 1. Sidebar width
 
@@ -51,26 +51,69 @@ taken from the accessibility tree (`AXOutline` / `AXTextField`):
 | VPN, Profiles, Dashboard, Rules, Routing, History, Appearance, Advanced | 243 | 206 | 215 |
 | **Policies** | **215** | **178** | **187** |
 
-### Open issue
+(Those Policies numbers were measured before the fix in §3; the nine panes now
+measure the first row.)
 
-The Policies pane's chrome is 28 pt shorter — exactly the height of a toolbar
-item row — so its pane header and the sidebar sit 28 pt higher, and the
-sidebar's search field ends up tucked under the titlebar. It is not caused by
-the pane's own toolbar items (removing them changes nothing) and it is not
-caused by the spacer's height (30 pt and 60 pt measure identically). The most
-likely explanation is that `.unifiedCompact` decides per pane whether the
-sidebar's search field shares the title row or gets its own row, and that
-decision is not stable across runs: an earlier build of this same window
-measured *three* chrome heights (76 / 78 / 86 pt) across the nine panes.
+## 3. The Policies pane's minimum height
 
-Reproduce with `swift test`'s neighbours: build, open Settings, and compare
-`AXOutline label="Sidebar"`'s `y` on Policies and on Routing. If it still
-differs, the deterministic fixes to try, in order of preference, are
+The Policies pane used to be the odd one out: its pane header and the whole
+sidebar sat **28 pt higher** than on the other eight panes, the sidebar's search
+field was tucked under the titlebar, and the footer's second line fell past the
+bottom edge.
 
-1. `window.toolbarStyle = .expanded` — AppKit then always gives the toolbar its
-   own row, at a constant height, whatever the pane declares;
-2. rendering our own search field inside the sidebar column instead of using
-   `.searchable(placement: .sidebar)`, which removes the one item that forces a
-   second toolbar row.
+### What it looked like
 
-Both change how the window looks, so neither should be landed blind.
+The window frame stays 860×660 whatever the pane; what changed was the split
+view inside it (measured from the accessibility tree):
+
+| pane | window | `AXSplitGroup` | overhang per side |
+|---|---|---|---|
+| the other eight | 860×660 | 860×620, flush with the content area | 0 |
+| **Policies** | 860×660 | **860×676**, centred | **28** |
+
+676 was a hard minimum, not a proportion — resizing the window did not move it,
+it only grew once the window was tall enough to fit it:
+
+| window size | content area | Policies split group | overhang per side | other panes' split group |
+|---|---|---|---|---|
+| 860×600 | 560 | **676** | 58 | 560 |
+| 860×660 | 620 | **676** | 28 | 620 |
+| 860×700 | 660 | **676** | 8 | 660 |
+| 860×803 | 763 | 763 (fits, so it stretches) | 0 | 763 |
+
+Because the minimum is bigger than the container, `.frame(minWidth: 780,
+minHeight: 560)` centres it instead of clipping it from one edge — which is why
+the overhang was split evenly top and bottom, and why the search field ended up
+*drawn behind* the toolbar rather than cut off at a clean edge.
+
+### The cause
+
+Not the pane's content. Replacing `PoliciesView()` with a two-word
+`List { Text(…) }` reproduced 676 exactly, and the other eight panes stayed at
+620 — so the trigger is in the **shared pane header**, and it fires for
+whichever pane is on screen during the window's first layout pass (in practice
+the persisted one, which is why Policies looked like it was at fault: it was
+the pane selected when the window was created).
+
+`SettingsPaneHeader`'s subtitle carried
+`.fixedSize(horizontal: false, vertical: true)`. The window's very first layout
+pass proposes a degenerate width, and that modifier answers a degenerate width
+by unfolding the sentence to one line per word instead of truncating it. The
+pane then reported that height as its minimum, the split view was laid out at
+676, and the *list* then reported the height it was handed as *its* minimum —
+so 676 survived every later pass, including the ones at the correct width.
+
+### The fix
+
+The subtitle is now `.lineLimit(2)` with no vertical `fixedSize`: it can still
+wrap to two lines on a narrow window, but it can never inflate the pane's
+minimum height, so no minimum can be locked in the first place. Verified by the
+test above: with **Policies** persisted, a fresh launch and the Settings window
+opened for the first time, `AXSplitGroup` is 860×620 at the content top, and all
+nine panes now measure identically (the sidebar's `AXOutline y` and the search
+field's `AXTextField y` match on every pane).
+
+Re-verify after touching `SettingsPaneHeader` or the pane shell: pick a pane,
+quit, relaunch, open Settings, and check that `AXSplitGroup`'s `y` is 40 pt
+below the window's `y` and its height is the window's minus 40 — on the pane you
+left selected, and then on all nine.
