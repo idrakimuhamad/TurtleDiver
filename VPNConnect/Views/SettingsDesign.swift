@@ -32,11 +32,15 @@ enum SettingsStyle {
 /// it. Measurements and the open question live in `docs/SETTINGS_LAYOUT.md`.
 ///
 /// It is positioned in the *navigation* section rather than `.principal` on
-/// purpose: a `.principal` item puts an empty cluster in the middle of the
-/// toolbar, and macOS (26/Tahoe) draws a pair of hairlines around it — a
-/// visible ~1 pt wide, 30 pt tall mark in the centre of the titlebar. Any
-/// toolbar item contributes its height, so the leading section does the same
-/// job with nothing to see.
+/// purpose: a `.principal` item reserves the middle of the toolbar, and the
+/// title is happier without it. Any toolbar item contributes its height, so
+/// the leading section holds the toolbar open just as well.
+///
+/// The item must also have its background switched off —
+/// `sharedBackgroundVisibility(.hidden)` where available, see `detailPane`.
+/// macOS 26 gives *every* toolbar item a glass capsule background regardless
+/// of placement, and a 1×30 pt capsule draws as a pair of hairlines in the
+/// titlebar. That is the whole reason this spacer was ever visible.
 struct SettingsToolbarSpacer: View {
     static let height: CGFloat = 30
 

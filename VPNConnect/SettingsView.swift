@@ -135,13 +135,25 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var detailPane: some View {
-        paneContent
-            // Invisible, but it fixes the titlebar's height for every pane — see
-            // `SettingsToolbarSpacer` for why that matters and why it is not
-            // centred in the toolbar.
-            .toolbar {
+        // The spacer is invisible, but it holds the titlebar's height constant
+        // for the panes that declare no toolbar item of their own — see
+        // `SettingsToolbarSpacer`.
+        //
+        // On macOS 26 every toolbar item is given a glass capsule background by
+        // default, which turns a 1×30 pt spacer into two hairlines sitting in
+        // the titlebar. `sharedBackgroundVisibility(.hidden)` is the documented
+        // way to switch that capsule off; it is macOS 26-only, and so is the
+        // capsule, hence the branch.
+        if #available(macOS 26.0, *) {
+            paneContent.toolbar {
+                ToolbarItem(placement: .navigation) { SettingsToolbarSpacer() }
+                    .sharedBackgroundVisibility(.hidden)
+            }
+        } else {
+            paneContent.toolbar {
                 ToolbarItem(placement: .navigation) { SettingsToolbarSpacer() }
             }
+        }
     }
 
     @ViewBuilder

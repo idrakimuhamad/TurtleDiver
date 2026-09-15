@@ -43,16 +43,30 @@ whole window jumping when you switch panes. `SettingsStyle.paneTopPadding`
 `SettingsToolbarSpacer` (an invisible 1×30 pt item in the detail column's
 toolbar) exist to keep that constant.
 
-That item is declared with `ToolbarItem(placement: .navigation)`, **not**
-`.principal`. A principal item leaves an empty cluster in the middle of the
-toolbar, and macOS 26 draws a pair of hairlines around it — a ~1 pt wide, 30 pt
-tall mark sitting in the centre of the titlebar, which is easy to mistake for a
-rendering glitch. Any toolbar item contributes its height, so the leading
-section holds the toolbar open just as well with nothing to see. Moving it
-did not move anything: measured after the change, the sidebar rows are still
-VPN 294 / Profiles 330 / Dashboard 402 and the Profiles and Policies headers
-are both at 226 — i.e. identical across panes, which is the property the spacer
-exists to protect.
+**The spacer must have its background switched off.** macOS 26 gives every
+toolbar item a glass capsule background by default, and a 1×30 pt capsule draws
+as a pair of hairlines standing in the titlebar — it looks like a rendering
+glitch and it is easy to misread as something the window is drawing around the
+item rather than the item itself. The documented way out is
+`sharedBackgroundVisibility(.hidden)` on the `ToolbarItem`
+(`@available(macOS 26.0, *)`, hence the branch in `detailPane`; on macOS 14/15
+there is no capsule and the item is invisible as written). The item still
+contributes its height, so the floor is unchanged.
+
+Measured after that change, with the window at (470, 157) 860×660 — sidebar rows
+`AXOutline` and pane headers from the accessibility tree, all ten panes,
+`SettingsToolbarSpacer` present and unbordered:
+
+| | sidebar `VPN` row y | pane header y |
+|---|---|---|
+| every pane (VPN, Profiles, Dashboard, Policies, Rules, Routing, Rule Sets, History, Appearance, Advanced) | 294 | 215 |
+
+294 is also what the *previous* build measured, so hiding the capsule changed
+the appearance and nothing else.
+
+The two facts that made this hard to diagnose, in case it comes up again:
+the mark follows the item when you move it (it *is* the item's background, not
+a decoration around it), and it is new on macOS 26 only (the capsule is).
 
 Measured with the window at (470, 157) 860×660, sidebar and search-field frames
 taken from the accessibility tree (`AXOutline` / `AXTextField`):
