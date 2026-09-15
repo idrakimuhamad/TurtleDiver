@@ -17,6 +17,7 @@ struct SettingsView: View {
 
     @State private var selection: SettingsRoute
     @State private var query = ""
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     /// Deep links (the menu bar's Dashboard item) preselect a pane; otherwise
     /// the pane the user had open last time wins.
@@ -26,7 +27,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             detailPane
@@ -35,6 +36,12 @@ struct SettingsView: View {
         .frame(minWidth: 780, minHeight: 560)
         .onChange(of: selection) { _, newValue in
             settings.settingsPane = newValue.rawValue
+        }
+        .onChange(of: columnVisibility) { _, newValue in
+            // The sidebar *is* the navigation here, and dragging the divider
+            // shut used to hide it with no obvious way back (System Settings
+            // does not let you lose its sidebar either).
+            if newValue != .all { columnVisibility = .all }
         }
     }
 
@@ -71,9 +78,14 @@ struct SettingsView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 208, ideal: 228, max: 280)
         .searchable(text: $query, placement: .sidebar, prompt: "Search settings")
         .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+        // Outermost: `.searchable(placement: .sidebar)` rebuilds the sidebar's
+        // chrome, and the width preference is only read from the view that ends
+        // up as the column's content.
+        .navigationSplitViewColumnWidth(min: SettingsSidebar.minWidth,
+                                        ideal: SettingsSidebar.idealWidth,
+                                        max: SettingsSidebar.maxWidth)
     }
 
     private func sidebarRow(_ item: SettingsItem) -> some View {
@@ -105,7 +117,11 @@ struct SettingsView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
+            // Holds the column open at the minimum even though SwiftUI ignores
+            // the explicit width request — the split view sizes the sidebar
+            // from its content instead.
+            .frame(minWidth: SettingsSidebar.footerMinWidth, alignment: .leading)
+            .padding(.horizontal, SettingsSidebar.footerPadding)
             .padding(.vertical, 9)
         }
         .background(.bar)
@@ -119,6 +135,16 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var detailPane: some View {
+        paneContent
+            // Invisible, but it fixes the titlebar's height for every pane — see
+            // `SettingsToolbarSpacer` for why that matters.
+            .toolbar {
+                ToolbarItem(placement: .principal) { SettingsToolbarSpacer() }
+            }
+    }
+
+    @ViewBuilder
+    private var paneContent: some View {
         let item = SettingsCatalog.item(for: selection)
         switch selection {
         case .vpn:

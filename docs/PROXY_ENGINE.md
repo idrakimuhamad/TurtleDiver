@@ -170,7 +170,7 @@ not), and the pure display helpers that keep machine values out of
 `LocalizedStringKey` (`SettingsDisplay.listener(host:port:)` never renders
 `Optional(…)`, `abbreviateHome(_:home:)` is boundary-safe, `profileSummary`
 pluralises, `connectionStatus(_:)` shortens stored statuses so a pill cannot
-wrap mid-word). Total: **350 tests**.
+wrap mid-word). Total: **354 tests**.
 
 ### System-proxy ownership vs. a legacy PAC
 

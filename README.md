@@ -155,6 +155,8 @@ request through the active profile's rules. See:
 - `docs/PROFILES.md` — full profile syntax (`[General]`, `[Proxy]`,
   `[Proxy Group]`, `[Rule]`)
 - `docs/SYSTEM_PROXY.md` — system proxy lifecycle and VPN tie-in
+- `docs/SETTINGS_LAYOUT.md` — why the sidebar is 172 pt wide, and the titlebar
+  height contract
 
 The engine is independent of the VPN: it can run with or without a tunnel, and
 when split tunneling is active, vpn-slice targets are auto-added as DIRECT
@@ -308,7 +310,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 350 tests (core engine + app glue)
+swift test          # 354 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

@@ -12,8 +12,32 @@ enum SettingsStyle {
     /// Forms get unreadable when a row stretches across a wide window.
     static let contentMaxWidth: CGFloat = 620
     static let panePadding: CGFloat = 22
+    /// Every pane starts its header at the same distance from the titlebar.
+    /// `SettingsListPane` used to use 14 while `SettingsPane` used 18, which
+    /// read as "no top padding" on the table panes.
+    static let paneTopPadding: CGFloat = 18
     static let rowPaddingH: CGFloat = 12
     static let rowPaddingV: CGFloat = 9
+}
+
+// MARK: - Titlebar height
+
+/// Reserves a minimum height in the toolbar of every pane, so that a pane whose
+/// content declares no toolbar item does not end up with a shorter titlebar —
+/// and therefore a higher pane header and sidebar — than one that does.
+///
+/// This is a *floor*, not a guarantee. `.unifiedCompact` still collapses the
+/// toolbar's item row for a pane whose items are short (Policies is the one
+/// that does it: 58 pt of chrome instead of 86 pt), and no item height fixes
+/// it. Measurements and the open question live in `docs/SETTINGS_LAYOUT.md`.
+struct SettingsToolbarSpacer: View {
+    static let height: CGFloat = 30
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 1, height: Self.height)
+    }
 }
 
 extension SettingsTint {
@@ -93,7 +117,7 @@ struct SettingsPane<Content: View>: View {
                 content
             }
             .padding(.horizontal, SettingsStyle.panePadding)
-            .padding(.top, 18)
+            .padding(.top, SettingsStyle.paneTopPadding)
             .padding(.bottom, 26)
             .frame(maxWidth: SettingsStyle.contentMaxWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -119,7 +143,7 @@ struct SettingsListPane<Content: View>: View {
             SettingsPaneHeader(title: title, subtitle: subtitle)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, SettingsStyle.panePadding)
-                .padding(.top, 14)
+                .padding(.top, SettingsStyle.paneTopPadding)
                 .padding(.bottom, 10)
             Divider().opacity(0.5)
             content

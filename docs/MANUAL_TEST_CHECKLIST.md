@@ -6,7 +6,7 @@ release.
 
 ## 0. Setup
 
-- [ ] `swift test` passes (350 tests green).
+- [ ] `swift test` passes (354 tests green).
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
 
@@ -57,6 +57,10 @@ release.
       (Dashboard, Policies, Rules, Routing) / Monitoring (History) /
       Application (Appearance, Advanced); the footer shows the engine dot,
       `v1.4.0` and the active profile.
+- [ ] The sidebar can hold its width: drag the divider as far left as it goes
+      → it stops at the search field (the placeholder never clips to
+      `Search setting:`) and the sidebar never disappears (see
+      `docs/SETTINGS_LAYOUT.md`).
 - [ ] Open a pane, close the window, reopen → it lands on the *same* pane
       (`plutil -p ~/Library/Preferences/com.idraki.turtle.vpn.plist | grep
       settingsPane`).
@@ -84,6 +88,10 @@ release.
       listener reads `127.0.0.1:6152`, request hosts read `host:443`.
 - [ ] Deep links from the menu bar (Open Dashboard…) still land on the right
       pane.
+- [ ] Switching panes does not move the window chrome: the sidebar's search
+      field and the pane title stay at the same height on every pane
+      (**known issue:** Policies sits 28 pt higher — see
+      `docs/SETTINGS_LAYOUT.md`).
 
 ## 1. Profile lifecycle
 

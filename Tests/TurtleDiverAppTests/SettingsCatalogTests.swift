@@ -127,4 +127,33 @@ final class SettingsCatalogTests: XCTestCase {
         let reopened = SettingsManager(defaults: defaults)
         XCTAssertEqual(SettingsCatalog.route(forStoredValue: reopened.settingsPane), .advanced)
     }
+
+    // MARK: Sidebar geometry
+
+    /// The minimum is derived from the search field, and the search field is
+    /// only as wide as its placeholder needs. If someone shortens the prompt,
+    /// these numbers should shrink with it — not stay as cargo cult.
+    func testMinimumSidebarWidthIsTheSearchFieldPlusItsInsets() {
+        let expected = SettingsSidebar.searchFieldContentWidth
+            + SettingsSidebar.searchFieldTrailingReserve
+            + SettingsSidebar.searchFieldAir
+            + 2 * SettingsSidebar.fieldInset
+        XCTAssertEqual(SettingsSidebar.minWidth, expected)
+        XCTAssertEqual(SettingsSidebar.minWidth, 172,
+                       "the measured width at which 'Search settings' stops clipping")
+    }
+
+    func testMinimumWidthAlsoFitsTheWidestSidebarRow() {
+        XCTAssertGreaterThanOrEqual(SettingsSidebar.minWidth, SettingsSidebar.widestRowWidth)
+    }
+
+    func testWidthsAreOrdered() {
+        XCTAssertLessThan(SettingsSidebar.minWidth, SettingsSidebar.idealWidth)
+        XCTAssertLessThan(SettingsSidebar.idealWidth, SettingsSidebar.maxWidth)
+    }
+
+    func testFooterHoldsTheColumnOpenAtTheMinimum() {
+        XCTAssertEqual(SettingsSidebar.footerMinWidth + 2 * SettingsSidebar.footerPadding,
+                       SettingsSidebar.minWidth)
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 // MARK: - Route
 
@@ -189,4 +190,53 @@ public enum SettingsCatalog {
             }
         }
     }
+}
+
+// MARK: - Sidebar geometry
+
+/// How wide the sidebar is, and why.
+///
+/// The search field is the widest fixed thing in the sidebar and it is not
+/// compressible: its placeholder needs a fixed amount of room, so it — not the
+/// longest pane name — decides the minimum. 144 pt (the width this window used
+/// to open at) clipped the placeholder to "Search setting:"; 172 pt is where it
+/// reads as evenly spaced.
+///
+/// Two things had to be true for `navigationSplitViewColumnWidth` to be
+/// honoured at all: it has to be the *outermost* modifier on the sidebar
+/// (`searchable(placement: .sidebar)` rebuilds the column's chrome and swallows
+/// the preference if it is applied underneath), and the footer asks for
+/// `footerMinWidth` so the column's fitting width cannot pull it back under the
+/// minimum.
+public enum SettingsSidebar {
+    /// Magnifier plus "Search settings" at the field's font, as measured on
+    /// screen: 9.5 pt of leading inset and 121 pt of content.
+    public static let searchFieldContentWidth: CGFloat = 121
+    /// The field reserves this much at its trailing edge for the clear button,
+    /// whether or not one is showing.
+    public static let searchFieldTrailingReserve: CGFloat = 20
+    /// A little air between the end of the placeholder and that reserve, so the
+    /// text does not look jammed against the end of the pill.
+    public static let searchFieldAir: CGFloat = 11
+    /// The field's own inset inside the sidebar column.
+    public static let fieldInset: CGFloat = 10
+    /// The sidebar footer's horizontal padding, so its content can be asked to
+    /// hold the column open at `minWidth` (see `footerMinWidth`) — SwiftUI does
+    /// not honour the column-width preference here.
+    public static let footerPadding: CGFloat = 14
+    /// Minimum width for the footer's own content.
+    public static var footerMinWidth: CGFloat { minWidth - 2 * footerPadding }
+    /// The widest sidebar row: a 21 pt icon chip, its 8 pt gap, "Appearance",
+    /// and the list row's horizontal insets.
+    public static let widestRowWidth: CGFloat = 166
+
+    /// Narrowest sidebar in which the search field still reads as evenly
+    /// spaced. Also wide enough for the longest pane name.
+    public static let minWidth: CGFloat = searchFieldContentWidth
+        + searchFieldTrailingReserve + searchFieldAir + 2 * fieldInset
+    /// Where a window opens, and where it snaps back to if it was ever narrower.
+    public static let idealWidth: CGFloat = 196
+    /// A ceiling, so a stray drag cannot turn Settings into a sidebar with a
+    /// sliver of content.
+    public static let maxWidth: CGFloat = 320
 }
