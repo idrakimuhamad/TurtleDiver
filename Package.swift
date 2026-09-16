@@ -96,6 +96,8 @@ let package = Package(
                 "System/AppIdentity.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/SystemProxyManager.swift",
+                "System/ToolProcess.swift",
+                "System/ToolResolver.swift",
                 "System/VPNRuleGenerator.swift"
             ],
             sources: [
@@ -105,7 +107,7 @@ let package = Package(
                 "VPNManager.swift",
                 "Views/MainWindowLayout.swift",
                 "Views/SettingsCatalog.swift",
-                "Views/SettingsDraft.swift"
+                "Views/SettingsDraft.swift",
             ]
         ),
         .testTarget(
