@@ -50,6 +50,14 @@ All `networksetup` set-commands go through the same admin-password path the
 VPN connection already uses (`SettingsManager.shared.adminPassword`, stored in
 the Keychain). No new privilege model is introduced.
 
+`networksetup` does **not** use PAM: for a set-command it asks the system for
+authorization through Authorization Services, which can raise a GUI dialog of
+its own. The password still travels on the child's standard input (never in
+argv), and the wait is now **bounded** — 60 s, then `SIGTERM`, a 2 s grace, then
+`SIGKILL`, reported as `SystemProxyError.authorizationTimedOut`. Before that it
+was a `DispatchSemaphore.wait()` with no deadline at all, on a path a click can
+reach. See `docs/ELEVATION.md`.
+
 ## VPN tie-in
 
 `EngineController` observes `VPNManager.status`:

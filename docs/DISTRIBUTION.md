@@ -273,3 +273,60 @@ correct and expected; it is the Developer ID gap, not a build failure.
 
 `dist/` is ignored by git: installers are build outputs, and the two older
 1.1.0/1.2.0 sets are being kept on disk but no longer tracked.
+
+---
+
+## 4. A privileged helper instead of `sudo` (deferred)
+
+TurtleDiver elevates twice: openconnect (`sudo`) and `networksetup`
+(Authorization Services). Both are described, with their failure modes and
+bounds, in **`docs/ELEVATION.md`**. A `SMAppService` helper daemon would remove
+the stored administrator password from the picture entirely — and the class of
+problem that comes with piping it into a stack that can decide to wait for a
+dialog instead.
+
+**It is deferred until a Developer ID exists**, and that is not a preference:
+
+- Apple's `SMAppService.h` (macOS 27 SDK) states that *"Apps that contain
+  LaunchDaemons must be notarized."* Notarization requires a Developer ID leaf
+  certificate, which requires Apple Developer Program enrolment. This project
+  has decided **not** to enrol, so the notarization paths in `publish.sh` stay
+  correct and dormant (§1).
+- The same header documents `.requiresApproval` as successfully registered and
+  awaiting the user in System Settings, and `kSMErrorInvalidSignature` as the
+  answer for an improperly signed app.
+- A throwaway spike (`/tmp/tdspike`) measured registration on macOS 27: **every**
+  item type — including `SMAppService.mainApp`, with a correctly signed helper
+  and with a deliberately differently signed one — returned
+  `SMAppServiceErrorDomain` **code 1 ("Operation not permitted")** with status
+  `.requiresApproval`. Read that as *pending approval*, **not** as *bad
+  signature*; a signature check cannot be inferred from it.
+- Useful for a later no-Developer-ID route: legacy `/Library/LaunchDaemons`
+  plists *"continue to be bootstrapped without explicit approval in System
+  Settings"*, so a root-owned helper installed once by an explicit user command
+  (or a `.pkg` postinstall) remains viable. The plist must then point at a
+  binary under `/Library/PrivilegedHelperTools`, **never** into the app bundle,
+  because the logged-in user can replace anything inside their own copy of the
+  app while launchd would still run it as root.
+
+Rules agreed in advance, if the helper is ever built:
+
+- **No generic `runCommand`, ever.** Commands are constructed inside the daemon
+  from typed fields — a fixed executable list, `/etc/hosts` edits as validated
+  IP + hostname entries. No shell, and no client-supplied argv.
+- **Validate the caller in-code** (audit token, pid fallback), pinned to
+  **Team ID + bundle id** rather than to a certificate, so renewing the
+  certificate does not invalidate the daemon.
+- **One elevation path per connect**, chosen by an explicit setting and verified
+  with a bounded ping before use. Never a silent fallback to `sudo`: that
+  re-creates the stall the bounded paths were written to remove.
+
+### Non-goal: the app never edits PAM
+
+TurtleDiver **reads** `/etc/pam.d/sudo_local` and `/etc/pam.d/sudo` to learn
+whether Touch ID (`pam_tid`) answers sudo. It **never writes, creates or removes
+them** — not to enable Touch ID, not to work around it, not to "repair" a
+machine. That is the user's authentication configuration, and an installer or an
+app that rewrites it is doing something nobody asked for. The detection exists
+so the app can step aside and let the system show its own dialog; the file itself
+stays untouched.

@@ -204,6 +204,8 @@ request through the active profile's rules. See:
 - `docs/PROFILES.md` — full profile syntax (`[General]`, `[Proxy]`,
   `[Proxy Group]`, `[Rule]`)
 - `docs/SYSTEM_PROXY.md` — system proxy lifecycle and VPN tie-in
+- `docs/ELEVATION.md` — how the app asks for privilege, and every deadline it
+  waits on
 - `docs/SETTINGS_LAYOUT.md` — why the sidebar is 172 pt wide, and the titlebar
   height contract
 
@@ -362,7 +364,10 @@ The application consists of several key components:
   keys — so a plaintext password no longer sits in the preferences file
   (`~/Library/Preferences/com.xvii.kurakura.vpn.plist`).
 - The application requires sudo privileges for VPN connection and for setting
-  the system proxy
+  the system proxy. It never *changes* how sudo authenticates: if Touch ID is
+  enabled for sudo, macOS shows its own dialog and the app waits for you — see
+  **`docs/ELEVATION.md`** for the full picture, including why the app reads but
+  never writes `/etc/pam.d/sudo_local`.
 - All network traffic is handled through standard macOS networking APIs
 - App output does not live in `/tmp` any more: the connection and launch logs
   are `~/Library/Logs/TurtleDiver/{vpn,launch}.log` (owner-only, `0600`) so
@@ -385,6 +390,27 @@ The application consists of several key components:
   `testTheRequestCapturePathNeverReferencesTheDebugLog`). Turning on
   **Show sensitive header values** changes what the *next* captures keep — it
   cannot resurrect a value the app already refused to store.
+
+### Elevation: Touch ID, dialogs, and orphans
+
+`sudo` used to be handed the administrator password through a pipe while it was
+warming its timestamp. On a Mac where `/etc/pam.d/sudo_local` enables `pam_tid`,
+sudo offers Touch ID first, never reads the pipe, and waits on a dialog the app
+was not watching for — so the connect stalled until its 90 s timeout, which then
+killed the wrapper rather than the process holding the dialog.
+
+The connect now decides **before** launching: it reads the two world-readable
+PAM files and asks `sudo -n -v` whether the timestamp is already valid, then
+either uses `sudo -n` (no dialog), hands over to macOS's own Touch ID dialog
+(the log says so, up front), or falls back to the stored password. Only that
+last path writes the password anywhere. The privileged body also runs in its own
+process group, recorded in `…/TurtleDiver/run/elevation.pgid`, so teardown
+signals the whole group instead of leaving something behind, and a launch-time
+sweep cleans up a previous run's leftovers. `networksetup` — the other
+elevation path — got the same treatment: it had no deadline at all.
+
+What the app cannot do is kill a root-owned process it did not start; a non-root
+sender may not signal one. The fix is that it no longer creates them.
 
 ### Fixed: a predictable PID file
 
@@ -412,6 +438,11 @@ probe answers `EPERM` and no PID tier can be trusted to adopt it.
    the same `brew install …` line is shown for copying.
 2. Ensure your VPN credentials are correct
 3. Check debug output for specific error messages
+4. If **History** says *Failed - Elevation Blocked (Touch ID)*, macOS asked for
+   Touch ID or your administrator password and nothing answered it. Connect
+   again with the app in front so the dialog is visible; `docs/ELEVATION.md`
+   explains when the app uses `sudo -n` instead, and when it falls back to the
+   stored password.
 
 ### Token Generation Issues
 
@@ -464,7 +495,8 @@ VPNConnect/
 ├── Engine/                        # HTTP + SOCKS5 listeners, proxy engine
 ├── Profile/                       # Profile model, parser, policy store
 ├── Rules/                         # Rule matching, PAC conversion, DNS/IP utils
-├── System/                        # System proxy, vpn-slice rule generation
+├── System/                        # System proxy, elevation policy, vpn-slice
+│                                  #   rule generation, tool resolution
 ├── Views/                         # Dashboard, Routing, Profiles, Rules editors,
 │                                  #   Settings panes + design system
 ├── Assets.xcassets                # App icons and assets

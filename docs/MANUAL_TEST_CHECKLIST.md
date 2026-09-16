@@ -374,3 +374,46 @@ resolve its host list.
 - [ ] Disconnect → openconnect exits, and the app still adopts/kills a
       surviving tunnel (the PID tier only matches a same-user process, so a
       root openconnect is found by the `pgrep` tier as before).
+
+## 9b. Elevation (2.0.0) — the part unit tests cannot reach
+
+The connect no longer guesses how `sudo` will authenticate: it reads the two
+world-readable PAM files and asks `sudo -n -v` whether the timestamp is already
+warm, then picks one of three strategies (`docs/ELEVATION.md`). Everything below
+except the dialog itself is covered by `ElevationPolicyTests`,
+`OpenConnectLaunchTests` and `ElevationWiringTests`.
+
+- [ ] `grep -n pam_tid /etc/pam.d/sudo_local` → `2:auth       sufficient     pam_tid.so`.
+      (On a machine without it, the app uses the stored password and none of the
+      dialog steps below apply.)
+- [ ] `sudo -k` (or wait for sudo to forget), then connect from the app → the
+      debug log starts with
+      `Elevation: Touch ID for sudo is enabled (pam_tid) and sudo's timestamp is cold.`
+      **before** any openconnect output, and macOS shows its own Touch ID /
+      password dialog. Answer it → the connect proceeds. **This is the step that
+      only a human can run**: the automated suite classifies and times out the
+      dialog path, it never answers one.
+- [ ] Repeat with the dialog left unanswered → after ~90 s: status
+      `Failed - Elevation Blocked (Touch ID)`, the log explains what happened,
+      and there is exactly one History entry for the attempt.
+- [ ] On a machine **without** Touch ID for sudo, store a deliberately wrong
+      administrator password and connect → status `Failed - Admin Password`
+      (not a bare `Connection failed (status: 1)`), and the log says the stored
+      password was not accepted. Do not test this by editing PAM.
+- [ ] During a connect, `cat ~/Library/Application\ Support/TurtleDiver/run/elevation.pgid`
+      → a plausible pgid, and `ps -o pid=,pgid=,comm= -g <pgid>` shows the
+      wrapper (names only — never `ps` with args).
+- [ ] Disconnect, then `ps -o comm= -g <pgid>` → nothing. No `sudo`, no
+      `openconnect`, and `pgrep -x sudo` is empty.
+- [ ] Relaunch the app → `~/Library/Logs/TurtleDiver/launch.log` has
+      `Step 0c: Sweeping stale elevation groups (background)...` and
+      `Step 0c done.` followed by the decision. With no leftovers it is
+      `nothingToDo`.
+- [ ] **Never** observed, and not something to test: the app cannot kill a
+      root-owned orphan that a *previous* build created — a non-root sender may
+      not signal a root-owned process. The remedy is to leave it or kill it as
+      root yourself; it exits on its own.
+- [ ] System proxy *toggle* with `networksetup` made slow or a dialog left open
+      → the app reports `Timed out changing the system proxy: …` within ~60 s and
+      stays responsive. (Simulated in `BoundedNetworkSetupRunnerTests`; the real
+      tool's dialog cannot be provoked on demand.)
