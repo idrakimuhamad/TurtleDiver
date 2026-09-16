@@ -99,6 +99,7 @@ let package = Package(
                 "System/ElevationPolicy.swift",
                 "System/ExistingConnection.swift",
                 "System/OpenConnectLaunch.swift",
+                "System/ProcessStartTime.swift",
                 "System/SystemProxyManager.swift",
                 "System/ToolProcess.swift",
                 "System/ToolResolver.swift",

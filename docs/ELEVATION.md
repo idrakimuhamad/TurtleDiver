@@ -131,8 +131,17 @@ reported rather than pretended away.
 | `sudo -n -v` probe | 3 s | treat the timestamp as cold |
 | the recorded group after teardown | 0.5 s | escalate to SIGKILL |
 | `ps -o comm= -g` in the sweep | 3 s | treat the group as unknown |
+| `ps -o etime=` reading an adopted tunnel's start time | 3 s | no duration: it counts from now |
 | `networksetup` (system proxy) | 60 s + 2 s grace | terminate, then SIGKILL, then `authorizationTimedOut` |
 | `/etc/hosts` cleanup on quit | 5 s | report and let the next connect retry |
+
+That last `ps` read is not an elevation wait; it is here because this table is
+where the bounds live. It runs on the main thread while a tunnel is being
+adopted, so it is bounded like the rest. It also asks for the *elapsed* field
+rather than `lstart`, because `lstart` is a formatted date: its day and month
+names come from `LC_TIME`, and under `LC_ALL=de_DE.UTF-8` it answers
+`Mi. 16 Sep. 19:34:34 2026`, which a fixed-format parser cannot read however it
+pins its own locale. The elapsed field is digits, colons and at most one dash.
 
 ## Non-goals
 

@@ -167,6 +167,25 @@ final class ExistingConnectionWiringTests: XCTestCase {
         }
     }
 
+    // MARK: - No unbounded waits on the adoption path
+
+    /// The duration read runs on the main thread while a tunnel is being
+    /// adopted, i.e. on the launch path. It used to spawn `ps` and wait on it
+    /// with no deadline, asking for `lstart` — a formatted date whose day and
+    /// month names follow the machine's `LC_TIME`.
+    func testTheDurationReadIsBoundedAndLocaleProof() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        let body = try body(of: "func processStartTime(pid:", in: code)
+
+        XCTAssertFalse(body.contains("waitUntilExit()"), "the duration read needs a deadline")
+        XCTAssertFalse(body.contains("Process()"), "the duration read must go through the bounded reader")
+        XCTAssertFalse(body.contains("lstart"), "lstart is a formatted date: its names follow LC_TIME")
+        XCTAssertTrue(body.contains("processStartTimeReader.startTime(pid: pid)"),
+                      "the duration read must go through ProcessStartTimeReader")
+        XCTAssertTrue(code.contains("private let processStartTimeReader = ProcessStartTimeReader()"),
+                      "and the reader must be a property, so it can be replaced in a test")
+    }
+
     // MARK: - Helpers
 
     /// The statements of one `case` in a switch, from its label to the next one.

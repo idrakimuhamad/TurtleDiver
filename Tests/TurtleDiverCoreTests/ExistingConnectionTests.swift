@@ -330,8 +330,14 @@ final class ExistingConnectionTests: XCTestCase {
         XCTAssertTrue(OpenConnectProcess.isRunning(pid: decoy.processIdentifier))
 
         // The exact shape of what was seen live: that pid sitting in the PID file.
+        //
+        // The scanner also looks for a genuinely-named openconnect, so its answer
+        // is not "nothing" merely because the file was rejected: on a machine that
+        // is *actually* connected it returns that tunnel, and rightly so. What
+        // must never happen is the decoy being adopted.
         let detection = ExistingConnectionScanner.detect(pidFilePid: decoy.processIdentifier)
-        XCTAssertNil(detection.pid)
+        XCTAssertNotEqual(detection.pid, decoy.processIdentifier,
+                          "a process whose arguments merely mention openconnect must never be adopted")
         XCTAssertEqual(detection.rejections.map(\.reason), [.isNotOpenConnect])
     }
 

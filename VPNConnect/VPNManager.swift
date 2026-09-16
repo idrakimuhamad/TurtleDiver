@@ -237,6 +237,10 @@ class VPNManager: ObservableObject {
     /// it now depends on the user's Application Support directory — see
     /// `OpenConnectPidFile` for why it left `/tmp`.
     private var pidFilePath: String { OpenConnectPidFile.path.path }
+
+    /// Reads a process's start time for the duration display. Bounded, because
+    /// it means spawning `ps` on the main thread while adopting a tunnel.
+    private let processStartTimeReader = ProcessStartTimeReader()
     private var currentAttemptId: UUID?
     
     /// Incremented on each `connect()` call so stale termination handlers
@@ -1531,29 +1535,15 @@ class VPNManager: ObservableObject {
         ConnectionHistoryManager.shared.addAttempt(attempt)
     }
     
-    /// Gets the process start time by parsing `ps -o lstart= -p <pid>`.
-    /// Returns nil if the process is gone or the command fails.
+    /// Gets the process start time for the duration display.
+    ///
+    /// Returns nil if the process is gone, the read failed, or it ran out of
+    /// time. Deliberately a *bounded* read of the elapsed field: this runs on the
+    /// main thread on the launch path, and the previous version both waited on
+    /// `ps` with no deadline at all and asked for `lstart`, a formatted date
+    /// whose day and month names follow the machine's `LC_TIME`. See
+    /// `ProcessStartTime`.
     private func processStartTime(pid: Int32) -> Date? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/ps")
-        task.arguments = ["-o", "lstart=", "-p", "\(pid)"]
-        let outPipe = Pipe()
-        task.standardOutput = outPipe
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            guard task.terminationStatus == 0 else { return nil }
-            let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !output.isEmpty else { return nil }
-            // ps -o lstart= format: "Sat Jun 29 10:30:45 2026"
-            let formatter = DateFormatter()
-            formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            return formatter.date(from: output)
-        } catch {
-            return nil
-        }
+        processStartTimeReader.startTime(pid: pid)
     }
 }
