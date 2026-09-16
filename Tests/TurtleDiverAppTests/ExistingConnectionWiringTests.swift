@@ -186,6 +186,59 @@ final class ExistingConnectionWiringTests: XCTestCase {
                       "and the reader must be a property, so it can be replaced in a test")
     }
 
+    // MARK: - The adopted tunnel's duration
+
+    /// An adopted tunnel's duration must count from when that process started,
+    /// not from when we noticed it.
+    ///
+    /// This is a separate defect from the detection one and outlived it: the
+    /// adopter read the real start time correctly and then assigned it, and the
+    /// duration timer's first statement — inside a `DispatchQueue.main.async`
+    /// block, one runloop later — overwrote it with `Date()`. The reader was
+    /// right, the wiring threw the answer away, and the only visible symptom was
+    /// a duration that quietly restarted from zero (the history row, built
+    /// before the async block ran, still held the true start, so the app's own
+    /// two records disagreed).
+    func testTheAdoptedStartTimeSurvivesTheDurationTimer() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+
+        let timer = try body(of: "private func startDurationTimer", in: code)
+        XCTAssertLessThan(timer.count, 4_000)
+        XCTAssertFalse(timer.contains("connectionStartTime = Date()"),
+                       "the timer must not recompute the start time; that is what discarded the adopted one")
+        XCTAssertTrue(timer.contains("connectionStartTime = start"),
+                      "the timer must seed the display from the start it was given")
+        XCTAssertFalse(timer.contains("startingAt start: Date ="),
+                       "a default would let a caller silently mean `now` again")
+
+        // Every call site must say which instant it means: no bare calls, and no
+        // call that passes `Date()` where an adopted start time is in hand.
+        let calls = code.components(separatedBy: "startDurationTimer(").count - 1
+        let explicitCalls = code.components(separatedBy: "startDurationTimer(startingAt").count - 1
+        XCTAssertEqual(calls, explicitCalls, "every call site must pass its start instant")
+        XCTAssertFalse(code.contains("startDurationTimer()"),
+                       "the bare call is the shape that silently meant `now`")
+
+        let adoption = try body(of: "private func adoptExistingConnection", in: code)
+        XCTAssertLessThan(adoption.count, 4_000)
+        XCTAssertTrue(adoption.contains("startDurationTimer(startingAt: start)"),
+                      "the adopter must seed the timer with the process's own start time")
+        XCTAssertFalse(adoption.contains("startDurationTimer(startingAt: Date())"),
+                       "the adopter must not fall back to `now`")
+        XCTAssertTrue(adoption.contains("let start = startTime ?? Date()"),
+                      "one local feeds both the timer and the history row")
+        XCTAssertTrue(adoption.contains("timestamp: start,"),
+                      "the history row must use the same instant as the duration")
+    }
+
+    /// The reader itself is pinned in `ProcessStartTimeTests`; this pins that the
+    /// adopter still goes through it rather than inventing a time.
+    func testTheAdopterAsksTheProcessWhenItStarted() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        let adoption = try body(of: "private func adoptExistingConnection", in: code)
+        XCTAssertTrue(adoption.contains("let startTime = processStartTime(pid: pid)"))
+    }
+
     // MARK: - Helpers
 
     /// The statements of one `case` in a switch, from its label to the next one.

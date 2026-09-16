@@ -632,7 +632,7 @@ class VPNManager: ObservableObject {
                         log.logHandler("STDOUT", action: "detected successful connection signal")
                         if case .connecting = self.status {
                             self.status = .connected
-                            self.startDurationTimer()
+                            self.startDurationTimer(startingAt: Date())
                             self.cancelConnectionTimer()
                             if let id = self.currentAttemptId {
                                 let attempt = ConnectionAttempt(
@@ -1188,7 +1188,7 @@ class VPNManager: ObservableObject {
                 guard case .connecting = self.status, self.connectionGeneration == gen else { return }
                 self.debugOutput += "VPN connection established (PID: \(pid))\n"
                 self.status = .connected
-                self.startDurationTimer()
+                self.startDurationTimer(startingAt: Date())
                 self.cancelConnectionTimer()
                 if let id = self.currentAttemptId {
                     let attempt = ConnectionAttempt(
@@ -1206,9 +1206,18 @@ class VPNManager: ObservableObject {
         connectionPollTimer = pollTimer
     }
     
-    private func startDurationTimer() {
+    /// Seeds the duration display from a known start instant.
+    ///
+    /// The start is a parameter rather than a default, because the callers mean
+    /// different things by it: a fresh connect means "now", an adopted tunnel
+    /// means "when that process actually started". Passing the value in — rather
+    /// than recomputing it inside the block below — is what makes the adopted
+    /// case honest. An earlier version assigned `Date()` in the block and so
+    /// discarded the adopter's real start time one runloop after it was read,
+    /// which is why an adopted tunnel's duration always restarted from zero.
+    private func startDurationTimer(startingAt start: Date) {
         DispatchQueue.main.async {
-            self.connectionStartTime = Date()
+            self.connectionStartTime = start
             self.durationString = "00:00:00"
             self.durationTimer?.invalidate()
             self.durationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -1512,6 +1521,9 @@ class VPNManager: ObservableObject {
         
         // Get the process start time for the duration display
         let startTime = processStartTime(pid: pid)
+        // One start instant, used for both the timer and the history row, so
+        // the two can never disagree about when this connection began.
+        let start = startTime ?? Date()
         
         // Write the PID to the PID file so disconnect(), forceTerminate(),
         // and cleanupOnTermination() can find and gracefully kill openconnect.
@@ -1519,15 +1531,15 @@ class VPNManager: ObservableObject {
         
         debugOutput += "Found existing VPN connection (PID: \(pid), verified openconnect)\n"
         status = .connected
-        connectionStartTime = startTime ?? Date()
-        startDurationTimer()
+        connectionStartTime = start
+        startDurationTimer(startingAt: start)
         
         // Also log to connection history
         let attemptId = UUID()
         currentAttemptId = attemptId
         let attempt = ConnectionAttempt(
             id: attemptId,
-            timestamp: connectionStartTime ?? Date(),
+            timestamp: start,
             host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
             status: "Connected (adopted from existing process)",
             logOutput: debugOutput
