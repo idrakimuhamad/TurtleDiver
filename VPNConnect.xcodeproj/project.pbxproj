@@ -33,6 +33,8 @@
 		7C0FFEEA0000000000000002 /* ToolSetupModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000012 /* ToolSetupModel.swift */; };
 		7C0FFEEA0000000000000003 /* ToolResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000013 /* ToolResolver.swift */; };
 		7C0FFEEA0000000000000004 /* ToolProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000014 /* ToolProcess.swift */; };
+		7C0FFEEA0000000000000005 /* ElevationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000015 /* ElevationPolicy.swift */; };
+		7C0FFEEA0000000000000006 /* BoundedProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000016 /* BoundedProcess.swift */; };
 		7C0FFEE80000000000000001 /* RuleSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000011 /* RuleSet.swift */; };
 		7C0FFEE80000000000000002 /* RuleSetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000012 /* RuleSetStore.swift */; };
 		7C0FFEE80000000000000003 /* RuleSetsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000013 /* RuleSetsView.swift */; };
@@ -79,6 +81,8 @@
 		7C0FFEEA0000000000000012 /* ToolSetupModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolSetupModel.swift; sourceTree = "<group>"; };
 		7C0FFEEA0000000000000013 /* ToolResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResolver.swift; sourceTree = "<group>"; };
 		7C0FFEEA0000000000000014 /* ToolProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolProcess.swift; sourceTree = "<group>"; };
+		7C0FFEEA0000000000000015 /* ElevationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevationPolicy.swift; sourceTree = "<group>"; };
+		7C0FFEEA0000000000000016 /* BoundedProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedProcess.swift; sourceTree = "<group>"; };
 		7C0FFEE80000000000000011 /* RuleSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSet.swift; sourceTree = "<group>"; };
 		7C0FFEE80000000000000012 /* RuleSetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSetStore.swift; sourceTree = "<group>"; };
 		7C0FFEE80000000000000013 /* RuleSetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSetsView.swift; sourceTree = "<group>"; };
@@ -223,6 +227,8 @@
 				7C0FFEE30000000000000014 /* AppIdentity.swift */,
 				7C0FFEEA0000000000000013 /* ToolResolver.swift */,
 				7C0FFEEA0000000000000014 /* ToolProcess.swift */,
+				7C0FFEEA0000000000000015 /* ElevationPolicy.swift */,
+				7C0FFEEA0000000000000016 /* BoundedProcess.swift */,
 				7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */,
 			);
 			path = System;
@@ -355,6 +361,8 @@
 				7C0FFEEA0000000000000002 /* ToolSetupModel.swift in Sources */,
 				7C0FFEEA0000000000000003 /* ToolResolver.swift in Sources */,
 				7C0FFEEA0000000000000004 /* ToolProcess.swift in Sources */,
+				7C0FFEEA0000000000000005 /* ElevationPolicy.swift in Sources */,
+				7C0FFEEA0000000000000006 /* BoundedProcess.swift in Sources */,
 				7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */,
 				7C0FFEE30000000000000003 /* OpenConnectLaunch.swift in Sources */,
 				7C0FFEE30000000000000004 /* AppIdentity.swift in Sources */,

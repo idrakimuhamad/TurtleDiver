@@ -95,6 +95,8 @@ let package = Package(
                 "Rules/RuleSetStore.swift",
                 "Rules/RuleMatcher.swift",
                 "System/AppIdentity.swift",
+                "System/BoundedProcess.swift",
+                "System/ElevationPolicy.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/SystemProxyManager.swift",
                 "System/ToolProcess.swift",
