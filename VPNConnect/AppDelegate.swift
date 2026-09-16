@@ -81,6 +81,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             StartupLog.write("Step 0b done. credentials: \(copied)")
         }
 
+        // 0c. A privileged wrapper left behind by a previous run, swept before
+        // anything can connect. This is the case the whole elevation change
+        // exists for: a `sudo` blocked on a dialog used to sit there until the
+        // machine was rebooted. Off the main thread — it shells out to `ps` — and
+        // it refuses to touch a group that still has a connection attached, so a
+        // running tunnel is never at risk.
+        StartupLog.write("Step 0c: Sweeping stale elevation groups (background)...")
+        DispatchQueue.global(qos: .utility).async {
+            let decision = ElevationReaper.reapStaleGroup(log: { message in
+                StartupLog.write("Step 0c: \(message)")
+                DispatchQueue.main.async { VPNManager.shared.debugOutput += message + "\n" }
+            })
+            StartupLog.write("Step 0c done. \(decision)")
+        }
+
         // 1. Set up the menu FIRST — before anything else
         StartupLog.write("Step 1: Setting up menu bar...")
         setupMenuBar()

@@ -210,6 +210,21 @@ class VPNManager: ObservableObject {
     private var errorPipe: Pipe?
     private var inputPipe: Pipe?
     private var connectionTimer: DispatchSourceTimer?
+
+    /// How long a connect may stay in `.connecting` before it is treated as
+    /// stuck. Named because the preflight message quotes it back to the user.
+    private static let connectionTimeoutSeconds = 90
+
+    /// How this attempt asks for privilege. Decided *before* the launch, from
+    /// what `/etc/pam.d` and a bounded `sudo -n -v` say — this is what stops a
+    /// password being piped into a `sudo` that will never read it, which is the
+    /// whole bug: `pam_tid` answers first, the pipe is left full, and the
+    /// `sudo` sits on a dialog nobody was told about.
+    private var elevation: ElevationStrategy = .storedPassword
+
+    /// Set when the launch script reported a named elevation failure. Matched
+    /// exactly, so openconnect's own output cannot pass for one.
+    private var elevationBlock: ElevationBlockReason?
     private var durationTimer: Timer?
     private var connectionStartTime: Date?
     private var errorBurst: Int = 0
@@ -251,6 +266,7 @@ class VPNManager: ObservableObject {
         errorBurst = 0
         challengePending = false
         passcodePromptCount = 0
+        elevationBlock = nil
         
         let settings = SettingsManager.shared
         
@@ -338,6 +354,10 @@ class VPNManager: ObservableObject {
             // Don't wait — the process may take time to clean up, but the app is exiting.
             // The network may briefly be in a bad state until the kernel cleans up.
         }
+
+        // Best effort before the process goes away. It is asynchronous, so it may
+        // not finish — in which case the record stays and the next launch sweeps it.
+        reapLaunchProcessGroupInBackground()
     }
     
     func disconnect() {
@@ -418,6 +438,7 @@ class VPNManager: ObservableObject {
         status = .disconnected
         debugOutput += "VPN disconnected\n"
         stopDurationTimer()
+        reapLaunchProcessGroupInBackground()
     }
     
     private func executeVPNConnection() async {
@@ -442,6 +463,19 @@ class VPNManager: ObservableObject {
             }
             logFailedAttempt(status: "Failed - Missing Tool")
             return
+        }
+
+        // Decide the elevation path before anything is launched, so the user can
+        // be told what to expect while there is still time to answer it. The
+        // probe shells out to `sudo -n -v` and reads two world-readable PAM
+        // files; it authenticates nothing and changes nothing.
+        let snapshot = await Self.elevationSnapshot()
+        elevation = snapshot.strategy
+        elevationBlock = nil
+        await MainActor.run {
+            for line in snapshot.strategy.debugLines(timeoutSeconds: Self.connectionTimeoutSeconds) {
+                self.debugOutput += line + "\n"
+            }
         }
 
         // Generate token using stoken
@@ -478,8 +512,10 @@ class VPNManager: ObservableObject {
             }
         }
         
-        // Ensure admin password is available for sudo -S
-        if settings.adminPassword.isEmpty {
+        // The stored password is only *needed* when it is the one being piped.
+        // With Touch ID enabled the system answers, and demanding a password
+        // first would be asking for a credential the connect has no use for.
+        if elevation.pipesTheStoredPassword && settings.adminPassword.isEmpty {
             await MainActor.run {
                 self.debugOutput += "Admin password required for VPN connection.\n"
             }
@@ -509,7 +545,8 @@ class VPNManager: ObservableObject {
             arguments: arguments,
             adminPassword: settings.adminPassword,
             pin: pin,
-            vpnPassword: settings.vpnPassword
+            vpnPassword: settings.vpnPassword,
+            elevation: elevation
         )
         // Shape, for the log and for debugging — it is the same script every
         // time, and it contains nothing secret.
@@ -527,7 +564,8 @@ class VPNManager: ObservableObject {
         // openconnect's stdin from `plan.standardInput`. Individual
         // credentials are recorded below in redacted form by `logSend`.
         log.write("Pipeline: \(shellCommand)")
-        log.write("Credential stdin: \(plan.standardInput.count) bytes, \(OpenConnectCommand.credentialLineCount) lines")
+        log.write("Credential stdin: \(plan.standardInput.count) bytes, \(elevation.credentialLineCount) lines")
+        log.write("Elevation: \(elevation)")
         log.logSend("Admin password (for sudo)", value: settings.adminPassword)
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
@@ -610,6 +648,16 @@ class VPNManager: ObservableObject {
                 if cleanLine.isEmpty { continue }
                 DispatchQueue.main.async {
                     let lower = cleanLine.lowercased()
+
+                    // A named elevation failure, before the keyword checks below:
+                    // the marker contains "sudo", and would otherwise be logged
+                    // as an administrator-password problem, which it is not.
+                    if let reason = ElevationBlockReason.match(markerLine: cleanLine) {
+                        log.logHandler("STDERR", action: "elevation blocked: \(reason.historyStatus)")
+                        self.elevationBlock = reason
+                        self.debugOutput += "ERROR: \(reason.detail)\n"
+                        return
+                    }
                     
                     // Handle potential login failure messages from openconnect.
                     // NOTE: Do NOT force-terminate here — the VPN may have successfully
@@ -653,6 +701,17 @@ class VPNManager: ObservableObject {
                 self.outputPipe?.fileHandleForReading.readabilityHandler = nil
                 self.errorPipe?.fileHandleForReading.readabilityHandler = nil
                 self.debugOutput += "VPN process exited (status: \(p.terminationStatus))\n"
+                // A named cause beats a bare exit status: the script ended
+                // itself because elevation could not be obtained, and saying
+                // which branch failed is the difference between a fixable
+                // message and "Connection failed (status: 1)".
+                if let reason = self.elevationBlock {
+                    self.debugOutput += "\(reason.detail)\n"
+                    self.status = .error(reason.historyStatus)
+                    self.logFailedAttempt(status: reason.historyStatus)
+                    self.cancelConnectionTimer()
+                    return
+                }
                 // Only update status if we weren't already connected
                 if case .connected = self.status {
                     self.status = .disconnected
@@ -672,7 +731,7 @@ class VPNManager: ObservableObject {
                 self.debugOutput += "VPN process launched. Awaiting connection...\n"
             }
             
-            self.startConnectionTimer(timeoutSeconds: 90)
+            self.startConnectionTimer(timeoutSeconds: Self.connectionTimeoutSeconds)
             
             // Feed the credentials. Written after `run()` so the child cannot
             // miss them, and closed so a failed `read` fails fast instead of
@@ -934,6 +993,53 @@ class VPNManager: ObservableObject {
         logFailedAttempt(status: "Failed - Token Error")
     }
     
+    /// The elevation snapshot, taken off the main thread: it shells out to
+    /// `sudo -n -v` (bounded, but up to 3 s) and reads two files. Neither the
+    /// window nor the cooperative pool should be waiting on that.
+    private static func elevationSnapshot() async -> ElevationSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: ElevationProbe.live(
+                    readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
+                    sudoTimestampIsWarm: { SudoProbe.isTimestampWarm() }
+                ))
+            }
+        }
+    }
+
+    /// Signals the process group the launch recorded, once the connection and the
+    /// wrapper are done with it.
+    ///
+    /// One id covers every user-owned member of the privileged subtree, which is
+    /// how a blocked `sudo` stops being *created*: with the body in a group of its
+    /// own, the group is what gets signalled. Three things it deliberately does
+    /// not do — it does not make the root members killable (the kernel refuses a
+    /// signal from a non-root sender), it does not touch a group that still holds
+    /// a live `openconnect` (that process restores routes and DNS on its way out),
+    /// and it does not pretend the group died: a group that is left alone keeps
+    /// its record, so a later launch can still find it.
+    ///
+    /// Runs off the main thread: it shells out to `ps`, bounded, but the UI must
+    /// not wait on it. If the app is quitting before that finishes, the record
+    /// survives and the next launch's sweep picks it up.
+    private func reapLaunchProcessGroup(log: VpnConnectionLogger? = nil) {
+        ElevationReaper.reapStaleGroup(log: { message in
+            if let log {
+                log.write("[ELEV] \(message)")
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.debugOutput += message + "\n"
+                }
+            }
+        })
+    }
+
+    private func reapLaunchProcessGroupInBackground() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.reapLaunchProcessGroup()
+        }
+    }
+
     private func binaryPath(_ name: String) -> String? {
         // Delegates to the shared resolver, which searches `$PATH` as well as
         // the prefixes: the four directories this used to try missed MacPorts
@@ -953,7 +1059,20 @@ class VPNManager: ObservableObject {
                 if case .connecting = self.status {
                     self.debugOutput += "Connection timeout reached. Terminating VPN process.\n"
                     self.forceTerminate()
-                    self.status = .error("Connection timeout")
+                    // With a system dialog up, the timeout means the dialog was
+                    // not answered — which is something the user can act on, and
+                    // is not the same as a network that did not come up.
+                    if let reason = self.elevationBlock {
+                        self.debugOutput += "\(reason.detail)\n"
+                        self.status = .error(reason.historyStatus)
+                    } else if self.elevation.waitsForTheSystem {
+                        self.debugOutput += self.elevation.timeoutDetail(timeoutSeconds: timeoutSeconds) + "\n"
+                        self.status = .error(self.elevation.timeoutHistoryStatus)
+                    } else {
+                        self.status = .error("Connection timeout")
+                    }
+                    self.logFailedAttempt(status: self.elevationBlock?.historyStatus
+                                          ?? self.elevation.timeoutHistoryStatus)
                 }
             }
         }
@@ -1172,6 +1291,7 @@ class VPNManager: ObservableObject {
         process = nil
         inputPipe = nil
         stopDurationTimer()
+        reapLaunchProcessGroupInBackground()
     }
     
     /// Shows an on-demand alert asking for the local admin password when sudo fails,
@@ -1296,38 +1416,36 @@ class VPNManager: ObservableObject {
     ///     before its atexit handlers can run
     /// Stale entries cause the next connection to fail because DNS
     /// resolution still points to old tunnel IPs that no longer exist.
+    ///
+    /// `.warmTimestamp`, never `.storedPassword`: this can run while the app is
+    /// quitting, and a dialog raised on the way out is one nobody can answer.
+    /// `sudo -n` either works or fails immediately, and the app does not need the
+    /// administrator password at all in this mode — so the cleanup now happens
+    /// even when no password is stored.
     private func cleanupVpnSliceHosts() {
-        let adminPwd = SettingsManager.shared.adminPassword
-        guard !adminPwd.isEmpty else {
-            debugOutput += "Warning: Cannot clean /etc/hosts — no admin password stored\n"
-            return
-        }
-        
-        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: adminPwd)
-        
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = ["-c", plan.script]
-        
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        let inPipe = Pipe()
-        task.standardOutput = outPipe
-        task.standardError = errPipe
-        // Same rule as the connect path: the admin password goes down the pipe,
-        // never into this command line.
-        task.standardInput = inPipe
-        
+        let plan = OpenConnectCommand.hostsCleanupPlan(
+            adminPassword: SettingsManager.shared.adminPassword,
+            elevation: .warmTimestamp
+        )
+
+        // Bounded, because this runs on the quit path: a wedged `sudo` must not be
+        // able to hold the app open. The runner gives the script /dev/null on
+        // stdin, which is not a compromise here — `.warmTimestamp` writes no
+        // credential to the pipe, so there is nothing to withhold.
         do {
-            try task.run()
-            try? inPipe.fileHandleForWriting.write(contentsOf: plan.standardInput)
-            try? inPipe.fileHandleForWriting.close()
-            task.waitUntilExit()
-            if task.terminationStatus == 0 {
+            let result = try SystemBoundedProcessRunner().run(
+                executable: URL(fileURLWithPath: "/bin/bash"),
+                arguments: ["-c", plan.script],
+                timeout: 5
+            )
+            if result.timedOut {
+                debugOutput += "Warning: /etc/hosts cleanup timed out; the next connect will retry it\n"
+            } else if result.terminationStatus == 0 {
                 debugOutput += "Cleaned up stale vpn-slice entries from /etc/hosts\n"
             } else {
-                let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                debugOutput += "Warning: Failed to clean /etc/hosts: \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+                let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                let reason = stderr.isEmpty ? "exit status \(result.terminationStatus)" : stderr
+                debugOutput += "Warning: Failed to clean /etc/hosts: \(reason)\n"
             }
         } catch {
             debugOutput += "Warning: Failed to clean /etc/hosts: \(error.localizedDescription)\n"
