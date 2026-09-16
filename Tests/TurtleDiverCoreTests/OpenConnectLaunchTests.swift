@@ -26,14 +26,18 @@ final class OpenConnectLaunchTests: XCTestCase {
     private func makePlan(host: String = "vpn.example.com",
                           arguments: [String]? = nil,
                           openconnectPath: String = "/opt/homebrew/bin/openconnect",
-                          searchPath: String = OpenConnectCommand.defaultSearchPath) -> OpenConnectLaunchPlan {
+                          searchPath: String = OpenConnectCommand.defaultSearchPath,
+                          elevation: ElevationStrategy = .storedPassword,
+                          pgidFile: String = "/tmp/turtlediver-test-elevation.pgid") -> OpenConnectLaunchPlan {
         OpenConnectCommand.launchPlan(
             openconnectPath: openconnectPath,
             arguments: arguments ?? ["--force-dpd=10", "--user=451799", "--pid-file", "/tmp/pid", host],
             adminPassword: admin,
             pin: pin,
             vpnPassword: password,
-            searchPath: searchPath
+            searchPath: searchPath,
+            elevation: elevation,
+            pgidFile: pgidFile
         )
     }
 
@@ -130,7 +134,9 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(script.contains("sudo '/opt/homebrew/bin/openconnect'"))
         XCTAssertTrue(script.contains("'--force-dpd=10'"))
         XCTAssertTrue(script.contains("'--user=451799'"))
-        XCTAssertTrue(script.hasSuffix("'vpn.example.com'; unset oc_admin oc_pin oc_pass"),
+        // The host stays last, after the options, and the launch is the last
+        // thing in the group's body.
+        XCTAssertTrue(script.contains("'vpn.example.com'; } & job=$!"),
                       "the host must stay last, after the options: \(script)")
     }
 
@@ -170,7 +176,9 @@ final class OpenConnectLaunchTests: XCTestCase {
 
         XCTAssertTrue(script.contains("if ! sudo -n -v >/dev/null 2>&1; then"),
                       "the refresh must not authenticate when the timestamp is warm")
-        XCTAssertTrue(script.contains("|| exit 1; fi"))
+        XCTAssertTrue(script.contains("| sudo -S -v || { printf '%s\\n' 'turtlediver: elevation"),
+                      "a refused password must be reported, not left as a bare exit status")
+        XCTAssertTrue(script.contains("exit 1; }; fi"))
     }
 
     /// A cold timestamp still has to end up authenticated — `-n` alone would
@@ -196,15 +204,110 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(cleanup.lowerBound < run.lowerBound)
     }
 
-    /// Nothing was relaxed system-wide to get there: no `NOPASSWD`, no
-    /// passwordless `sudo`, no `-n` on the invocations that actually need to
-    /// work.
+    /// Nothing was relaxed system-wide to get there: no `NOPASSWD`, no edit to
+    /// sudoers, no passwordless `sudo` standing in for a password that is
+    /// available. The default mode is the only one allowed to feed `-S`, and it
+    /// feeds it only where the pipe carries the password.
     func testThePlanNeverAsksForPasswordlessSudo() {
-        let script = makePlan().script
+        for elevation in ElevationStrategy.allCases {
+            let script = makePlan(elevation: elevation).script
+            XCTAssertFalse(script.contains("NOPASSWD"), "\(elevation) weakens sudo system-wide")
+            XCTAssertFalse(script.contains("sudoers"), "\(elevation) touches sudoers")
+        }
+        XCTAssertFalse(makePlan().script.contains("sudo -n openconnect"))
+        XCTAssertFalse(makePlan().script.contains("sudo -n sed"))
+    }
 
-        XCTAssertFalse(script.contains("NOPASSWD"))
-        XCTAssertFalse(script.contains("sudo -n openconnect"))
-        XCTAssertFalse(script.contains("sudo -n sed"))
+    /// The default mode is the only one that may pipe a password, and it is the
+    /// one whose `sudo` can never raise a dialog.
+    func testOnlyTheStoredPasswordModeFeedsSudoAPassword() {
+        let stored = makePlan(elevation: .storedPassword).script
+        XCTAssertTrue(stored.contains("| sudo -S -v"))
+        XCTAssertTrue(stored.contains("| sudo -S sed"))
+
+        for elevation in [ElevationStrategy.systemPrompt, .warmTimestamp] {
+            let script = makePlan(elevation: elevation).script
+            XCTAssertFalse(script.contains("sudo -S"), "\(elevation) can still block on a dialog")
+            XCTAssertFalse(script.contains(OpenConnectCommand.adminVariable),
+                           "\(elevation) still references the administrator password")
+        }
+    }
+
+    /// The Touch ID case: the dialog is the point, so stdin is closed and
+    /// nothing is piped. Feeding `sudo` here is what produced the hang — the
+    /// password was never read, and the `sudo` blocked forever.
+    func testTheSystemPromptModeLetsSudoRaiseItsOwnDialogAndPipesNothing() {
+        let plan = makePlan(elevation: .systemPrompt)
+
+        XCTAssertTrue(plan.script.contains("sudo -v </dev/null"),
+                      "sudo must be free to ask the system, with no pipe in the way")
+        XCTAssertFalse(plan.script.contains("printf '%s\\n' \"$\(OpenConnectCommand.adminVariable)\""))
+        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 2)
+
+        let lines = String(decoding: plan.standardInput, as: UTF8.self)
+        XCTAssertEqual(lines, "\(pin)\n\(password)\n", "the admin password must not be on the pipe at all")
+        XCTAssertFalse(lines.contains(admin))
+    }
+
+    /// The no-dialog case for a quit or a headless moment: never ask, and say so
+    /// when the timestamp is cold.
+    func testTheWarmTimestampModeRefusesToAskAndReportsWhy() {
+        let plan = makePlan(elevation: .warmTimestamp)
+
+        XCTAssertTrue(plan.script.contains("sudo -n '/opt/homebrew/bin/openconnect'"))
+        XCTAssertFalse(plan.script.contains("sudo -S"))
+        XCTAssertFalse(plan.script.contains("sudo -v"))
+        XCTAssertTrue(plan.script.contains("exit 1"), "a cold timestamp must end the script, not wait")
+        XCTAssertTrue(plan.script.contains(ElevationBlockReason.timestampExpired.markerLine))
+        XCTAssertEqual(String(decoding: plan.standardInput, as: UTF8.self), "\(pin)\n\(password)\n")
+    }
+
+    /// The invariant the plain `sudo` launch relies on: by the time openconnect
+    /// runs, a cold timestamp has already ended the script.
+    func testTheWarmTimestampIsCheckedAgainImmediatelyBeforeTheLaunch() throws {
+        let script = makePlan(elevation: .warmTimestamp).script
+        let stillWarm = try XCTUnwrap(script.range(of: "sudo -n -v >/dev/null 2>&1 || {"))
+        let launch = try XCTUnwrap(script.range(of: "sudo -n '/opt/homebrew/bin/openconnect'"))
+
+        XCTAssertTrue(stillWarm.lowerBound < launch.lowerBound)
+    }
+
+    /// Quitting must never raise a dialog: nobody can answer one, and the app is
+    /// on its way out.
+    func testTheCleanupPlanOnQuitNeverAsksForAnything() {
+        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: admin, elevation: .warmTimestamp)
+
+        XCTAssertTrue(plan.script.contains("sudo -n sed -i '' '/# vpn-slice-/d' /etc/hosts"))
+        XCTAssertFalse(plan.script.contains("sudo -S"))
+        XCTAssertFalse(plan.script.contains("sudo -v"))
+        XCTAssertFalse(plan.script.contains(OpenConnectCommand.adminVariable))
+        XCTAssertTrue(plan.script.contains(ElevationBlockReason.timestampExpired.markerLine))
+        XCTAssertTrue(plan.standardInput.isEmpty)
+        // It reports its own failure; the caller does not silence it.
+        XCTAssertFalse(plan.script.contains("2>/dev/null"))
+    }
+
+    // MARK: - The process group
+
+    func testThePrivilegedBodyRunsInItsOwnProcessGroup() {
+        let script = makePlan(pgidFile: "/tmp/example.pgid").script
+
+        XCTAssertTrue(script.contains("set -m; { set +m; "),
+                      "job control must create the group, then be switched off inside it")
+        XCTAssertTrue(script.contains("} & job=$!; set +m; "),
+                      "job control must be off again before anything forks")
+        XCTAssertTrue(script.contains("ps -o pgid= -p \"$job\" 2>/dev/null | tr -d ' ' > '/tmp/example.pgid'"))
+        XCTAssertTrue(script.contains("wait \"$job\" 2>/dev/null; status=$?;"))
+        XCTAssertTrue(script.contains("rm -f '/tmp/example.pgid'"))
+        XCTAssertTrue(script.hasSuffix("exit $status"), "the body's status must be the script's status")
+    }
+
+    func testTheCleanupPlanRunsInTheForeground() {
+        // Quitting has no timer to fall back on, so that plan waits inline.
+        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: admin)
+
+        XCTAssertFalse(plan.script.contains("set -m"))
+        XCTAssertFalse(plan.script.contains("job=$!"))
     }
 
     func testTheConnectPlanKeepsTheCleanupStepQuiet() {
@@ -269,10 +372,11 @@ final class OpenConnectLaunchTests: XCTestCase {
     /// Nothing here touches the real `sudo`, `/etc/hosts` or a network: the
     /// plan is composed with `searchPath` pointing at the sandbox, so the
     /// script's own `export PATH=…` finds the fakes first, and the fake `sudo`
-    /// simply execs its arguments.
+    /// simply execs its arguments. The process-group record is redirected into
+    /// the sandbox too, so a test can never write into the real run directory.
     private func run(
         makePlan: (String) -> OpenConnectLaunchPlan
-    ) throws -> (stdin: String, argv: [String], sudoCalls: [String]) {
+    ) throws -> (stdin: String, argv: [String], sudoCalls: [String], recordedPgid: String, openconnectPgid: String, wrapperPid: Int32) {
         let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("oclaunch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
@@ -282,6 +386,9 @@ final class OpenConnectLaunchTests: XCTestCase {
         let recorded = sandbox.appendingPathComponent("openconnect-received.txt")
         let argvFile = sandbox.appendingPathComponent("openconnect-argv.txt")
         let sudoLog = sandbox.appendingPathComponent("sudo-calls.txt")
+        let pgidFile = sandbox.appendingPathComponent("elevation.pgid")
+        let myPgidFile = sandbox.appendingPathComponent("openconnect.pgid")
+        let seenPgidFile = sandbox.appendingPathComponent("pgid-file-seen.pgid")
 
         func write(_ name: String, _ body: String) throws -> String {
             let url = sandbox.appendingPathComponent(name)
@@ -301,6 +408,7 @@ final class OpenConnectLaunchTests: XCTestCase {
           case "$arg" in
             -S) password=1 ;;
             -v) exit 0 ;;
+            -n) ;;
             *) args+=("$arg") ;;
           esac
         done
@@ -312,6 +420,16 @@ final class OpenConnectLaunchTests: XCTestCase {
         let openconnectBody = """
         #!/bin/bash
         printf '%s\\n' "$@" > '\(argvFile.path)'
+        # Record which process group this ran in, and what the script had
+        # written down for it. The script writes the record concurrently with
+        # this process starting, so wait — briefly and with a bound — for it.
+        printf '%s\\n' "$(ps -o pgid= -p $$ | tr -d ' ')" > '\(myPgidFile.path)'
+        i=0
+        while [ ! -s '\(pgidFile.path)' ] && [ "$i" -lt 40 ]; do
+          sleep 0.05
+          i=$((i + 1))
+        done
+        cat '\(pgidFile.path)' > '\(seenPgidFile.path)' 2>/dev/null
         cat > '\(recorded.path)'
         """
         _ = try write("openconnect", openconnectBody)
@@ -321,8 +439,9 @@ final class OpenConnectLaunchTests: XCTestCase {
         process.arguments = ["-c", plan.script]
         let stdinPipe = Pipe()
         process.standardInput = stdinPipe
+        let errorPipe = Pipe()
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errorPipe
 
         let finished = expectation(description: "plan finished")
         process.terminationHandler = { _ in finished.fulfill() }
@@ -337,7 +456,13 @@ final class OpenConnectLaunchTests: XCTestCase {
             .split(separator: "\n").map(String.init)
         let calls = ((try? String(contentsOf: sudoLog, encoding: .utf8)) ?? "")
             .split(separator: "\n").map(String.init)
-        return (received, argv, calls)
+        let recordedPgid = ((try? String(contentsOf: seenPgidFile, encoding: .utf8)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let openconnectPgid = ((try? String(contentsOf: myPgidFile, encoding: .utf8)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertTrue(stderr.isEmpty, "the plan wrote to stderr, which the app parses as log output: \(stderr)")
+        return (received, argv, calls, recordedPgid, openconnectPgid, process.processIdentifier)
     }
 
     /// What the old `printf '<pin>\n<password>' | sudo openconnect …` pipeline
@@ -361,15 +486,34 @@ final class OpenConnectLaunchTests: XCTestCase {
     }
 
     func testOpenconnectReceivesTheSameStdinAsTheOldPipeline() throws {
-        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0) }
+        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0,
+                                        pgidFile: $0 + "/elevation.pgid") }
 
         XCTAssertEqual(result.stdin, "\(pin)\n\(password)\n",
                        "openconnect's own stdin must be unchanged from the old pipeline")
         XCTAssertEqual(result.stdin, try runLegacyPipeline())
     }
 
+    /// The group is the whole mechanism: a teardown signals that id, and a
+    /// launch-time sweep decides from it whether a leftover can be killed. Both
+    /// only work if the id really is the group openconnect runs in — and if it
+    /// is *not* the app's own group, because signalling that would kill the app.
+    func testTheRecordedGroupIsTheOneOpenconnectActuallyRunsIn() throws {
+        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0,
+                                        pgidFile: $0 + "/elevation.pgid") }
+
+        let recorded = try XCTUnwrap(Int32(result.recordedPgid), "the script recorded no process group")
+        let actual = try XCTUnwrap(Int32(result.openconnectPgid), "openconnect did not report its group")
+        XCTAssertEqual(recorded, actual, "the recorded group is not the one openconnect ran in")
+        XCTAssertNotEqual(recorded, result.wrapperPid,
+                          "the record names the wrapper itself, not a group the body leads")
+        XCTAssertNotEqual(recorded, getpgrp(),
+                          "the recorded group is the caller's own — signalling it would kill the app")
+    }
+
     func testTheAdminPasswordReachesSudoThroughItsStdinNotItsArguments() throws {
-        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0) }
+        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0,
+                                        pgidFile: $0 + "/elevation.pgid") }
 
         XCTAssertFalse(result.sudoCalls.isEmpty, "the fake sudo was never called")
         for call in result.sudoCalls {
@@ -381,7 +525,8 @@ final class OpenConnectLaunchTests: XCTestCase {
     }
 
     func testOpenconnectNeverSeesTheCredentialsInItsArguments() throws {
-        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0) }
+        let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0,
+                                        pgidFile: $0 + "/elevation.pgid") }
 
         XCTAssertTrue(result.argv.contains("vpn.example.com"))
         XCTAssertTrue(result.argv.contains("--force-dpd=10"))
@@ -425,7 +570,8 @@ final class OpenConnectLaunchTests: XCTestCase {
         }
 
         let plan = makePlan(openconnectPath: sandbox.appendingPathComponent("openconnect").path,
-                            searchPath: sandbox.path)
+                            searchPath: sandbox.path,
+                            pgidFile: sandbox.appendingPathComponent("elevation.pgid").path)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = ["-c", plan.script]
