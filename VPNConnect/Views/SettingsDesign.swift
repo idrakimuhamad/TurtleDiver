@@ -409,6 +409,62 @@ struct SettingsPill: View {
     }
 }
 
+/// A described option tile: icon, title, and the consequence in one or two
+/// lines, with the chosen one outlined in the accent colour.
+///
+/// Used where a control picks between *behaviours* rather than values — a
+/// segmented control can only name them, and the name ("Mode: split
+/// tunneling") does not say what changes.
+struct SettingsChoiceTile: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let isSelected: Bool
+    let choose: () -> Void
+
+    var body: some View {
+        Button(action: choose) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .frame(width: 17)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    Text(detail)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+
+                Spacer(minLength: 4)
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.45))
+            }
+            .padding(10)
+            // `maxHeight` makes the shorter of two side-by-side tiles grow to
+            // match the taller one, so the pair reads as one control.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(isSelected ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.10),
+                                  lineWidth: isSelected ? 1.5 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+}
+
 /// Password field with a reveal toggle, sized for a settings row.
 struct SettingsSecureField: View {
     let prompt: String

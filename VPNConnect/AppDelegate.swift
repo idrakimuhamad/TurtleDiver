@@ -60,7 +60,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         StartupLog.reset()
         StartupLog.write("applicationDidFinishLaunching started")
-        
+
+        // 0. Bring anything stored under an older bundle identifier forward.
+        // This has to run before the first read of the settings: both stores are
+        // keyed by the bundle id, so after a rename the app would otherwise
+        // start with no preferences and no credentials at all.
+        //
+        // The credential half can raise the system's "wants to access" key
+        // dialog once per item, because those items belong to the *old* app
+        // identity — it blocks here until it is answered, which is why it runs
+        // in the app only, never in a test or a tool.
+        StartupLog.write("Step 0: Migrating settings and credentials from older bundle ids...")
+        let copiedKeys = SettingsDomainMigration.copyLegacyDomains()
+        let copiedSecrets = KeychainHelper.migrateLegacyServicesIfNeeded()
+        StartupLog.write("Step 0 done. settings keys: \(copiedKeys.count), credentials: \(copiedSecrets.count)")
+
         // 1. Set up the menu FIRST — before anything else
         StartupLog.write("Step 1: Setting up menu bar...")
         setupMenuBar()

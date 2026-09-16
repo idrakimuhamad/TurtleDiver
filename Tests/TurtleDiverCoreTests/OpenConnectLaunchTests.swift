@@ -160,6 +160,53 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(plan.script.contains("printf '%s\\n' \"$\(OpenConnectCommand.adminVariable)\""))
     }
 
+    // MARK: - sudo timestamp
+
+    /// `sudo -v` authenticates unconditionally, so it raised a Touch ID prompt
+    /// of its own even when the timestamp was already valid. The probe must be
+    /// non-interactive, or the refresh keeps costing a dialog it does not need.
+    func testTheTimestampRefreshProbesNonInteractivelyFirst() {
+        let script = makePlan().script
+
+        XCTAssertTrue(script.contains("if ! sudo -n -v >/dev/null 2>&1; then"),
+                      "the refresh must not authenticate when the timestamp is warm")
+        XCTAssertTrue(script.contains("|| exit 1; fi"))
+    }
+
+    /// A cold timestamp still has to end up authenticated — `-n` alone would
+    /// simply fail and stop every connect on a machine that has not run sudo
+    /// recently.
+    func testAColdTimestampStillFallsBackToTheStoredPassword() {
+        let script = makePlan().script
+
+        XCTAssertTrue(script.contains("printf '%s\\n' \"$\(OpenConnectCommand.adminVariable)\" | sudo -S -v"),
+                      "the admin password fallback must survive the probe")
+    }
+
+    /// The refresh has to happen before anything else needs sudo, so the
+    /// cleanup and openconnect inherit a warm timestamp instead of each raising
+    /// their own dialog.
+    func testTheTimestampIsRefreshedBeforeTheCleanupAndOpenconnect() throws {
+        let script = makePlan().script
+        let refresh = try XCTUnwrap(script.range(of: "sudo -n -v"))
+        let cleanup = try XCTUnwrap(script.range(of: "sed -i"))
+        let run = try XCTUnwrap(script.range(of: "/openconnect"))
+
+        XCTAssertTrue(refresh.lowerBound < cleanup.lowerBound)
+        XCTAssertTrue(cleanup.lowerBound < run.lowerBound)
+    }
+
+    /// Nothing was relaxed system-wide to get there: no `NOPASSWD`, no
+    /// passwordless `sudo`, no `-n` on the invocations that actually need to
+    /// work.
+    func testThePlanNeverAsksForPasswordlessSudo() {
+        let script = makePlan().script
+
+        XCTAssertFalse(script.contains("NOPASSWD"))
+        XCTAssertFalse(script.contains("sudo -n openconnect"))
+        XCTAssertFalse(script.contains("sudo -n sed"))
+    }
+
     func testTheConnectPlanKeepsTheCleanupStepQuiet() {
         // The old pipeline sent the /etc/hosts cleanup's stderr to /dev/null:
         // a stale entry it cannot remove is not a connection failure, and the

@@ -33,6 +33,10 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   between launches, and the window expands itself when the tunnel comes up or
   when you switch the proxy engine on. The VPN/engine/system-proxy switches sit
   in the main window, so the everyday loop never needs Settings
+- **Renamed app** (1.6.0): the bundle identifier is now
+  `com.xvii.kurakura.vpn` (it was `com.idraki.turtle.vpn`). Preferences and
+  Keychain items are carried over on first launch — see
+  [Renaming the app](#renaming-the-app-160)
 - **Settings** (1.4.0): a native sidebar-and-detail window — **Connection**
   (VPN, Profiles), **Proxy Engine** (Dashboard, Policies, Rules, Routing,
   Rule Sets),
@@ -176,6 +180,28 @@ first match wins, with the active profile's `FINAL` as catch-all. *Import PAC*
 in the toolbar pastes or loads a `.pac` file, previews the proxies, groups,
 rules and diagnostics it would create, and applies them to the active profile.
 
+### Renaming the app (1.6.0)
+
+The bundle identifier is `com.xvii.kurakura.vpn` — it names both the
+preferences domain and the Keychain service, so the first launch after the
+rename has to bring the old data across. `AppDelegate` does that before
+anything reads the settings (step 0 of the launch log):
+
+- **Preferences** are copied from the old `UserDefaults` domains
+  (`com.idraki.turtle.vpn`, `com.turtlediver`) with
+  `persistentDomain(forName:)`; a key that already exists under the new
+  identifier is never overwritten, and the global domain is never copied in.
+- **Credentials** are copied from the old Keychain services the first time a
+  current-service item is missing. The legacy items are left in place, because
+  scripts that read them by name (e.g. a personal reconnect helper) still work.
+  Because those items were created by the *old* app identity, macOS asks once
+  per credential whether the renamed app may read them — click **Always Allow**
+  and they are copied forward; after that the prompts stop.
+
+`AppIdentity` holds the identifiers, and `AppIdentityTests` fails if they drift
+from `PRODUCT_BUNDLE_IDENTIFIER` in the Xcode project — the two must agree or
+the app would read its own secrets from a name the system does not accept.
+
 ### Rule Sets (1.5.0)
 
 Settings → **Rule Sets** subscribes to a remote rule list — the Surge-style
@@ -256,8 +282,8 @@ The application consists of several key components:
   macOS **Keychain**, never in `UserDefaults`. A launch-time hygiene pass
   migrates anything an older build left in the plist into the Keychain (the
   Keychain value always wins), then deletes the dead credential and PAC-era
-  keys — so a plaintext password no longer sits in
-  `~/Library/Preferences/com.idraki.turtle.vpn.plist`.
+  keys — so a plaintext password no longer sits in the preferences file
+  (`~/Library/Preferences/com.xvii.kurakura.vpn.plist`).
 - The application requires sudo privileges for VPN connection and for setting
   the system proxy
 - All network traffic is handled through standard macOS networking APIs

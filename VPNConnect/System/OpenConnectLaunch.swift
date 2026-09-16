@@ -45,9 +45,9 @@ public enum OpenConnectCommand {
     /// wins over anything else on the login shell's `PATH`.
     public static let defaultSearchPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
-    /// The full connect pipeline: clear stale vpn-slice lines out of
-    /// `/etc/hosts`, refresh sudo's timestamp, then hand the PIN and the
-    /// account password to openconnect.
+    /// The full connect pipeline: refresh sudo's timestamp if that can be done
+    /// without asking, clear stale vpn-slice lines out of `/etc/hosts`, then
+    /// hand the PIN and the account password to openconnect.
     ///
     /// The credential order (PIN, then password) and the shape of the pipelines
     /// are unchanged from the previous `echo`-based version; only the source of
@@ -62,12 +62,12 @@ public enum OpenConnectCommand {
     ) -> OpenConnectLaunchPlan {
         let escapedArguments = arguments.map(shellEscape).joined(separator: " ")
         let body = [
+            timestampRefreshStep,
             // `2>/dev/null` is kept from the old pipeline on purpose: a stale
             // entry that cannot be cleaned is not a connection failure, and its
             // stderr would otherwise be parsed as an error burst.
             hostsCleanupStep + " 2>/dev/null",
-            "printf '%s\\n' \"$\(adminVariable)\" | sudo -S -v"
-                + " && printf '%s\\n%s\\n' \"$\(pinVariable)\" \"$\(passwordVariable)\""
+            "printf '%s\\n%s\\n' \"$\(pinVariable)\" \"$\(passwordVariable)\""
                 + " | sudo \(shellEscape(openconnectPath)) \(escapedArguments)"
         ].joined(separator: "; ")
 
@@ -90,6 +90,23 @@ public enum OpenConnectCommand {
             standardInput: credentialLines([adminPassword])
         )
     }
+
+    /// Refreshes sudo's timestamp without a dialog whenever the timestamp is
+    /// already valid, and only then falls back to an authenticated refresh.
+    ///
+    /// `sudo -v` on its own authenticates unconditionally, which raised a Touch
+    /// ID (or password) dialog for the refresh itself even when the cleanup
+    /// below had just authenticated — a prompt that proved nothing. `-n` never
+    /// prompts, so it succeeds exactly when the timestamp is warm.
+    ///
+    /// The fallback keeps `sudo -S` and the stored admin password: `sudo_local`
+    /// has pam_tid as `sufficient`, not `required`, so a cold timestamp uses
+    /// Touch ID when it can and this password when it cannot — the clamshell or
+    /// headless case, where nothing else can answer the prompt. The password is
+    /// never in the script, only on stdin.
+    private static let timestampRefreshStep =
+        "if ! sudo -n -v >/dev/null 2>&1; then"
+        + " printf '%s\\n' \"$\(adminVariable)\" | sudo -S -v || exit 1; fi"
 
     /// `sed -i` through sudo, fed by `printf` rather than `echo` so a password
     /// containing a backslash or a leading `-n` is not mangled.

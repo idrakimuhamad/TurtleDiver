@@ -13,6 +13,7 @@
 		7C0FFEE20000000000000004 /* RelayConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000014 /* RelayConnection.swift */; };
 		7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000011 /* SystemProxyManager.swift */; };
 		7C0FFEE30000000000000003 /* OpenConnectLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000013 /* OpenConnectLaunch.swift */; };
+		7C0FFEE30000000000000004 /* AppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000014 /* AppIdentity.swift */; };
 		7C0FFEE50000000000000001 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000011 /* DashboardView.swift */; };
 		7C0FFEE50000000000000002 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000012 /* ProfilesView.swift */; };
 		7C0FFEE50000000000000003 /* RulesEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE50000000000000013 /* RulesEditorView.swift */; };
@@ -69,6 +70,7 @@
 		7C0FFEE80000000000000013 /* RuleSetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSetsView.swift; sourceTree = "<group>"; };
 		7C0FFEE30000000000000011 /* SystemProxyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyManager.swift; sourceTree = "<group>"; };
 		7C0FFEE30000000000000013 /* OpenConnectLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenConnectLaunch.swift; sourceTree = "<group>"; };
+		7C0FFEE30000000000000014 /* AppIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIdentity.swift; sourceTree = "<group>"; };
 		7C0FFEE50000000000000011 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		7C0FFEE50000000000000012 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
 		7C0FFEE50000000000000013 /* RulesEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesEditorView.swift; sourceTree = "<group>"; };
@@ -201,6 +203,7 @@
 			children = (
 				7C0FFEE30000000000000011 /* SystemProxyManager.swift */,
 				7C0FFEE30000000000000013 /* OpenConnectLaunch.swift */,
+				7C0FFEE30000000000000014 /* AppIdentity.swift */,
 				7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */,
 			);
 			path = System;
@@ -326,6 +329,7 @@
 				7C0FFEE20000000000000009 /* AdvancedView.swift in Sources */,
 				7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */,
 				7C0FFEE30000000000000003 /* OpenConnectLaunch.swift in Sources */,
+				7C0FFEE30000000000000004 /* AppIdentity.swift in Sources */,
 				7C0FFEE30000000000000002 /* VPNRuleGenerator.swift in Sources */,
 				1A2B3C7E1234567890ABCDEF /* EngineController.swift in Sources */,
 				7C0FFEE50000000000000001 /* DashboardView.swift in Sources */,
@@ -473,7 +477,7 @@
 				CODE_SIGN_ENTITLEMENTS = VPNConnect/VPNConnect.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = KT7QU923S8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -486,8 +490,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.5.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.idraki.turtle.vpn;
+				MARKETING_VERSION = 1.6.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.xvii.kurakura.vpn;
 				PRODUCT_NAME = TurtleDiver;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -503,7 +507,7 @@
 				CODE_SIGN_ENTITLEMENTS = VPNConnect/VPNConnect.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = KT7QU923S8;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -516,8 +520,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.5.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.idraki.turtle.vpn;
+				MARKETING_VERSION = 1.6.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.xvii.kurakura.vpn;
 				PRODUCT_NAME = TurtleDiver;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;

@@ -23,6 +23,9 @@ struct MainView: View {
     /// dashboard the user opened on purpose.
     @State private var autoExpanded = false
     @State private var copiedLog = false
+    /// The docked log starts open — it is only on screen when it has something
+    /// to say (`showsLog`) — and collapses out of the way on request.
+    @State private var logExpanded = true
     @State private var spinning = false
     @State private var footerHovered = false
 
@@ -38,16 +41,24 @@ struct MainView: View {
             statusHero
                 .padding(.horizontal, 14)
 
-            actionButton
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-
             toggles
                 .padding(.horizontal, 14)
                 .padding(.top, 12)
+                // Room under the pinned switches for the dashboard to scroll
+                // into: without it the first row of cards was clipped flush
+                // against the switch tiles, with nothing to say more was below.
+                .padding(.bottom, 12)
 
             if expanded {
                 dashboard
+                // Docked, not appended to the dashboard: the log is what you
+                // watch *while* something goes wrong, so it must not sit below
+                // the request table, where reaching it meant scrolling first.
+                if showsLog {
+                    logCard
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 12)
+                }
             }
 
             footer
@@ -146,35 +157,50 @@ struct MainView: View {
                     .foregroundStyle(statusTitleColor)
                     .lineLimit(1)
                 if let detail = statusDetail {
-                    Text(detail)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    statusDetailLine(detail)
                 }
             }
 
-            Spacer(minLength: 6)
+            Spacer(minLength: 8)
 
-            if vpn.status == .connected {
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text("DURATION")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text(vpn.durationString)
-                        .font(.system(size: 15, weight: .medium, design: .monospaced))
-                        .contentTransition(.numericText())
-                }
-            }
+            // Status and action in one card: the button no longer owns a row of
+            // its own, so the everyday controls sit together instead of in two
+            // stacked bands.
+            actionButton
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
         .background(RoundedRectangle(cornerRadius: 12).fill(statusTint.opacity(isDimState ? 0.07 : 0.12)))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(statusTint.opacity(isDimState ? 0.18 : 0.30))
         )
         .animation(.easeInOut(duration: 0.2), value: vpn.status)
+    }
+
+    /// Host on the left, duration on the right, both on the detail line — which
+    /// left the card's trailing edge to the one thing that acts: the button.
+    /// The duration is `.fixedSize()` so a long host truncates first (the
+    /// other way round hid the number that changes).
+    @ViewBuilder
+    private func statusDetailLine(_ detail: String) -> some View {
+        HStack(spacing: 6) {
+            Text(detail)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if vpn.status == .connected {
+                Text("·")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Text(vpn.durationString)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+                    .fixedSize()
+            }
+        }
     }
 
     /// Idle is not a problem state, so it is not coloured like one: the badge
@@ -214,10 +240,13 @@ struct MainView: View {
                         .tint(.white)
                 }
                 Text(actionButtonText)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 38)
+            // A fixed box, not the whole row: a fixed width keeps the button
+            // from resizing itself between "Connect" and "Disconnect", which
+            // would shove the status text sideways on every state change.
+            .frame(width: 106, height: 34)
             .background(RoundedRectangle(cornerRadius: 9).fill(actionButtonBackground))
             .foregroundStyle(.white)
         }
@@ -341,16 +370,26 @@ struct MainView: View {
                     trafficCard
                 }
                 RequestsCard()
-                if showsLog {
-                    logCard
-                }
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)
             .padding(.bottom, 12)
         }
-        // Without this a row is sliced mid-height at the scroll boundary, which
-        // reads as a rendering glitch rather than "there is more below".
+        // A row is sliced mid-height at both scroll boundaries. Without the
+        // fades that hard cut reads as a rendering glitch rather than "there is
+        // more this way".
+        .overlay(alignment: .top) {
+            LinearGradient(
+                colors: [
+                    Color(nsColor: .windowBackgroundColor),
+                    Color(nsColor: .windowBackgroundColor).opacity(0)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 14)
+            .allowsHitTesting(false)
+        }
         .overlay(alignment: .bottom) {
             LinearGradient(
                 colors: [
@@ -499,9 +538,9 @@ struct MainView: View {
         }
     }
 
-    /// The log is part of the dashboard, and it turns itself on when it is
-    /// actually useful: while a connection is coming up or running, or when the
-    /// Debug Output switch asks for it.
+    /// The log is docked below the dashboard (not part of its scroll view) and
+    /// turns itself on when it is actually useful: while a connection is coming
+    /// up or running, or when the Debug Output switch asks for it.
     private var showsLog: Bool {
         if settings.debugMode { return true }
         switch vpn.status {
@@ -510,13 +549,29 @@ struct MainView: View {
         }
     }
 
+    /// The docked console: header (collapse, VERBOSE, Copy) plus the log body.
+    /// It sits between the dashboard and the footer, at a fixed height, so the
+    /// request table scrolls inside its own card instead of being the thing you
+    /// have to scroll past to reach the log.
     private var logCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text("Live Log")
-                    .font(.system(size: 11, weight: .semibold))
-                    .textCase(.uppercase)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { logExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: logExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                        Text("Live Log")
+                            .font(.system(size: 11, weight: .semibold))
+                            .textCase(.uppercase)
+                    }
                     .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(logExpanded ? "Hide the log" : "Show the log")
+
                 if settings.debugMode {
                     Text("VERBOSE")
                         .font(.system(size: 9, weight: .bold))
@@ -541,32 +596,39 @@ struct MainView: View {
                 .disabled(vpn.debugOutput.isEmpty)
             }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 1) {
-                        if logLines.isEmpty {
-                            Text("No log output yet.")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(logLines) { line in
-                                logLineText(line)
+            if logExpanded {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 1) {
+                            if logLines.isEmpty {
+                                Text("No log output yet.")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(Color(white: 0.62))
+                            } else {
+                                ForEach(logLines) { line in
+                                    logLineText(line)
+                                }
                             }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(logBottomAnchor)
                         }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(logBottomAnchor)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(8)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .padding(8)
-                }
-                .frame(height: 190)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.32)))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
-                .onAppear { proxy.scrollTo(logBottomAnchor, anchor: .bottom) }
-                .onChange(of: vpn.debugOutput) { _, _ in
-                    proxy.scrollTo(logBottomAnchor, anchor: .bottom)
+                    // A dark, *opaque* console. The old fill was
+                    // `black.opacity(0.32)` over a light window, which turned
+                    // the light log text into pale ink on mid grey; the colours
+                    // below are the ones tuned for a dark background, so the
+                    // background has to actually be dark.
+                    .frame(height: 150)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(white: 0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.10)))
+                    .onAppear { proxy.scrollTo(logBottomAnchor, anchor: .bottom) }
+                    .onChange(of: vpn.debugOutput) { _, _ in
+                        proxy.scrollTo(logBottomAnchor, anchor: .bottom)
+                    }
                 }
             }
         }

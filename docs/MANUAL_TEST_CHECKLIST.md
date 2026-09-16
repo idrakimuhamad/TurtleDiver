@@ -6,9 +6,44 @@ release.
 
 ## 0. Setup
 
-- [ ] `swift test` passes (462 tests green).
+- [ ] `swift test` passes (485 tests green).
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
+
+## 0a. Bundle-identifier rename (1.6.0) — one-time, run before installing 1.6.0
+
+Installing 1.6.0 over 1.5.0 changes the app's identity, so this is the one
+section that has to be done **before** the new build is launched (the old plist
+is the input).
+
+- [ ] Note what the old build had: `plutil -p
+      ~/Library/Preferences/com.idraki.turtle.vpn.plist | grep -c .` (the
+      renamed app reads `…/com.xvii.kurakura.vpn.plist` from now on).
+- [ ] Quit 1.5.0, install 1.6.0, launch it → the launch log
+      (`~/Library/Logs/TurtleDiver/launch.log`) starts with
+      `Step 0: Migrating settings and credentials from older bundle ids...` and
+      reports a non-zero number of settings keys (0 only on a clean install).
+- [ ] **macOS asks once per credential whether TurtleDiver may read a Keychain
+      item created by the old app identity.** Click *Always Allow*; never
+      script this. A cancelled prompt leaves that credential uncopied — the VPN
+      pane shows *NOT SET* and you can retype it.
+- [ ] The VPN pane still shows the organization domain, username and profile
+      it had before the rename, and the four switches are where you left them
+      (settings copied).
+- [ ] `plutil -p ~/Library/Preferences/com.xvii.kurakura.vpn.plist | grep -c .`
+      is at least as large as the old count (nothing was dropped).
+- [ ] Connect once without retyping anything → the connect succeeds, so all
+      three credentials were copied to the new service.
+- [ ] The old items still exist for outside tools:
+      `security find-generic-password -s com.idraki.turtle.vpn >/dev/null &&
+      echo kept` → `kept` (the user's own reconnect script reads them by name).
+      Do **not** print a value (`-w`), only the status.
+- [ ] Relaunch → step 0 reports `credentials: 0` (the copy happens once) and no
+      Keychain prompt appears again.
+- [ ] Advanced → Storage → *Preferences* shows `com.xvii.kurakura.vpn`.
+- [ ] **Reset All…** (after a confirmation) clears the credentials from *both*
+      services: `security find-generic-password -s com.idraki.turtle.vpn` →
+      `could not be found` — a reset is meant to be a reset.
 
 ## 0b. Main window: compact ↔ expanded (1.4.0)
 
@@ -29,7 +64,7 @@ release.
       cards, Proxy Engine / Policy Health / Traffic cards, Recent Requests
       table, Live Log (its default is *this session*, not "today").
 - [ ] **Hide Dashboard** returns to compact; the choice survives a relaunch
-      (`plutil -p ~/Library/Preferences/com.idraki.turtle.vpn.plist \
+      (`plutil -p ~/Library/Preferences/com.xvii.kurakura.vpn.plist \
       | grep mainWindowDashboardExpanded`).
 - [ ] Open it manually, then connect/disconnect the VPN → the window does NOT
       collapse on disconnect (a manual choice is not auto-corrected).
@@ -90,13 +125,13 @@ release.
 - [ ] The sidebar groups are Connection (VPN, Profiles) / Proxy Engine
       (Dashboard, Policies, Rules, Routing, Rule Sets) / Monitoring (History) /
       Application (Appearance, Advanced); the footer shows the engine dot,
-      `v1.4.0` and the active profile.
+      `v1.6.0` and the active profile.
 - [ ] The sidebar can hold its width: drag the divider as far left as it goes
       → it stops at the search field (the placeholder never clips to
       `Search setting:`) and the sidebar never disappears (see
       `docs/SETTINGS_LAYOUT.md`).
 - [ ] Open a pane, close the window, reopen → it lands on the *same* pane
-      (`plutil -p ~/Library/Preferences/com.idraki.turtle.vpn.plist | grep
+      (`plutil -p ~/Library/Preferences/com.xvii.kurakura.vpn.plist | grep
       settingsPane`).
 - [ ] Type `log` / `stoken` / `listener` in the sidebar search → the list
       filters by title, subtitle and keywords; clearing restores every pane.

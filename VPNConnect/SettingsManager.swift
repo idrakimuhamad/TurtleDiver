@@ -1,6 +1,13 @@
 import Foundation
 import Combine
 
+// The app target compiles these files into one module; the SPM target
+// `TurtleDiverAppGlue` compiles them standalone, so the engine modules are
+// imported only when they exist as modules (see Package.swift).
+#if canImport(TurtleDiverSystem)
+import TurtleDiverSystem
+#endif
+
 enum AppTheme: String, CaseIterable {
     case system = "system"
     case light = "light"
@@ -86,14 +93,15 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
     }
     
     func resetAllSettings() async {
-        if let bundleID = Bundle.main.bundleIdentifier {
-            defaults.removePersistentDomain(forName: bundleID)
-            defaults.synchronize()
+        defaults.removePersistentDomain(forName: AppIdentity.bundleIdentifier)
+        defaults.synchronize()
+
+        // Every service this app has written to, not just the current one: a
+        // credential left behind under an older bundle identifier would make
+        // "reset all settings" a half-truth.
+        for account in KeychainHelper.credentialAccounts {
+            KeychainHelper.deleteEverywhere(account: account)
         }
-        
-        KeychainHelper.delete(account: KeychainHelper.adminPasswordAccount)
-        KeychainHelper.delete(account: KeychainHelper.vpnPasswordAccount)
-        KeychainHelper.delete(account: KeychainHelper.vpnPasscodeAccount)
         stokenBookmarkData = nil
         stokenTokenBookmarkData = nil
     }

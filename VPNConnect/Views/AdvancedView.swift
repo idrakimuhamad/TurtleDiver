@@ -88,7 +88,7 @@ struct AdvancedView: View {
     private var storageGroup: some View {
         SettingsCard("Storage", note: "Credentials live in your login Keychain — the preferences file only holds settings, ports and paths.") {
             SettingsRow(label: "Preferences") {
-                SettingsMonoValue(value: Bundle.main.bundleIdentifier ?? "com.idraki.turtle.vpn")
+                SettingsMonoValue(value: AppIdentity.bundleIdentifier)
             }
             SettingsRow(label: "VPN password") {
                 credentialPill(for: KeychainHelper.vpnPasswordAccount)

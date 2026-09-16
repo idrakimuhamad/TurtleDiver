@@ -277,16 +277,23 @@ struct VPNConfigurationView: View {
 
     private var routingGroup: some View {
         SettingsCard("Traffic routing",
-                      note: "Split tunneling (vpn-slice) keeps ordinary traffic on your normal connection and sends only the listed targets through the VPN. The proxy engine routes the rest by rule.") {
-            SettingsRow(label: "Mode", isLast: !draft.useTunneling) {
-                Picker("Mode", selection: $draft.useTunneling) {
-                    Text("Standard VPN").tag(false)
-                    Text("Split tunneling").tag(true)
+                      note: "Choose how much of your traffic goes through the VPN. The proxy engine routes whatever the VPN does not take.") {
+            // Two described tiles instead of a "Mode" segmented control: the
+            // labels alone ("Standard VPN" / "Split tunneling") name the
+            // options without saying what either one does.
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(TrafficMode.allCases) { mode in
+                    SettingsChoiceTile(
+                        icon: mode.icon,
+                        title: mode.title,
+                        detail: mode.detail,
+                        isSelected: draft.useTunneling == mode.isOn,
+                        choose: { draft.useTunneling = mode.isOn }
+                    )
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 250)
             }
+            .padding(.horizontal, SettingsStyle.rowPaddingH)
+            .padding(.vertical, SettingsStyle.rowPaddingV)
 
             if draft.useTunneling {
                 VStack(alignment: .leading, spacing: 6) {

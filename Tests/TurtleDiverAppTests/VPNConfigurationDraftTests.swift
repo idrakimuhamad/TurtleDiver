@@ -200,6 +200,47 @@ extension SettingsDisplayTests {
     }
 }
 
+/// The Traffic routing card renders its two choices as described tiles, so the
+/// words are what the user reads before switching VPN mode. They are pure data
+/// here rather than string literals in the view body.
+final class TrafficModeTests: XCTestCase {
+
+    func testThereAreExactlyTwoModesAndTheyMapToTheStoredFlag() {
+        XCTAssertEqual(TrafficMode.allCases.map(\.isOn), [false, true])
+        XCTAssertEqual(TrafficMode.allCases.map(\.title), ["Standard VPN", "Split tunneling"])
+    }
+
+    func testSelectingAModeIsTheInverseOfTheStoredFlag() {
+        XCTAssertEqual(TrafficMode.selected(useTunneling: false), .standardVPN)
+        XCTAssertEqual(TrafficMode.selected(useTunneling: true), .splitTunneling)
+    }
+
+    /// Each title has to survive on its own: the tile shows the description
+    /// underneath, but the title is what names the choice.
+    func testEveryModeIsDescribedAndNamedDifferently() {
+        let titles = Set(TrafficMode.allCases.map(\.title))
+        let details = Set(TrafficMode.allCases.map(\.detail))
+        let icons = Set(TrafficMode.allCases.map(\.icon))
+
+        XCTAssertEqual(titles.count, TrafficMode.allCases.count)
+        XCTAssertEqual(details.count, TrafficMode.allCases.count)
+        XCTAssertEqual(icons.count, TrafficMode.allCases.count)
+        for mode in TrafficMode.allCases {
+            XCTAssertFalse(mode.title.isEmpty)
+            XCTAssertFalse(mode.detail.isEmpty)
+            XCTAssertFalse(mode.icon.isEmpty)
+        }
+    }
+
+    /// The detail is the whole point of replacing the segmented control: it has
+    /// to say which traffic goes where, not restate the title.
+    func testTheDetailsExplainWhatHappensToTraffic() {
+        XCTAssertTrue(TrafficMode.standardVPN.detail.contains("through the VPN"))
+        XCTAssertTrue(TrafficMode.splitTunneling.detail.contains("targets"))
+        XCTAssertTrue(TrafficMode.splitTunneling.detail.contains("normal connection"))
+    }
+}
+
 /// The Rule Sets pane renders counts, ages and cadences; all three are derived
 /// so that a machine value never reaches `Text` raw.
 final class RuleSetDisplayTests: XCTestCase {

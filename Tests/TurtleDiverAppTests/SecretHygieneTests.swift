@@ -1,5 +1,6 @@
 import XCTest
 @testable import TurtleDiverAppGlue
+import TurtleDiverSystem
 
 /// Tests for the launch-time purge of dead `UserDefaults` keys.
 ///
@@ -210,5 +211,115 @@ final class SecretHygieneTests: XCTestCase {
 
         XCTAssertTrue(purged.isEmpty)
         XCTAssertTrue(secrets.stored.isEmpty)
+    }
+
+    // MARK: Bundle-identifier rename
+
+    /// The rename from `com.idraki.turtle.vpn` to `com.xvii.kurakura.vpn` moves
+    /// the Keychain *service*, so every stored credential lives somewhere the
+    /// app no longer looks. This is the plan that copies them across — decided
+    /// from an injected reader, so no test ever opens the login keychain (a real
+    /// read of another identity's item raises a system dialog).
+    private func makeMigrationReader(
+        _ items: [String: [String: String]]
+    ) -> (_ service: String, _ account: String) -> String? {
+        { service, account in items[service]?[account] }
+    }
+
+    func testACredentialOnlyInTheLegacyServiceIsCopiedFromIt() {
+        let read = makeMigrationReader(["com.idraki.turtle.vpn": ["vpnPassword": "old"]])
+
+        let plan = KeychainMigration.sources(
+            accounts: ["vpnPassword"],
+            currentService: "com.xvii.kurakura.vpn",
+            legacyServices: ["com.idraki.turtle.vpn"],
+            read: read
+        )
+
+        XCTAssertEqual(plan.map(\.account), ["vpnPassword"])
+        XCTAssertEqual(plan.map(\.service), ["com.idraki.turtle.vpn"])
+    }
+
+    /// Once copied, a second launch must not copy again — and must not read the
+    /// legacy item again, which is what would re-raise the access dialog.
+    func testACredentialAlreadyInTheCurrentServiceIsLeftAlone() {
+        var legacyReads = 0
+        let plan = KeychainMigration.sources(
+            accounts: ["vpnPassword"],
+            currentService: "com.xvii.kurakura.vpn",
+            legacyServices: ["com.idraki.turtle.vpn"],
+            read: { service, _ in
+                if service == "com.idraki.turtle.vpn" { legacyReads += 1 }
+                return "value"
+            }
+        )
+
+        XCTAssertTrue(plan.isEmpty)
+        XCTAssertEqual(legacyReads, 0, "the legacy service was read despite the current one having a value")
+    }
+
+    func testAnEmptyLegacyValueIsNotCopied() {
+        let read = makeMigrationReader(["com.idraki.turtle.vpn": ["vpnPassword": ""]])
+
+        let plan = KeychainMigration.sources(
+            accounts: ["vpnPassword"],
+            currentService: "com.xvii.kurakura.vpn",
+            legacyServices: ["com.idraki.turtle.vpn"],
+            read: read
+        )
+
+        XCTAssertTrue(plan.isEmpty)
+    }
+
+    func testAnAccountNobodyHasIsSkipped() {
+        let read = makeMigrationReader([:])
+
+        let plan = KeychainMigration.sources(
+            accounts: ["vpnPassword", "adminPassword"],
+            currentService: "com.xvii.kurakura.vpn",
+            legacyServices: ["com.idraki.turtle.vpn", "com.turtlediver"],
+            read: read
+        )
+
+        XCTAssertTrue(plan.isEmpty)
+    }
+
+    /// With more than one historical name, the newest source wins — an older
+    /// build's value must never overwrite a newer one.
+    func testTheNewestLegacyServiceWinsWhenSeveralHaveAValue() {
+        let read = makeMigrationReader([
+            "com.idraki.turtle.vpn": ["vpnPassword": "newest"],
+            "com.turtlediver": ["vpnPassword": "ancient"],
+        ])
+
+        let plan = KeychainMigration.sources(
+            accounts: ["vpnPassword"],
+            currentService: "com.xvii.kurakura.vpn",
+            legacyServices: ["com.idraki.turtle.vpn", "com.turtlediver"],
+            read: read
+        )
+
+        XCTAssertEqual(plan.map(\.service), ["com.idraki.turtle.vpn"])
+    }
+
+    func testThePlanFollowsTheAccountOrderItWasGiven() {
+        let read = makeMigrationReader([
+            "com.idraki.turtle.vpn": ["vpnPasscode": "c", "adminPassword": "a", "vpnPassword": "b"],
+        ])
+
+        let plan = KeychainMigration.sources(
+            accounts: ["adminPassword", "vpnPassword", "vpnPasscode"],
+            currentService: "com.xvii.kurakura.vpn",
+            legacyServices: ["com.idraki.turtle.vpn"],
+            read: read
+        )
+
+        XCTAssertEqual(plan.map(\.account), ["adminPassword", "vpnPassword", "vpnPasscode"])
+    }
+
+    /// The service the app writes under is `AppIdentity`'s, not the bundle's —
+    /// the two are only equal because the project says so.
+    func testTheAppStoresUnderTheIdentityTheMigrationCopiesInto() {
+        XCTAssertEqual(KeychainHelper.serviceName, AppIdentity.bundleIdentifier)
     }
 }

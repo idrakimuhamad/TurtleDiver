@@ -68,6 +68,53 @@ public struct VPNConfigurationDraft: Equatable, Sendable {
     }
 }
 
+/// The two ways the app can send traffic, as presentation data.
+///
+/// This used to be a segmented control labelled "Mode", which reads as a toggle
+/// without saying what either half does. A tile carries the consequence in
+/// words so the choice explains itself; the words live here, away from the
+/// view, so they can be asserted without a SwiftUI host.
+public enum TrafficMode: CaseIterable, Identifiable, Equatable, Sendable {
+    /// Everything on the Mac goes through the tunnel.
+    case standardVPN
+    /// Only the listed targets go through the tunnel; the proxy engine routes
+    /// the rest by rule.
+    case splitTunneling
+
+    public var id: Self { self }
+
+    /// The value the draft stores in `useTunneling`.
+    public var isOn: Bool { self == .splitTunneling }
+
+    public var title: String {
+        switch self {
+        case .standardVPN: return "Standard VPN"
+        case .splitTunneling: return "Split tunneling"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .standardVPN:
+            return "Everything on this Mac goes through the VPN."
+        case .splitTunneling:
+            return "Only the targets below go through the VPN; everything else stays on your normal connection."
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .standardVPN: return "lock.shield"
+        case .splitTunneling: return "arrow.triangle.branch"
+        }
+    }
+
+    /// The tile that should be drawn as chosen for a given `useTunneling`.
+    public static func selected(useTunneling: Bool) -> TrafficMode {
+        useTunneling ? .splitTunneling : .standardVPN
+    }
+}
+
 /// Small pure formatters shared by the Settings panes.
 ///
 /// They exist so the panes never hand raw values to `Text`: `Int?` would

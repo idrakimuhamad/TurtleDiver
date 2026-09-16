@@ -467,8 +467,7 @@ final class EngineController: ObservableObject {
             DispatchQueue.global(qos: .utility).async {
                 let purged = settings.purgeLegacyDefaults(secrets: secrets)
                 if !purged.isEmpty {
-                    Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.idraki.turtle.vpn",
-                           category: "settings")
+                    Logger(subsystem: AppIdentity.bundleIdentifier, category: "settings")
                         .info("purged \(purged.count, privacy: .public) legacy defaults key(s)")
                 }
                 continuation.resume()
