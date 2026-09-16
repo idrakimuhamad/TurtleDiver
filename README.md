@@ -49,9 +49,31 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   searchable sidebar, a remembered pane, and an **Advanced** pane for engine
   ports, log files, storage locations and resetting the app's settings
 
+## Installing
+
+Download `TurtleDiver-<version>.dmg` from the releases page, open it, and drag
+**TurtleDiver** onto the **Applications** shortcut. A `.pkg` is also built for
+managed installs.
+
+**The current release builds are signed but not notarized**, so a downloaded
+copy is quarantined by macOS and the first launch refuses to open it. Either
+right-click the app ▸ **Open**, or if macOS offers no override that way (macOS
+15 and later hide it), allow it in **System Settings ▸ Privacy & Security**; the
+blunt alternative is to clear the attribute:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/TurtleDiver.app
+```
+
+A copy built on your own Mac — or installed from `./build.sh --install` — has no
+quarantine attribute and launches directly. See
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) for why, and for what it takes to
+make downloads open without that prompt (a Developer ID certificate and
+notarization).
+
 ## Prerequisites
 
-Before using this application, ensure you have the following tools installed via Homebrew:
+The app drives three command-line tools, which must be installed via Homebrew:
 
 ```bash
 # Install required tools
@@ -60,6 +82,14 @@ brew install stoken
 brew install vpn-slice
 ```
 
+They are looked up in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
+`/bin`; if a Connect fails with "Failed to generate token", one of them is
+missing. [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) plans an in-app **Setup**
+assistant that detects each tool, shows its version and path, and installs the
+missing ones with one click — bundling them into the app is not viable (they
+and their 19 Homebrew dependencies come to 212 MB, and they are LGPL-2.1 /
+GPL-3.0, so redistributing our own copies would add relinking and source-offer
+obligations on top of the re-signing work).
 
 ## Configuration
 
@@ -399,6 +429,21 @@ If VPN connects but traffic doesn't route properly:
 2. Select your development team in project settings
 3. Build and run (⌘R)
 
+Or from a terminal:
+
+```bash
+./build.sh                      # Release build of the app
+./build.sh --install            # …and copy it to /Applications, then relaunch
+./build.sh --debug --test       # Debug build + the SwiftPM test suite
+./publish.sh --local            # .dmg + .pkg signed for this machine
+./publish.sh                    # signed with Developer ID, notarized, stapled
+```
+
+`publish.sh` refuses to build a release artifact without a Developer ID
+certificate and a notary profile, because the failure mode of guessing is an
+installer that Gatekeeper silently rejects. `./publish.sh --help` lists the
+options; output lands in `dist/` (git-ignored).
+
 ### Code Structure
 
 ```
@@ -423,7 +468,7 @@ VPNConnect/
 ### Tests
 
 ```bash
-swift test          # 462 tests (core engine + app glue)
+swift test          # 549 tests (core engine + app glue)
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small

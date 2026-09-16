@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Installer UI for the .pkg. `customize="allow"` would show the dependency
+  component; it is "never" while the only component is the app itself.
+  See docs/DISTRIBUTION.md for the planned tools component.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>@APP_NAME@ @VERSION@</title>
+    <organization>@ORG@</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <readme file="README_INSTALL.txt"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="@BUNDLE_ID@"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="@BUNDLE_ID@" visible="false">
+        <pkg-ref id="@BUNDLE_ID@"/>
+    </choice>
+    <pkg-ref id="@BUNDLE_ID@" version="@VERSION@" onConclusion="none">@APP_NAME@.component.pkg</pkg-ref>
+</installer-gui-script>

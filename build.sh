@@ -1,54 +1,128 @@
 #!/bin/bash
+#
+# Local development build. For shippable, signed, notarized artifacts use
+# ./publish.sh instead.
+#
+# Usage: ./build.sh [--debug] [--install] [--test] [--no-clean] [--help]
 
-# Build script for TurtleDiver macOS app
+set -uo pipefail
 
-echo "Building TurtleDiver..."
+APP_NAME="TurtleDiver"
+PROJECT_NAME="VPNConnect"
+SCHEME="VPNConnect"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$ROOT/build"
 
-# Check if Xcode is installed
-if ! command -v xcodebuild &> /dev/null; then
-    echo "Error: Xcode is not installed. Please install Xcode from the App Store."
-    exit 1
-fi
+CONFIGURATION="Release"
+DO_CLEAN=1
+DO_INSTALL=0
+DO_TEST=0
 
-# Check if required tools are installed
-echo "Checking prerequisites..."
-
-if ! command -v openconnect &> /dev/null; then
-    echo "Warning: openconnect is not installed. Install with: brew install openconnect"
-fi
-
-if ! command -v stoken &> /dev/null; then
-    echo "Warning: stoken is not installed. Install with: brew install stoken"
-fi
-
-# Check vpn-slice via Homebrew
-if ! command -v brew &> /dev/null; then
-    echo "Warning: Homebrew is not installed. Install with: https://brew.sh"
+if [ -t 1 ]; then
+    BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; OFF=$'\033[0m'
 else
-    if ! brew list --formula | grep -q "^vpn-slice$"; then
-        echo "Warning: vpn-slice is not installed. Install with: brew install vpn-slice"
+    BOLD=""; RED=""; GREEN=""; YELLOW=""; OFF=""
+fi
+
+step() { printf '%s==>%s %s\n' "$BOLD" "$OFF" "$1"; }
+ok()   { printf '%s  ✓ %s%s\n' "$GREEN" "$1" "$OFF"; }
+warn() { printf '%s  ! %s%s\n' "$YELLOW" "$1" "$OFF"; }
+die()  { printf '\n%serror:%s %s\n' "$RED" "$OFF" "$1" >&2; exit 1; }
+
+usage() {
+    cat <<EOF
+${BOLD}Build TurtleDiver for this machine.${OFF}
+
+Usage: ./build.sh [options]
+
+  --debug        Build the Debug configuration instead of Release
+  --install      Copy the build to /Applications and relaunch the app
+  --test         Run the SwiftPM test suite first
+  --no-clean     Reuse build/ (much faster; use it when only Swift changed)
+  -h, --help     This text
+
+The app is built at build/Build/Products/$CONFIGURATION/$APP_NAME.app.
+Installing over a running copy: quit the app first — it restores the system
+proxy on quit, and killing it would leave the proxy pointing at a dead engine.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --debug)     CONFIGURATION="Debug"; shift ;;
+        --install)   DO_INSTALL=1; shift ;;
+        --test)      DO_TEST=1; shift ;;
+        --no-clean)  DO_CLEAN=0; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *)           die "unknown option: $1 (try --help)" ;;
+    esac
+done
+
+APP_PATH="$BUILD_DIR/Build/Products/$CONFIGURATION/$APP_NAME.app"
+
+command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found — install Xcode from the App Store"
+
+# The three tools the app shells out to, resolved the same way
+# VPNManager.binaryPath does, so this report and the app agree.
+step "Runtime dependencies"
+missing=0
+for tool in openconnect stoken vpn-slice; do
+    found=""
+    for dir in /opt/homebrew/bin /usr/local/bin /opt/local/bin /usr/bin /bin; do
+        if [ -x "$dir/$tool" ]; then found="$dir/$tool"; break; fi
+    done
+    if [ -n "$found" ]; then
+        ok "$tool — $found"
+    else
+        warn "$tool — not found (brew install $tool)"
+        missing=$((missing + 1))
     fi
+done
+[ "$missing" -gt 0 ] && warn "$missing tool(s) missing: the app will build, but connecting will fail until they are installed"
+
+if [ "$DO_TEST" = 1 ]; then
+    step "Running tests"
+    ( cd "$ROOT" && swift test ) || die "tests failed"
+    ok "tests passed"
 fi
 
-# Clean build folder
-if [ -d "build" ]; then
-    echo "Cleaning previous build..."
-    rm -rf build
+if [ "$DO_CLEAN" = 1 ]; then
+    step "Cleaning $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
 fi
 
-# Build the project
-echo "Building project..."
-xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect -configuration Release -derivedDataPath build build
+step "Building $APP_NAME ($CONFIGURATION)"
+xcodebuild -project "$ROOT/$PROJECT_NAME.xcodeproj" \
+           -scheme "$SCHEME" \
+           -configuration "$CONFIGURATION" \
+           -derivedDataPath "$BUILD_DIR" \
+           build || die "build failed"
 
-if [ $? -eq 0 ]; then
-    echo "Build successful!"
-    echo "App location: build/Build/Products/Release/TurtleDiver.app"
-    echo ""
-    echo "To install the app:"
-    echo "1. Copy TurtleDiver.app to your Applications folder"
-    echo "2. Run the app from Applications"
-    echo "3. You may need to allow the app in System Preferences > Security & Privacy"
+[ -d "$APP_PATH" ] || die "build reported success but $APP_PATH is missing"
+
+VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist" 2>/dev/null)
+BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$APP_PATH/Contents/Info.plist" 2>/dev/null)
+ok "built $APP_NAME $VERSION ($BUILD_NUMBER)"
+printf '    %s\n' "$APP_PATH"
+
+if [ "$DO_INSTALL" = 1 ]; then
+    step "Installing to /Applications"
+    if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+        # Quitting lets the app restore the user's system proxy. Killing it
+        # would leave the proxy armed against a port nothing is listening on.
+        osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1
+        for _ in 1 2 3 4 5 6; do
+            pgrep -x "$APP_NAME" >/dev/null 2>&1 || break
+            sleep 1
+        done
+    fi
+    pgrep -x "$APP_NAME" >/dev/null 2>&1 \
+        && die "$APP_NAME is still running — quit it and re-run, or the copy will be replaced underneath it"
+    rm -rf "/Applications/$APP_NAME.app"
+    ditto "$APP_PATH" "/Applications/$APP_NAME.app" || die "could not copy the app"
+    open -a "/Applications/$APP_NAME.app"
+    ok "installed and launched"
 else
-    echo "Build failed. Please check the error messages above."
-    exit 1
+    printf '\n    Install it with:  ./build.sh --no-clean --install\n'
+    printf '    Ship it with:     ./publish.sh\n'
 fi
