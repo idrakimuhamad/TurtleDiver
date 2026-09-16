@@ -239,6 +239,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         openSettingsRoute(nil)
     }
 
+    /// Menu bar: jump straight to the tools pane — the one place that answers
+    /// "why won't it connect" when a command-line tool is missing.
+    @objc func showToolSetup() {
+        openSettingsRoute(.setup)
+    }
+
     /// Opens Settings, optionally deep-linking to a route (menu bar actions;
     /// nil = root menu).
     func openSettingsRoute(_ route: SettingsRoute?) {
@@ -548,6 +554,12 @@ final class MenuBarManager: NSObject {
         settingsItem.target = self
         menu.addItem(settingsItem)
 
+        let requirementsItem = NSMenuItem(title: "Check Requirements…",
+                                          action: #selector(openToolSetup),
+                                          keyEquivalent: "")
+        requirementsItem.target = self
+        menu.addItem(requirementsItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // 5. Quit
@@ -661,6 +673,12 @@ final class MenuBarManager: NSObject {
 
     @objc private func testLatency() {
         EngineController.shared.engine.policyStore.testAllPolicies()
+    }
+
+    @objc private func openToolSetup() {
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.showToolSetup()
+        }
     }
 
     @objc private func openDashboard() {

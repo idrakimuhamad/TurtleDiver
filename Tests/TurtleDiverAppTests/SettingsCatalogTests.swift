@@ -38,6 +38,13 @@ final class SettingsCatalogTests: XCTestCase {
         XCTAssertEqual(SettingsCatalog.items.first?.route, .vpn)
     }
 
+    /// Setup is the pane a stuck user is sent to, so it sits in Application
+    /// next to Appearance, above the technical Advanced pane.
+    func testSetupSitsInApplicationAboveAdvanced() {
+        let application = SettingsCatalog.items(in: .application).map(\.route)
+        XCTAssertEqual(application, [.appearance, .setup, .advanced])
+    }
+
     // MARK: Copy
 
     func testTitlesAndSubtitlesArePresentAndTerse() {
@@ -82,7 +89,11 @@ final class SettingsCatalogTests: XCTestCase {
     }
 
     func testSearchMatchesKeywordsAndSubtitleText() {
-        XCTAssertEqual(SettingsCatalog.filter("stoken").map(\.route), [.vpn])
+        // Both panes legitimately own the word: VPN is where the token is used,
+        // Setup is where a missing stoken is explained and installed.
+        XCTAssertEqual(SettingsCatalog.filter("stoken").map(\.route), [.vpn, .setup])
+        XCTAssertEqual(SettingsCatalog.filter("openconnect").map(\.route), [.setup])
+        XCTAssertEqual(SettingsCatalog.filter("brew").map(\.route), [.setup])
         XCTAssertTrue(SettingsCatalog.filter("proxy").contains { $0.route == .policies })
         XCTAssertTrue(SettingsCatalog.filter("url-test").contains { $0.route == .policies })
         // "ports" is only a keyword of Advanced.

@@ -71,6 +71,7 @@ let package = Package(
                 "Views/RuleSetsView.swift",
                 "Views/RulesEditorView.swift",
                 "Views/SettingsDesign.swift",
+                "Views/SetupView.swift",
                 "Engine/DisplayFormat.swift",
                 "Engine/RelayStreamObserver.swift",
                 "Engine/RequestDetail.swift",
@@ -108,6 +109,7 @@ let package = Package(
                 "Views/MainWindowLayout.swift",
                 "Views/SettingsCatalog.swift",
                 "Views/SettingsDraft.swift",
+                "Views/ToolSetupModel.swift"
             ]
         ),
         .testTarget(

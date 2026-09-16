@@ -18,6 +18,7 @@ public enum SettingsRoute: String, Hashable, CaseIterable, Identifiable, Sendabl
     case ruleSets
     case history
     case appearance
+    case setup
     case advanced
 
     public var id: String { rawValue }
@@ -154,6 +155,16 @@ public enum SettingsCatalog {
             tint: .blue,
             group: .application,
             keywords: ["theme", "dark", "light", "system", "colors", "appearance"]
+        ),
+        SettingsItem(
+            route: .setup,
+            title: "Setup",
+            subtitle: "The command-line tools the app drives, and installing them",
+            symbol: "wrench.and.screwdriver.fill",
+            tint: .green,
+            group: .application,
+            keywords: ["homebrew", "brew", "openconnect", "stoken", "vpn-slice", "tools",
+                       "install", "missing", "path", "dependencies", "requirements"]
         ),
         SettingsItem(
             route: .advanced,

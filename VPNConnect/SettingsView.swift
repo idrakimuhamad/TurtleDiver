@@ -166,6 +166,8 @@ struct SettingsView: View {
             AppearanceView()
         case .history:
             HistoryView()
+        case .setup:
+            SetupView()
         case .advanced:
             AdvancedView()
         case .dashboard, .policies, .rules, .routing, .ruleSets, .profiles:

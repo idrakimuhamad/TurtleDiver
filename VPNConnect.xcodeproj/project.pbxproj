@@ -29,6 +29,8 @@
 		7C0FFEE20000000000000007 /* SettingsDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000017 /* SettingsDraft.swift */; };
 		7C0FFEE20000000000000008 /* SettingsDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000018 /* SettingsDesign.swift */; };
 		7C0FFEE20000000000000009 /* AdvancedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE20000000000000019 /* AdvancedView.swift */; };
+		7C0FFEEA0000000000000001 /* SetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000011 /* SetupView.swift */; };
+		7C0FFEEA0000000000000002 /* ToolSetupModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000012 /* ToolSetupModel.swift */; };
 		7C0FFEEA0000000000000003 /* ToolResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000013 /* ToolResolver.swift */; };
 		7C0FFEEA0000000000000004 /* ToolProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000014 /* ToolProcess.swift */; };
 		7C0FFEE80000000000000001 /* RuleSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000011 /* RuleSet.swift */; };
@@ -73,6 +75,8 @@
 		7C0FFEE20000000000000017 /* SettingsDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDraft.swift; sourceTree = "<group>"; };
 		7C0FFEE20000000000000018 /* SettingsDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDesign.swift; sourceTree = "<group>"; };
 		7C0FFEE20000000000000019 /* AdvancedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdvancedView.swift; sourceTree = "<group>"; };
+		7C0FFEEA0000000000000011 /* SetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupView.swift; sourceTree = "<group>"; };
+		7C0FFEEA0000000000000012 /* ToolSetupModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolSetupModel.swift; sourceTree = "<group>"; };
 		7C0FFEEA0000000000000013 /* ToolResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResolver.swift; sourceTree = "<group>"; };
 		7C0FFEEA0000000000000014 /* ToolProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolProcess.swift; sourceTree = "<group>"; };
 		7C0FFEE80000000000000011 /* RuleSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSet.swift; sourceTree = "<group>"; };
@@ -239,6 +243,8 @@
 				7C0FFEE20000000000000017 /* SettingsDraft.swift */,
 				7C0FFEE20000000000000018 /* SettingsDesign.swift */,
 				7C0FFEE20000000000000019 /* AdvancedView.swift */,
+				7C0FFEEA0000000000000011 /* SetupView.swift */,
+				7C0FFEEA0000000000000012 /* ToolSetupModel.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -345,6 +351,8 @@
 				7C0FFEE20000000000000007 /* SettingsDraft.swift in Sources */,
 				7C0FFEE20000000000000008 /* SettingsDesign.swift in Sources */,
 				7C0FFEE20000000000000009 /* AdvancedView.swift in Sources */,
+				7C0FFEEA0000000000000001 /* SetupView.swift in Sources */,
+				7C0FFEEA0000000000000002 /* ToolSetupModel.swift in Sources */,
 				7C0FFEEA0000000000000003 /* ToolResolver.swift in Sources */,
 				7C0FFEEA0000000000000004 /* ToolProcess.swift in Sources */,
 				7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */,
