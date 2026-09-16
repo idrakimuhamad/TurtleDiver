@@ -156,7 +156,22 @@ in-process fake servers: CONNECT round-trips, absolute-form → origin-form
 rewriting, traffic through an upstream CONNECT proxy (and upstream 403 →
 502), SOCKS5 greeting/CONNECT/domain addressing/reject/command-and-method
 errors, 400 hardening, dead-destination 502, request-log accuracy (rule,
-policy, bytes) and ring-buffer trimming — 21 integration tests (incl. the relay backpressure regression and four end-to-end capture tests: plain-HTTP head + withheld cookie, CONNECT SNI, SOCKS5 SNI, capture-off) among the 420 core tests.
+policy, bytes) and ring-buffer trimming — 21 integration tests (incl. the relay backpressure regression and four end-to-end capture tests: plain-HTTP head + withheld cookie, CONNECT SNI, SOCKS5 SNI, capture-off) among the 424 core tests.
+
+Those fake servers (`Tests/TurtleDiverCoreTests/TestServers.swift`) have to be
+*joined* on shutdown: a serve loop accepts by descriptor **number**, so closing
+the listener while the loop is still inside `poll`/`accept` lets the kernel
+recycle that number into an unrelated socket — after which the stale loop
+accepts a connection belonging to somebody else, answering it with its own
+canned 204 (or closing it, which reads as an intermittently *empty* reply, or
+as a 200 where a 204 was expected). Every fake now runs on a `TestListenerLoop`
+whose `stop()` sets the stop flag, wakes a parked accept with a throwaway
+connection, `shutdown()`s live clients so a blocked handler returns, waits for
+the loop to leave the accept path, and only then closes the listener.
+`Tests/TurtleDiverCoreTests/TestHarnessLifecycleTests.swift` (4 tests) pins that:
+`stop()` must have joined the loop before it returns, a stopped server must not
+accept on a recycled descriptor, and joining must not degenerate into a hang
+when a handler is parked on a quiet client.
 
 `Tests/TurtleDiverCoreTests/TLSClientHelloTests.swift` (11 tests) parses
 hand-built ClientHellos — SNI, ALPN, `supported_versions` with GREASE ignored,
@@ -225,7 +240,7 @@ not), and the pure display helpers that keep machine values out of
 `LocalizedStringKey` (`SettingsDisplay.listener(host:port:)` never renders
 `Optional(…)`, `abbreviateHome(_:home:)` is boundary-safe, `profileSummary`
 pluralises, `connectionStatus(_:)` shortens stored statuses so a pill cannot
-wrap mid-word). Total: **630 tests**.
+wrap mid-word). Total: **634 tests**.
 
 ### System-proxy ownership vs. a legacy PAC
 

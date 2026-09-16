@@ -43,6 +43,12 @@ enum TestSockets {
     }
 
     /// Accepts one connection with a wall-clock timeout (seconds).
+    ///
+    /// ⚠️ Callers own the listener fd's lifetime: because this polls by
+    /// *number*, the caller must guarantee no accept loop is still inside it
+    /// when the fd is closed, or the kernel may hand the number to an
+    /// unrelated socket and the stale accept will steal its connection. Inside
+    /// a fake server use `TestListenerLoop`, which enforces that ordering.
     static func acceptWithTimeout(fd: Int32, seconds: Double) -> Int32? {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -155,14 +161,155 @@ enum TestSockets {
     }
 }
 
+// MARK: - Listener loop with a joined shutdown
+
+/// A loopback listener plus the two things a serve loop needs in order to be
+/// safe to stop.
+///
+/// **Why this exists.** A serve loop accepts by *descriptor number*, so closing
+/// the listener while the loop may still be inside `poll()`/`accept()` is a
+/// use-after-close: the kernel is free to hand that number to an unrelated
+/// socket, and the stale loop then accepts a connection belonging to somebody
+/// else — answering it with its own canned response, or (for a server whose
+/// first byte must be a SOCKS5 greeting) closing it outright. That is what a
+/// test observes as an intermittently *empty* reply or a response from the
+/// wrong origin. `stop()` here waits for the loop to leave the descriptor
+/// alone *before* closing it, so the number can never be recycled into a loop
+/// that is still using it.
+///
+/// The loop itself slices its wait and re-checks the stop flag, so it exits on
+/// its own rather than depending on the close to wake it.
+final class TestListenerLoop: @unchecked Sendable {
+    let fd: Int32
+    let port: Int
+
+    private let lock = NSLock()
+    private var stoppedFlag = false
+    private var liveClients: Set<Int32> = []
+    private var loopStarted = false
+    private var loopFinished = false
+    private let finished = DispatchSemaphore(value: 0)
+
+    init() {
+        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
+        self.fd = fd
+        self.port = port
+    }
+
+    /// Whether `stop()` has been asked for.
+    var isStopped: Bool { lock.withLock { stoppedFlag } }
+
+    /// Connections accepted and not yet released (diagnostics).
+    var activeClientCount: Int { lock.withLock { liveClients.count } }
+
+    /// True once the serve loop has exited (also true when `stop()` found that
+    /// it never started). `stop()` waits for this unless it had to give up.
+    var isLoopFinished: Bool { lock.withLock { loopFinished } }
+
+    /// First statement of the serve loop.
+    func noteLoopStarted() { lock.withLock { loopStarted = true } }
+
+    /// Last statement of the serve loop (`defer` it).
+    func noteLoopFinished() {
+        lock.lock()
+        loopFinished = true
+        lock.unlock()
+        finished.signal()
+    }
+
+    /// Accepts one connection, or `nil` when none arrived within `seconds` or
+    /// the server is stopping. Slices the wait so the stop flag is honoured
+    /// promptly instead of after the whole timeout.
+    func acceptOne(seconds: Double = 0.5) -> Int32? {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, !isStopped {
+            guard TestSockets.waitForReadable(fd: fd, timeoutSeconds: 0.1) else { continue }
+            let client = accept(fd, nil, nil)
+            guard client >= 0 else {
+                if errno == EINTR || errno == ECONNABORTED || errno == EPROTO { continue }
+                return nil
+            }
+            // A connection that arrived to wake us during stop(), or one that
+            // raced the flag: never hand it to a handler.
+            if isStopped {
+                TestSockets.closeFD(client)
+                return nil
+            }
+            lock.withLock { liveClients.insert(client) }
+            return client
+        }
+        return nil
+    }
+
+    /// Called by the serve loop when it is done with a client.
+    func release(_ client: Int32) { lock.withLock { liveClients.remove(client) } }
+
+    /// Stops the serve loop and *then* closes the listener.
+    ///
+    /// Order matters: flag → wake the parked accept → unblock in-flight client
+    /// reads → wait for the loop to exit → close. Closing first (the original
+    /// shape) is what let a stale loop accept on a recycled descriptor.
+    func stop() {
+        lock.lock()
+        if stoppedFlag {
+            lock.unlock()
+            return // idempotent: tests call stop() from a defer and directly
+        }
+        stoppedFlag = true
+        let started = loopStarted
+        let clients = Array(liveClients)
+        lock.unlock()
+
+        // Wake a parked poll/accept. A throwaway connection is safe (a closed
+        // fd is not: the loop owns the close).
+        wakeListener()
+
+        // A handler blocked in recv() would otherwise hold the loop open until
+        // its peer closes — which, for a client still talking to the engine,
+        // may be after this test ends. SHUT_RDWR makes that recv return 0;
+        // the handler still owns closing the fd.
+        for client in clients { shutdown(client, SHUT_RDWR) }
+
+        if started {
+            // Real condition, not a sleep: the loop signals when it is out of
+            // the accept path. The timeout only exists so a harness bug cannot
+            // hang the suite forever — `isLoopFinished` reports it.
+            if finished.wait(timeout: .now() + 5) == .timedOut {
+                lock.withLock { loopFinished = false }
+                TestSockets.closeFD(fd)
+                return
+            }
+        }
+        lock.withLock { loopFinished = true }
+        TestSockets.closeFD(fd)
+    }
+
+    /// Connects to ourselves so a parked `poll`/`accept` returns immediately.
+    private func wakeListener() {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        // Best-effort: if this fails the loop still exits within one slice.
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(clamping: port).bigEndian
+        addr.sin_addr = in_addr(s_addr: INADDR_LOOPBACK.bigEndian)
+        _ = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+}
+
 // MARK: - Fake HTTP Origin Server
 
 /// A minimal HTTP server on loopback: replies `HTTP/1.1 204 No Content` to any
 /// request, then closes. Used as the "test URL" target for probes.
 final class FakeHTTPServer {
-    let fd: Int32
-    let port: Int
-    private var stopped = false
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     private let queue = DispatchQueue(label: "fake-http-server")
 
     /// Number of requests received (atomic-ish via lock).
@@ -171,31 +318,30 @@ final class FakeHTTPServer {
     var requestCount: Int { lock.withLock { _requestCount } }
 
     init?() {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        let loop = TestListenerLoop()
+        self.loop = loop
+        queue.async { [weak self] in self?.serve() }
     }
 
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
-            lock.withLock { _requestCount += 1 }
-            // Read the request head (probe sends and waits for response).
-            _ = TestSockets.readSome(fd: client)
-            let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            _ = TestSockets.sendAll(fd: client, Array(response.utf8))
-            TestSockets.closeFD(client)
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
+            handle(client: client)
+            loop.release(client)
         }
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
+    private func handle(client: Int32) {
+        defer { TestSockets.closeFD(client) }
+        lock.withLock { _requestCount += 1 }
+        // Read the request head (probe sends and waits for response).
+        _ = TestSockets.readSome(fd: client)
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = TestSockets.sendAll(fd: client, Array(response.utf8))
     }
+
+    func stop() { loop.stop() }
 
     var testURL: String { "http://127.0.0.1:\(port)/generate_204" }
 }
@@ -205,56 +351,53 @@ final class FakeHTTPServer {
 /// A minimal RFC 1928 SOCKS5 server: completes greeting (no-auth), CONNECT
 /// (always succeeds), then relays bytes to a destination accepted in-process.
 final class FakeSOCKS5Server {
-    let fd: Int32
-    let port: Int
-    private var stopped = false
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     private let queue = DispatchQueue(label: "fake-socks5-server")
     private let lock = NSLock()
     private var _connectCount = 0
     var connectCount: Int { lock.withLock { _connectCount } }
 
     init?() {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        let loop = TestListenerLoop()
+        self.loop = loop
+        queue.async { [weak self] in self?.serve() }
     }
 
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
-            lock.withLock { _connectCount += 1 }
-
-            // Greeting
-            guard let greeting = TestSockets.readSome(fd: client), greeting.count >= 3, greeting[0] == 0x05 else {
-                TestSockets.closeFD(client)
-                continue
-            }
-            _ = TestSockets.sendAll(fd: client, [0x05, 0x00]) // no-auth
-
-            // CONNECT request
-            guard let request = TestSockets.readSome(fd: client), request.count >= 7, request[1] == 0x01 else {
-                TestSockets.closeFD(client)
-                continue
-            }
-            // Reply: success with a dummy bind address (IPv4 0.0.0.0:0)
-            _ = TestSockets.sendAll(fd: client, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-
-            // The probe will now send its HTTP request; reply 204 and close.
-            _ = TestSockets.readSome(fd: client)
-            let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            _ = TestSockets.sendAll(fd: client, Array(response.utf8))
-            TestSockets.closeFD(client)
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
+            handle(client: client)
+            loop.release(client)
         }
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
+    private func handle(client: Int32) {
+        defer { TestSockets.closeFD(client) }
+        lock.withLock { _connectCount += 1 }
+
+        // Greeting
+        guard let greeting = TestSockets.readSome(fd: client), greeting.count >= 3, greeting[0] == 0x05 else {
+            return
+        }
+        _ = TestSockets.sendAll(fd: client, [0x05, 0x00]) // no-auth
+
+        // CONNECT request
+        guard let request = TestSockets.readSome(fd: client), request.count >= 7, request[1] == 0x01 else {
+            return
+        }
+        // Reply: success with a dummy bind address (IPv4 0.0.0.0:0)
+        _ = TestSockets.sendAll(fd: client, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+
+        // The probe will now send its HTTP request; reply 204 and close.
+        _ = TestSockets.readSome(fd: client)
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = TestSockets.sendAll(fd: client, Array(response.utf8))
     }
+
+    func stop() { loop.stop() }
 }
 
 // MARK: - Fake SOCKS5 Server (auth required)
@@ -262,69 +405,68 @@ final class FakeSOCKS5Server {
 /// SOCKS5 server that requires username/password auth (RFC 1929) — used to
 /// verify the prober sends credentials correctly.
 final class FakeSOCKS5AuthServer {
-    let fd: Int32
-    let port: Int
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     let expectedUser: String
     let expectedPass: String
-    private var stopped = false
     private let queue = DispatchQueue(label: "fake-socks5-auth-server")
     private let lock = NSLock()
     private var _authOK = false
     var authOK: Bool { lock.withLock { _authOK } }
 
     init?(user: String, pass: String) {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
+        let loop = TestListenerLoop()
+        self.loop = loop
         self.expectedUser = user
         self.expectedPass = pass
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        queue.async { [weak self] in self?.serve() }
     }
 
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
-
-            guard let greeting = TestSockets.readSome(fd: client), greeting.count >= 2, greeting[0] == 0x05 else {
-                TestSockets.closeFD(client); continue
-            }
-            // Demand user/pass auth.
-            _ = TestSockets.sendAll(fd: client, [0x05, 0x02])
-
-            guard let auth = TestSockets.readSome(fd: client), auth.count >= 2, auth[0] == 0x01 else {
-                TestSockets.closeFD(client); continue
-            }
-            let ulen = Int(auth[1])
-            guard auth.count >= 2 + ulen + 1 else { TestSockets.closeFD(client); continue }
-            let user = String(bytes: auth[2..<(2 + ulen)], encoding: .utf8) ?? ""
-            let plen = Int(auth[2 + ulen])
-            guard auth.count >= 2 + ulen + 1 + plen else { TestSockets.closeFD(client); continue }
-            let pass = String(bytes: auth[(3 + ulen)..<(3 + ulen + plen)], encoding: .utf8) ?? ""
-
-            let ok = (user == expectedUser && pass == expectedPass)
-            lock.withLock { _authOK = ok }
-            _ = TestSockets.sendAll(fd: client, [0x01, ok ? 0x00 : 0x01])
-            if !ok { TestSockets.closeFD(client); continue }
-
-            // CONNECT
-            guard let request = TestSockets.readSome(fd: client), request.count >= 7, request[1] == 0x01 else {
-                TestSockets.closeFD(client); continue
-            }
-            _ = TestSockets.sendAll(fd: client, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            _ = TestSockets.readSome(fd: client)
-            let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            _ = TestSockets.sendAll(fd: client, Array(response.utf8))
-            TestSockets.closeFD(client)
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
+            handle(client: client)
+            loop.release(client)
         }
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
+    private func handle(client: Int32) {
+        defer { TestSockets.closeFD(client) }
+
+        guard let greeting = TestSockets.readSome(fd: client), greeting.count >= 2, greeting[0] == 0x05 else {
+            return
+        }
+        // Demand user/pass auth.
+        _ = TestSockets.sendAll(fd: client, [0x05, 0x02])
+
+        guard let auth = TestSockets.readSome(fd: client), auth.count >= 2, auth[0] == 0x01 else {
+            return
+        }
+        let ulen = Int(auth[1])
+        guard auth.count >= 2 + ulen + 1 else { return }
+        let user = String(bytes: auth[2..<(2 + ulen)], encoding: .utf8) ?? ""
+        let plen = Int(auth[2 + ulen])
+        guard auth.count >= 2 + ulen + 1 + plen else { return }
+        let pass = String(bytes: auth[(3 + ulen)..<(3 + ulen + plen)], encoding: .utf8) ?? ""
+
+        let ok = (user == expectedUser && pass == expectedPass)
+        lock.withLock { _authOK = ok }
+        _ = TestSockets.sendAll(fd: client, [0x01, ok ? 0x00 : 0x01])
+        if !ok { return }
+
+        // CONNECT
+        guard let request = TestSockets.readSome(fd: client), request.count >= 7, request[1] == 0x01 else {
+            return
+        }
+        _ = TestSockets.sendAll(fd: client, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        _ = TestSockets.readSome(fd: client)
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = TestSockets.sendAll(fd: client, Array(response.utf8))
     }
+
+    func stop() { loop.stop() }
 }
 
 // MARK: - Fake HTTP Forward Proxy
@@ -333,43 +475,41 @@ final class FakeSOCKS5AuthServer {
 /// (`GET http://host/path HTTP/1.1`) and replies 204. Verifies the prober's
 /// http-proxy code path sends absolute-form requests to the proxy.
 final class FakeHTTPProxyServer {
-    let fd: Int32
-    let port: Int
-    private var stopped = false
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     private let queue = DispatchQueue(label: "fake-http-proxy")
     private let lock = NSLock()
     private var _requestLines: [String] = []
     var requestLines: [String] { lock.withLock { _requestLines } }
 
     init?() {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        let loop = TestListenerLoop()
+        self.loop = loop
+        queue.async { [weak self] in self?.serve() }
     }
 
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
-            guard let data = TestSockets.readSome(fd: client),
-                  let request = String(bytes: data, encoding: .utf8) else {
-                TestSockets.closeFD(client)
-                continue
-            }
-            lock.withLock { _requestLines.append(request) }
-            let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            _ = TestSockets.sendAll(fd: client, Array(response.utf8))
-            TestSockets.closeFD(client)
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
+            handle(client: client)
+            loop.release(client)
         }
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
+    private func handle(client: Int32) {
+        defer { TestSockets.closeFD(client) }
+        guard let data = TestSockets.readSome(fd: client),
+              let request = String(bytes: data, encoding: .utf8) else {
+            return
+        }
+        lock.withLock { _requestLines.append(request) }
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = TestSockets.sendAll(fd: client, Array(response.utf8))
     }
+
+    func stop() { loop.stop() }
 }
 
 // MARK: - Echo Server
@@ -378,43 +518,38 @@ final class FakeHTTPProxyServer {
 /// EOF on either side. Used as the relay's "destination" to verify byte
 /// fidelity and bidirectional pumping.
 final class FakeEchoServer {
-    let fd: Int32
-    let port: Int
-    private var stopped = false
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     private let queue = DispatchQueue(label: "fake-echo-server")
 
     init?() {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        let loop = TestListenerLoop()
+        self.loop = loop
+        queue.async { [weak self] in self?.serve() }
     }
 
     // NOTE: connections are handled inline on the serve loop (same pattern as
     // the other fakes) — dispatching to the same serial queue would deadlock.
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
             relay(client: client)
+            loop.release(client)
         }
     }
 
     private func relay(client: Int32) {
         defer { TestSockets.closeFD(client) }
-        while !stopped {
+        while !loop.isStopped {
             guard let data = TestSockets.readSome(fd: client) else { return }
             if data.isEmpty { return } // EOF
             guard TestSockets.sendAll(fd: client, data) else { return }
         }
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
-    }
+    func stop() { loop.stop() }
 }
 
 // MARK: - Recording HTTP Origin
@@ -422,32 +557,30 @@ final class FakeEchoServer {
 /// HTTP origin server that replies to any request with a fixed status/body
 /// and records the exact request bytes it received (origin-form checks).
 final class RecordingHTTPOrigin {
-    let fd: Int32
-    let port: Int
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     let statusLine: String
     let body: String
-    private var stopped = false
     private let queue = DispatchQueue(label: "recording-http-origin")
     private let lock = NSLock()
     private var _receivedRequests: [String] = []
     var receivedRequests: [String] { lock.withLock { _receivedRequests } }
 
     init(statusLine: String = "HTTP/1.1 200 OK", body: String = "hello-from-origin") {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
+        let loop = TestListenerLoop()
+        self.loop = loop
         self.statusLine = statusLine
         self.body = body
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        queue.async { [weak self] in self?.serve() }
     }
 
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
             handle(client: client)
+            loop.release(client)
         }
     }
 
@@ -459,10 +592,7 @@ final class RecordingHTTPOrigin {
         _ = TestSockets.sendAll(fd: client, Array(response.utf8))
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
-    }
+    func stop() { loop.stop() }
 }
 
 // MARK: - Fake HTTP CONNECT Upstream Proxy
@@ -471,11 +601,11 @@ final class RecordingHTTPOrigin {
 /// answers `CONNECT host:port` with 200 and then relays bytes to an in-process
 /// echo peer, or (when `connectTarget` is set) opens a real TCP connection.
 final class FakeHTTPConnectProxyServer {
-    let fd: Int32
-    let port: Int
+    let loop: TestListenerLoop
+    var fd: Int32 { loop.fd }
+    var port: Int { loop.port }
     /// When true, CONNECT is answered with 403 to exercise refusal handling.
     let refusesConnects: Bool
-    private var stopped = false
     private let queue = DispatchQueue(label: "fake-connect-proxy")
     private let lock = NSLock()
     private var _connectTargets: [String] = []
@@ -484,32 +614,25 @@ final class FakeHTTPConnectProxyServer {
     var authorizationHeaders: [String] { lock.withLock { _authorizationHeaders } }
 
     init(refusesConnects: Bool = false) {
-        let (fd, port) = TestSockets.listenOnEphemeralLoopback()
-        self.fd = fd
-        self.port = port
+        let loop = TestListenerLoop()
+        self.loop = loop
         self.refusesConnects = refusesConnects
-        queue.async { [weak self] in
-            self?.serve()
-        }
+        queue.async { [weak self] in self?.serve() }
     }
 
     private func serve() {
-        while !stopped {
-            guard let client = TestSockets.acceptWithTimeout(fd: fd, seconds: 0.5) else { continue }
-            if client < 0 { break } // listener closed in stop()
+        loop.noteLoopStarted()
+        defer { loop.noteLoopFinished() }
+        while let client = loop.acceptOne() {
             handle(client: client)
+            loop.release(client)
         }
     }
 
     private func handle(client: Int32) {
-        guard let data = TestSockets.readSome(fd: client), !data.isEmpty else {
-            TestSockets.closeFD(client)
-            return
-        }
-        guard let text = String(bytes: data, encoding: .utf8) else {
-            TestSockets.closeFD(client)
-            return
-        }
+        defer { TestSockets.closeFD(client) }
+        guard let data = TestSockets.readSome(fd: client), !data.isEmpty else { return }
+        guard let text = String(bytes: data, encoding: .utf8) else { return }
         lock.withLock {
             _connectTargets.append(firstLineTarget(of: text) ?? "")
             if let auth = extractHeader("Proxy-Authorization", from: text) {
@@ -520,30 +643,24 @@ final class FakeHTTPConnectProxyServer {
         guard text.hasPrefix("CONNECT") else {
             let response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             _ = TestSockets.sendAll(fd: client, Array(response.utf8))
-            TestSockets.closeFD(client)
             return
         }
 
         if refusesConnects {
             let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             _ = TestSockets.sendAll(fd: client, Array(response.utf8))
-            TestSockets.closeFD(client)
             return
         }
 
         let response = "HTTP/1.1 200 Connection established\r\n\r\n"
-        guard TestSockets.sendAll(fd: client, Array(response.utf8)) else {
-            TestSockets.closeFD(client)
-            return
-        }
+        guard TestSockets.sendAll(fd: client, Array(response.utf8)) else { return }
         // Relay until EOF (echo behavior: clients connect here to exchange
         // bytes "through" the tunnel).
-        while !stopped {
+        while !loop.isStopped {
             guard let more = TestSockets.readSome(fd: client) else { break }
             if more.isEmpty { break }
             guard TestSockets.sendAll(fd: client, more) else { break }
         }
-        TestSockets.closeFD(client)
     }
 
     private func firstLineTarget(of request: String) -> String? {
@@ -562,10 +679,7 @@ final class FakeHTTPConnectProxyServer {
         return nil
     }
 
-    func stop() {
-        stopped = true
-        TestSockets.closeFD(fd)
-    }
+    func stop() { loop.stop() }
 }
 
 // MARK: - Fake Latency Measurer
