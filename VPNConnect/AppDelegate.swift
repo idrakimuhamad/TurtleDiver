@@ -58,6 +58,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     
     func applicationDidFinishLaunching(_ aNotification: Notification) {
+        // Recorded first, before anything that can block or fail, so that a run
+        // which never reaches its quit is still on the record. `lifecycle.log`
+        // pairs this with the quit trace in `applicationWillTerminate`.
+        LifecycleLog.append(.launch)
+
+        // The teardown in `applicationWillTerminate` is not optional: it puts the
+        // system proxy back and drops the vpn-slice hosts entries. macOS can end
+        // the process without calling it — sudden termination for an app it
+        // believes has nothing to lose, automatic termination for an idle hidden
+        // one — and the Info.plist no longer opts into either. This makes the
+        // guarantee unconditional at runtime rather than dependent on a
+        // framework happening to hold an activity: measured, one quit of this
+        // build was killed by sudden termination with no will-terminate markers,
+        // while another ran the delegate. Never re-enabled anywhere.
+        ProcessInfo.processInfo.disableSuddenTermination()
+
         StartupLog.reset()
         StartupLog.write("applicationDidFinishLaunching started")
 
@@ -272,8 +288,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ aNotification: Notification) {
+        // Traced at both ends, and synchronously, because this method is not
+        // guaranteed to run at all — `kill`, `SIGTERM` and a crash all skip it —
+        // and because nothing else recorded a quit. `StartupLog` is no use here:
+        // it writes on a queue, and the process can be gone before that queue is
+        // drained. A launch line with no `ended` line is a quit that did not
+        // finish its cleanup; a `began` line on its own says the cleanup hung.
+        LifecycleLog.append(.willTerminateBegan)
+
         EngineController.shared.shutdown()
         VPNManager.shared.cleanupOnTermination()
+
+        LifecycleLog.append(.willTerminateEnded)
     }
     
     /// Sizes the window to the current presentation state (compact controls or

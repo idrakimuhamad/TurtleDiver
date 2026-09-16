@@ -98,6 +98,7 @@ let package = Package(
                 "System/BoundedProcess.swift",
                 "System/ElevationPolicy.swift",
                 "System/ExistingConnection.swift",
+            "System/LifecycleLog.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/ProcessStartTime.swift",
                 "System/SystemProxyManager.swift",

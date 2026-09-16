@@ -131,7 +131,7 @@ reported rather than pretended away.
 | `sudo -n -v` probe | 3 s | treat the timestamp as cold |
 | the recorded group after teardown | 0.5 s | escalate to SIGKILL |
 | `ps -o comm= -g` in the sweep | 3 s | treat the group as unknown |
-| `ps -o etime=` reading an adopted tunnel's start time | 3 s | no duration: it counts from now |
+| `ps -o etime=` reading an adopted tunnel's start time | 3 s | no duration: it counts from the adoption |
 | `networksetup` (system proxy) | 60 s + 2 s grace | terminate, then SIGKILL, then `authorizationTimedOut` |
 | `/etc/hosts` cleanup on quit | 5 s | report and let the next connect retry |
 
@@ -142,6 +142,18 @@ rather than `lstart`, because `lstart` is a formatted date: its day and month
 names come from `LC_TIME`, and under `LC_ALL=de_DE.UTF-8` it answers
 `Mi. 16 Sep. 19:34:34 2026`, which a fixed-format parser cannot read however it
 pins its own locale. The elapsed field is digits, colons and at most one dash.
+
+That read is only half of the duration, though, and for a while the other half
+was wrong in a way the bound could not reveal. The reader returned the right
+instant — an adopted tunnel's history row carried the tunnel's true start time —
+but the duration timer's first statement, inside a
+`DispatchQueue.main.async` block one runloop later, overwrote
+`connectionStartTime` with `Date()`. So the pill always counted from the
+adoption while the history row counted from the process, and the two records
+disagreed by however long the tunnel had already been up. The timer now takes
+the start instant as a parameter, so each caller states which one it means and
+nothing recomputes it; the adopter feeds both the timer and the history row from
+one local.
 
 ## Non-goals
 
@@ -223,6 +235,35 @@ expire:
 `~/Library/Logs/TurtleDiver/launch.log` shows the sweep (`Step 0c`) and what it
 decided. `~/Library/Logs/TurtleDiver/vpn.log` shows the chosen strategy for each
 connect.
+
+`~/Library/Logs/TurtleDiver/lifecycle.log` is the one that tells a clean quit
+from a skipped one, and it is the only place a quit is recorded at all:
+`applicationWillTerminate` is not called for `kill`, `SIGTERM` or a crash. It is
+appended to synchronously — `launch.log` writes on a queue, and at quit the
+process can be gone before that queue drains — and it holds three events only:
+`launch`, `will-terminate-began`, `will-terminate-ended`. So a `launch` with no
+matching pair is a run that never cleaned up, and a `began` without an `ended`
+is a cleanup that hung or was killed part-way. It is rotated at launch, never at
+quit, and its lines are an event, a pid and a timestamp — there is no way to
+write anything else into it.
+
+The reason that file is needed at all is that the delegate method the teardown
+lives in is *not* guaranteed to run. macOS can end the process without asking:
+**sudden termination** kills an app it believes has nothing to lose, and
+**automatic termination** kills a hidden, idle one. Both are opt-in, and until
+now this app opted into both (`NSSupportsSuddenTermination` and
+`NSSupportsAutomaticTermination` in `VPNConnect/Info.plist` were `true`), so a
+normal quit could skip restoring the system proxy and leave it pointing at an
+engine that died with the process. Measured, with both `true`: one quit logged
+`Attempting sudden termination (1st attempt)` and then appDeath with **no**
+will-terminate markers, while another quit of the same build ran the delegate
+only because a Foundation activity happened to be alive at that moment — the
+same `lifecycle.log` got a `launch` line and nothing else. Both keys are now
+`false`, and `applicationDidFinishLaunching` additionally calls
+`ProcessInfo.processInfo.disableSuddenTermination()`, which is never undone, so
+the guarantee is enforced rather than accidental. The observable difference is
+in the unified log: a quit now ends with `Termination complete. Exiting without
+sudden termination.`
 
 Prefer `pgrep -x` and `ps -o comm=`. Nothing in the current design puts a
 credential in a process's argument list, and the habit is how that stays true.

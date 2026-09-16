@@ -10,9 +10,21 @@
 	<string></string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<!-- Both of these must stay false. Each one lets macOS end the process
+	     without asking it first: sudden termination kills an app that is
+	     believed to have nothing to lose, and automatic termination kills an
+	     idle, hidden one. TurtleDiver always has something to lose — the
+	     system proxy it armed points at an engine inside this process, and the
+	     teardown that puts it back runs in `applicationWillTerminate`, which
+	     neither mechanism calls. Measured with both set to true: a quit logged
+	     "Attempting sudden termination (1st attempt)" and then appDeath, with
+	     no will-terminate markers, while another quit of the same build ran the
+	     delegate only because a Foundation activity happened to be alive. The
+	     delegate disables sudden termination at launch as well; this is the
+	     declaration, that is the enforcement. -->
 	<key>NSSupportsAutomaticTermination</key>
-	<true/>
+	<false/>
 	<key>NSSupportsSuddenTermination</key>
-	<true/>
+	<false/>
 </dict>
 </plist>

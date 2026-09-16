@@ -324,6 +324,18 @@ Requires the engine ON and Settings → Dashboard → *Record request details* O
       connected) disconnects cleanly per the existing flow.
 - [ ] Quit with engine running (no system proxy) → listeners closed; next
       launch auto-starts the engine again (toggle persisted).
+- [ ] After the quit, `~/Library/Logs/TurtleDiver/lifecycle.log` ends with a
+      `launch` / `will-terminate-began` / `will-terminate-ended` triple for this
+      run. Then `pkill -TERM TurtleDiver` (which skips the delegate method
+      entirely) and check the next launch: the previous run has a `launch` line
+      and no quit pair — that absence is the whole point of the file.
+- [ ] Quit an instance that adopted **nothing** (no tunnel, no pid file) — the
+      triple must still be there. This is the case that silently vanished once:
+      with `NSSupportsSuddenTermination` / `NSSupportsAutomaticTermination` back
+      to `true`, macOS can end the process instead of asking it. To confirm the
+      guarantee is live, `log show --last 2m --predicate 'process ==
+      "TurtleDiver"' | grep -i sudden` and look for `Exiting without sudden
+      termination` rather than a `appDeath` with no willTerminate.
 
 ## 8. Regression — core VPN untouched
 
