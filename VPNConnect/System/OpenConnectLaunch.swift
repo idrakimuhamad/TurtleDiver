@@ -326,6 +326,26 @@ public enum OpenConnectPidFile {
     /// The path the app uses.
     public static var path: URL { path(inApplicationSupport: applicationSupportDirectory) }
 
+    /// The pid recorded in the file, if any.
+    ///
+    /// Reading it is all this decides. Whether that pid *is* an openconnect is
+    /// `ExistingConnectionScanner`'s question — the file is plain text in
+    /// Application Support, and it has held the pid of a process that was not an
+    /// openconnect. `pid <= 1` is refused too: a record of `0` or `1` must never
+    /// reach `kill`.
+    public static func recordedPid(at pidFile: URL = OpenConnectPidFile.path) -> Int32? {
+        guard let text = try? String(contentsOfFile: pidFile.path) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let pid = Int32(trimmed), pid > 1 else { return nil }
+        return pid
+    }
+
+    /// Throws the record away — for a file that names something that is not an
+    /// openconnect, or a process that is gone.
+    public static func discard(at pidFile: URL = OpenConnectPidFile.path) {
+        try? FileManager.default.removeItem(atPath: pidFile.path)
+    }
+
     /// Creates `run/` with `0700` before openconnect is launched.
     ///
     /// openconnect runs as root through sudo, so it can write the file anywhere

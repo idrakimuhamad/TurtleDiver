@@ -243,7 +243,8 @@ class VPNManager: ObservableObject {
     /// from a previous connection can detect they should not act on state.
     private var connectionGeneration: UInt64 = 0
     
-    /// Timer that polls for openconnect connection success via PID file / pgrep.
+    /// Timer that polls for openconnect connection success via the PID file and
+    /// a name-exact process scan.
     private var connectionPollTimer: DispatchSourceTimer?
     
     /// Flag set when the pipe write-end has been closed, preventing
@@ -331,28 +332,31 @@ class VPNManager: ObservableObject {
             }
         }
         
-        // Gracefully terminate openconnect via PID file (allows clean network teardown)
-        if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidStr), !pidStr.isEmpty, kill(pid, 0) == 0 {
+        // Gracefully terminate openconnect via the PID file (allows clean
+        // network teardown) — but only when that pid is *verified* to be an
+        // openconnect. The file is plain text in Application Support: a stale or
+        // recycled pid in it used to be signalled here, and a missing file used
+        // to fall back to a name-wide `pkill openconnect`.
+        if let pid = OpenConnectPidFile.recordedPid() {
             // Blocking call — this is called from applicationWillTerminate on the main thread,
             // but it's essential to give openconnect time to restore network settings before exit.
-            kill(pid, SIGTERM)
-            let deadline = DispatchTime.now() + .seconds(3)
-            while DispatchTime.now() < deadline {
-                usleep(200_000)
-                if kill(pid, 0) != 0 { break }
+            switch terminateGracefully(pid: pid, timeoutSeconds: 3) {
+            case .exitedCleanly:
+                debugOutput += "openconnect exited cleanly on quit\n"
+                OpenConnectPidFile.discard()
+            case .forceKilled:
+                debugOutput += "openconnect force-killed on quit (network may need manual restore)\n"
+                OpenConnectPidFile.discard()
+            case .notPermitted:
+                // An openconnect started through sudo is root-owned, so this user
+                // cannot signal it at all. The launch sweep reaps the process
+                // group the connect recorded, which is what ends one of those.
+                // The record stays: it is the only handle on a live tunnel.
+                debugOutput += "PID \(pid) is root-owned — leaving it to the process-group record\n"
+            case .notAnOpenConnect:
+                debugOutput += "PID \(pid) is not an openconnect — left alone\n"
+                OpenConnectPidFile.discard()
             }
-            if kill(pid, 0) == 0 {
-                kill(pid, SIGKILL) // Last resort — app is quitting anyway
-            }
-        } else {
-            // PID file missing — try pkill with SIGTERM (not SIGKILL)
-            let pkillTask = Process()
-            pkillTask.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pkillTask.arguments = ["-15", "openconnect"]
-            try? pkillTask.run()
-            // Don't wait — the process may take time to clean up, but the app is exiting.
-            // The network may briefly be in a bad state until the kernel cleans up.
         }
 
         // Best effort before the process goes away. It is asynchronous, so it may
@@ -390,15 +394,20 @@ class VPNManager: ObservableObject {
         }
         
         // STEP 1: Gracefully terminate openconnect (allows clean network teardown)
-        if let pidStr = try? String(contentsOfFile: pidFilePath)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidStr), !pidStr.isEmpty {
+        if let pid = OpenConnectPidFile.recordedPid() {
             debugOutput += "Terminating openconnect (PID: \(pid)) gracefully...\n"
-            let cleanExit = terminateGracefully(pid: pid)
-            if cleanExit {
+            switch terminateGracefully(pid: pid) {
+            case .exitedCleanly:
                 debugOutput += "openconnect exited cleanly, network restored\n"
-            } else {
+                OpenConnectPidFile.discard()
+            case .forceKilled:
                 debugOutput += "openconnect force-killed (network may need manual restore)\n"
+                OpenConnectPidFile.discard()
+            case .notPermitted:
+                debugOutput += "openconnect (PID: \(pid)) is root-owned — this app cannot signal it\n"
+            case .notAnOpenConnect:
+                debugOutput += "PID \(pid) is not an openconnect — left alone\n"
+                OpenConnectPidFile.discard()
             }
         }
         
@@ -760,64 +769,67 @@ class VPNManager: ObservableObject {
         }
     }
     
+    /// Stops a tunnel that is already running, before starting one.
+    ///
+    /// The pid is verified before anything is signalled. `openconnect.pid` has
+    /// named a process that was not an openconnect, and the name-wide
+    /// `pkill -15 -f openconnect` this used to fall back to could signal any
+    /// process of the user's whose command line merely mentioned the word.
     private func terminateExistingOpenConnect() async {
-        let adminPwd = SettingsManager.shared.adminPassword
-        var existingPid: Int32?
-        
-        // 1. Check PID file first — extract PID to avoid reading the file twice
-        if let pidStr = try? String(contentsOfFile: pidFilePath)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidStr), !pidStr.isEmpty, kill(pid, 0) == 0 {
-            existingPid = pid
-        }
-        
-        // 2. Fall back to pgrep
-        if existingPid == nil {
-            let pgrepExec = URL(fileURLWithPath: "/usr/bin/pgrep")
-            if let pgrepResult = try? await runProcess(executable: pgrepExec, arguments: ["-f", "openconnect"]),
-               !pgrepResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // We know a process exists, but we don't have a reliable PID yet
-                // (the pgrep output could include multiple PIDs). We'll rely on
-                // sudo pkill -9 below to kill it.
-            } else {
-                return // No process found
+        let pidFilePid = await MainActor.run { OpenConnectPidFile.recordedPid() }
+        // The scan spawns processes (up to 3 s each, bounded); keep it off the
+        // main thread.
+        let detection = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: ExistingConnectionScanner.detect(pidFilePid: pidFilePid))
             }
         }
-        
-        await MainActor.run {
-            self.debugOutput += "Found existing openconnect process. Terminating...\n"
-        }
-        
-        // 3. Gracefully terminate by PID file first
-        if let pid = existingPid {
+
+        guard let pid = detection.pid else {
+            // Nothing verified to stop. Still clean up any stale vpn-slice
+            // entries: a previous session that was killed uncleanly leaves them,
+            // and they stop the new connection from working.
             await MainActor.run {
-                self.debugOutput += "Gracefully terminating existing openconnect (PID: \(pid))...\n"
+                for rejection in detection.rejections {
+                    self.debugOutput += rejection.explanation + "\n"
+                }
+                if !detection.rejections.isEmpty {
+                    OpenConnectPidFile.discard()
+                    self.debugOutput += "Discarded a PID file that named no openconnect\n"
+                }
+                self.cleanupVpnSliceHosts()
             }
-            terminateGracefully(pid: pid)
-        } else {
-            await MainActor.run {
-                self.debugOutput += "No PID file found, sending SIGTERM via pkill...\n"
-            }
-            // Use pkill with SIGTERM (signal 15) instead of SIGKILL,
-            // giving openconnect a chance to restore network configuration.
-            _ = try? await runProcess(
-                executable: URL(fileURLWithPath: "/usr/bin/pkill"),
-                arguments: ["-15", "-f", "openconnect"]
-            )
-            // Give it time to clean up
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            return
         }
-        
-        // 4. Clean up any stale vpn-slice entries from /etc/hosts
-        // (entries from a partially-killed previous session prevent the new connection from working)
+
         await MainActor.run {
+            let source = detection.source?.rawValue ?? "unknown"
+            self.debugOutput += "Found existing openconnect (PID: \(pid), \(source)). Terminating...\n"
+        }
+
+        let outcome = terminateGracefully(pid: pid)
+
+        await MainActor.run {
+            switch outcome {
+            case .exitedCleanly:
+                self.debugOutput += "Existing openconnect exited cleanly\n"
+            case .forceKilled:
+                self.debugOutput += "Existing openconnect force-killed\n"
+            case .notPermitted:
+                self.debugOutput += "Existing openconnect (PID: \(pid)) is root-owned — this app cannot signal it\n"
+            case .notAnOpenConnect:
+                self.debugOutput += "PID \(pid) is not an openconnect — left alone\n"
+            }
+            if outcome != .notPermitted {
+                OpenConnectPidFile.discard()
+            }
+            // Clean up any stale vpn-slice entries from /etc/hosts (entries from
+            // a partially-killed previous session prevent the new connection
+            // from working).
             self.cleanupVpnSliceHosts()
         }
-        
-        // 5. Clean up the stale PID file
-        try? FileManager.default.removeItem(atPath: pidFilePath)
-        
-        // Wait for cleanup to complete
+
+        // Wait for cleanup to complete before the plan starts.
         try? await Task.sleep(nanoseconds: 1_000_000_000)
     }
 
@@ -1087,34 +1099,32 @@ class VPNManager: ObservableObject {
         connectionPollTimer = nil
     }
     
-    /// Polls the PID file every 2 seconds to detect when openconnect has
-    /// successfully started. Since we now run bash directly (not through
-    /// osascript), stdout/stderr arrive in real-time via readability handlers.
-    /// This polling timer is a secondary fallback for detecting the connection.
+    /// Polls every 2 seconds to detect when openconnect has successfully
+    /// started. Since we now run bash directly (not through osascript),
+    /// stdout/stderr arrive in real-time via readability handlers; this timer is
+    /// the secondary path.
     ///
     /// Detection strategy (tiered):
-    /// 1. Check the PID file (written by openconnect via `--pid-file`) — instant
-    ///    when openconnect supports it.
-    /// 2. After 10 seconds without a PID file, fall back to pgrep. Since
-    ///    `terminateExistingOpenConnect()` already cleaned up stale processes
-    ///    before starting, any new openconnect PID found by pgrep must be from
-    ///    the current connection. We exclude the bash process PID itself.
+    /// 1. The PID file openconnect was asked to write with `--pid-file`.
+    /// 2. After 10 seconds without one, a scan for a process *named*
+    ///    openconnect.
     ///
-    /// This avoids false positives from stale processes (which pgrep without
-    /// cleanup would detect) while still working when openconnect doesn't
-    /// write the PID file in foreground mode.
+    /// Both tiers verify the pid before it counts — see `ExistingConnection`.
+    /// The scan is a name match (`pgrep -x` plus `ps -o comm=`), never a
+    /// command-line match: matching command lines is what once made this app
+    /// adopt a process that merely mentioned openconnect, and it is why the
+    /// previous version had to guess which pids to leave out.
     private func startConnectionPollingTimer(log: VpnConnectionLogger, gen: UInt64) {
         // Cancel any previous polling timer
         connectionPollTimer?.cancel()
         
-        // The bash process that launched this connection. At this point
-        // `self.process` has been set and `proc.run()` has been called,
-        // so `processIdentifier` should be valid. We'll exclude this PID
-        // from pgrep results to avoid detecting the bash wrapper itself.
+        // The bash process that launched this connection, kept for the log only:
+        // the verification already excludes it, because its command name is
+        // bash, not openconnect.
         let bashPid: Int32? = self.process?.processIdentifier
         
-        // Track how many polls have elapsed. After 5 (10 seconds), fall back
-        // to pgrep if the PID file hasn't appeared.
+        // Track how many polls have elapsed. After 5 (10 seconds), fall back to a
+        // process-name scan if the PID file hasn't appeared.
         var pollCount = 0
         
         let pollTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
@@ -1140,46 +1150,26 @@ class VPNManager: ObservableObject {
             
             var detectedPid: Int32?
             
-            // Tier 1: Check the PID file (fast path)
-            if let pidStr = try? String(contentsOfFile: self.pidFilePath)
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-               let pid = Int32(pidStr),
-               !pidStr.isEmpty,
-               kill(pid, 0) == 0 {
+            // Tier 1: the PID file, verified before it counts. This tier used to
+            // accept *any* live pid from that file, and the file held a pid that
+            // was not an openconnect — enough to report a connection that did not
+            // exist.
+            if let pid = OpenConnectPidFile.recordedPid(), OpenConnectProcess.isOpenConnect(pid: pid) {
                 detectedPid = pid
-                log.write("[POLL] PID file found — PID \(pid) is alive")
+                log.write("[POLL] PID file found — PID \(pid) is openconnect")
             }
             
-            // Tier 2: After 10 seconds, fall back to pgrep
-            // We exclude the osascript PID because `pgrep -f openconnect`
-            // will match osascript's command line (the -e argument contains
-            // "openconnect").
+            // Tier 2: after 10 seconds, scan for a process *named* openconnect.
+            // The verification excludes the bash wrapper and any process that
+            // merely mentions the word, so no pid needs to be guessed at. This is
+            // the tier that finds the tunnel in practice: openconnect only writes
+            // `--pid-file` together with `--background`, which the plan does not
+            // use.
             if detectedPid == nil && pollCount >= 5 {
-                let pgrepTask = Process()
-                pgrepTask.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-                pgrepTask.arguments = ["-f", "openconnect"]
-                let outPipe = Pipe()
-                pgrepTask.standardOutput = outPipe
-                pgrepTask.standardError = FileHandle.nullDevice
-                try? pgrepTask.run()
-                pgrepTask.waitUntilExit()
-                
-                if pgrepTask.terminationStatus == 0 {
-                    let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                        .components(separatedBy: .newlines)
-                        .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-                    
-                    // Pick the first PID that is NOT the shell process and is still alive
-                    detectedPid = pids.first { runningPid in
-                        runningPid != bashPid
-                        && runningPid != ProcessInfo.processInfo.processIdentifier
-                        && kill(runningPid, 0) == 0
-                    }
-                    
-                    if let pid = detectedPid {
-                        log.write("[POLL] pgrep fallback found openconnect PID \(pid) (bash PID: \(bashPid ?? -1))")
-                    }
+                let detection = ExistingConnectionScanner.detect(pidFilePid: nil)
+                if let pid = detection.pid {
+                    detectedPid = pid
+                    log.write("[POLL] scan found openconnect PID \(pid) (bash PID: \(bashPid ?? -1))")
                 }
             }
             
@@ -1242,20 +1232,34 @@ class VPNManager: ObservableObject {
     /// This is critical — SIGKILL prevents openconnect from restoring network
     /// configuration (routes, DNS, utun interface), causing total internet loss.
     @discardableResult
-    private func terminateGracefully(pid: Int32, timeoutSeconds: TimeInterval = 3.0) -> Bool {
-        guard kill(pid, 0) == 0 else { return true } // already dead
-        
-        kill(pid, SIGTERM)
-        
+    /// Stops an openconnect, and says truthfully what happened.
+    ///
+    /// Two things are deliberately different from the version this replaces.
+    /// First, the pid is verified: `openconnect.pid` is a plain file, and a
+    /// stale or recycled pid in it names somebody else's process. Nothing is
+    /// signalled until `ps` says the pid is an openconnect.
+    ///
+    /// Second, the outcome is *measured* rather than assumed. Liveness used to
+    /// be `kill(pid, 0) == 0`, which answers `EPERM` — not 0 — for a process this
+    /// user may not signal. An openconnect started through `sudo` is owned by
+    /// root, so that test reported the app's own tunnel as "exited cleanly"
+    /// without ever having signalled it.
+    private func terminateGracefully(pid: Int32, timeoutSeconds: TimeInterval = 3.0) -> TerminationOutcome {
+        guard OpenConnectProcess.isOpenConnect(pid: pid) else { return .notAnOpenConnect }
+        guard OpenConnectProcess.isRunning(pid: pid) else { return .exitedCleanly }
+
+        _ = kill(pid, SIGTERM)
+
         let deadline = DispatchTime.now() + .seconds(Int(timeoutSeconds))
         while DispatchTime.now() < deadline {
             usleep(200_000) // 200ms
-            if kill(pid, 0) != 0 { return true } // exited cleanly
+            if !OpenConnectProcess.isRunning(pid: pid) { return .exitedCleanly }
         }
-        
+
         // Only force-kill as last resort — this may leave network in a bad state
-        kill(pid, SIGKILL)
-        return false
+        _ = kill(pid, SIGKILL)
+        usleep(200_000)
+        return OpenConnectProcess.isRunning(pid: pid) ? .notPermitted : .forceKilled
     }
     
     private func forceTerminate() {
@@ -1266,10 +1270,20 @@ class VPNManager: ObservableObject {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         
-        // Gracefully terminate openconnect (allows clean network teardown)
-        if let pidStr = try? String(contentsOfFile: pidFilePath).trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidStr) {
-            terminateGracefully(pid: pid)
+        // Gracefully terminate openconnect (allows clean network teardown) — but
+        // only a pid that is verified to be an openconnect.
+        if let pid = OpenConnectPidFile.recordedPid() {
+            switch terminateGracefully(pid: pid) {
+            case .notPermitted:
+                debugOutput += "openconnect (PID: \(pid)) is root-owned — this app cannot signal it\n"
+            case .notAnOpenConnect:
+                debugOutput += "PID \(pid) is not an openconnect — left alone\n"
+                OpenConnectPidFile.discard()
+            case .exitedCleanly, .forceKilled:
+                // The process is gone, so the record is stale — and a pid that no
+                // longer belongs to openconnect can be recycled by something else.
+                OpenConnectPidFile.discard()
+            }
         }
         
         // Then handle the shell wrapper
@@ -1456,41 +1470,41 @@ class VPNManager: ObservableObject {
     
     /// Checks if openconnect is already running (from a previous session)
     /// and updates the app status accordingly. Called on launch.
+    /// Looks for a tunnel that is already running and adopts it, so relaunching
+    /// the app does not orphan an openconnect it started itself.
+    ///
+    /// Adoption is a claim about the network, so it is gated on verification:
+    /// the pid must be alive, must not be this app, and `ps` must say it is an
+    /// openconnect. A PID file naming anything else is reported and discarded
+    /// instead of adopted — the previous version adopted whatever pid that file
+    /// held, or the first live pid from a command-line `pgrep`, and drew
+    /// "Connected" over a tunnel that did not exist.
     private func checkForExistingConnection() {
-        // Tier 1: Check PID file
-        var existingPid: Int32?
-        if let pidStr = try? String(contentsOfFile: pidFilePath)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidStr), !pidStr.isEmpty, kill(pid, 0) == 0 {
-            existingPid = pid
-        }
-        
-        // Tier 2: Fall back to pgrep
-        if existingPid == nil {
-            let pgrepTask = Process()
-            pgrepTask.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            pgrepTask.arguments = ["-f", "openconnect"]
-            let outPipe = Pipe()
-            pgrepTask.standardOutput = outPipe
-            pgrepTask.standardError = FileHandle.nullDevice
-            do {
-                try pgrepTask.run()
-                pgrepTask.waitUntilExit()
-                if pgrepTask.terminationStatus == 0 {
-                    let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                        .components(separatedBy: .newlines)
-                        .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-                    // Exclude our own process
-                    existingPid = pids.first { $0 != ProcessInfo.processInfo.processIdentifier && kill($0, 0) == 0 }
-                }
-            } catch {
-                // pgrep not available — no detection possible
-                return
+        let pidFilePid = OpenConnectPidFile.recordedPid()
+        let generation = connectionGeneration
+        // `ps`/`pgrep` get up to 3 s each; the UI must not wait on them.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let detection = ExistingConnectionScanner.detect(pidFilePid: pidFilePid)
+            DispatchQueue.main.async {
+                guard let self, self.connectionGeneration == generation else { return }
+                self.adoptExistingConnection(ifVerified: detection)
             }
         }
-        
-        guard let pid = existingPid else { return }
+    }
+
+    /// Adopts an existing tunnel, and *only* one that was verified.
+    private func adoptExistingConnection(ifVerified detection: ExistingConnectionDetection) {
+        for rejection in detection.rejections {
+            debugOutput += rejection.explanation + "\n"
+        }
+
+        guard let pid = detection.pid else {
+            if !detection.rejections.isEmpty {
+                OpenConnectPidFile.discard()
+                debugOutput += "Discarded a PID file that named no openconnect\n"
+            }
+            return
+        }
         
         // Get the process start time for the duration display
         let startTime = processStartTime(pid: pid)
@@ -1499,7 +1513,7 @@ class VPNManager: ObservableObject {
         // and cleanupOnTermination() can find and gracefully kill openconnect.
         try? "\(pid)\n".write(toFile: pidFilePath, atomically: false, encoding: .utf8)
         
-        debugOutput += "Found existing VPN connection (PID: \(pid))\n"
+        debugOutput += "Found existing VPN connection (PID: \(pid), verified openconnect)\n"
         status = .connected
         connectionStartTime = startTime ?? Date()
         startDurationTimer()

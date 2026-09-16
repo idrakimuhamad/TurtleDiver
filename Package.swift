@@ -97,6 +97,7 @@ let package = Package(
                 "System/AppIdentity.swift",
                 "System/BoundedProcess.swift",
                 "System/ElevationPolicy.swift",
+                "System/ExistingConnection.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/SystemProxyManager.swift",
                 "System/ToolProcess.swift",
