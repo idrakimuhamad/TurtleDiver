@@ -464,3 +464,96 @@ final class SystemProxyManagerTests: XCTestCase {
         XCTAssertFalse(SystemProxyManager.isLegacyPAC(""))
     }
 }
+
+// MARK: - The real runner
+
+/// `NetworkSetupRunner` was the second unbounded elevation path in the app: it
+/// pipes the administrator password to `networksetup`, which does not use PAM —
+/// for a set-command it goes through Authorization Services, which *can* raise a
+/// GUI dialog. An unanswered dialog blocked the child forever behind a
+/// `semaphore.wait()` with no deadline.
+///
+/// These drive a fake executable, because no test may touch real proxy settings.
+final class BoundedNetworkSetupRunnerTests: XCTestCase {
+
+    func testTheInjectedExecutableIsWhatActuallyRuns() throws {
+        let sandbox = try makeSandbox()
+        let marker = sandbox.appendingPathComponent("ran")
+        let script = try makeScript("echo hello; : > '\(marker.path)'", in: sandbox)
+
+        let runner = NetworkSetupRunner(adminPasswordProvider: { "hunter2" },
+                                        executableURL: script,
+                                        timeout: 10)
+        XCTAssertEqual(try runner.run(arguments: ["-listallnetworkservices"]), "hello\n")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path),
+                      "the injected executable must be the one that runs")
+    }
+
+    /// The administrator password travels on stdin, never in argv — this is the
+    /// same rule the VPN launch follows, and it must survive the bounding.
+    func testTheAdminPasswordGoesToStdinAndNeverIntoTheCommandLine() throws {
+        let sandbox = try makeSandbox()
+        let capture = sandbox.appendingPathComponent("stdin")
+        let script = try makeScript("cat > '\(capture.path)'", in: sandbox)
+
+        let secret = "correct horse battery staple"
+        let runner = NetworkSetupRunner(adminPasswordProvider: { secret },
+                                        executableURL: script,
+                                        timeout: 10)
+        _ = try runner.run(arguments: ["-setwebproxy", "Wi-Fi"])
+
+        XCTAssertEqual(try String(contentsOf: capture, encoding: .utf8), secret)
+        XCTAssertFalse(script.path.contains(secret))
+    }
+
+    /// A command that never answers must be killed and reported, not waited on.
+    func testACommandThatNeverAnswersIsKilledAndReportedAsATimeout() throws {
+        let runner = NetworkSetupRunner(adminPasswordProvider: { "hunter2" },
+                                        executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                                        timeout: 0.5)
+
+        let started = Date()
+        XCTAssertThrowsError(try runner.run(arguments: ["30"])) { error in
+            guard case SystemProxyError.authorizationTimedOut(let detail)? = error as? SystemProxyError else {
+                return XCTFail("expected a timeout, got \(error)")
+            }
+            XCTAssertTrue(detail.contains("sleep"), "the message must name what did not answer: \(detail)")
+            XCTAssertTrue(detail.contains("authorization dialog"))
+        }
+        // 30 s of `sleep` minus a 0.5 s deadline: it has to come back quickly.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+    }
+
+    /// A real failure is still a failure — the timeout must not swallow it.
+    func testANonZeroExitIsStillReportedAsAFailure() throws {
+        let sandbox = try makeSandbox()
+        let script = try makeScript("echo 'no such service' >&2; exit 3", in: sandbox)
+
+        let runner = NetworkSetupRunner(adminPasswordProvider: { "hunter2" },
+                                        executableURL: script,
+                                        timeout: 10)
+        XCTAssertThrowsError(try runner.run(arguments: ["-setwebproxy", "Wi-Fi"])) { error in
+            guard case SystemProxyError.restoreFailed(let detail)? = error as? SystemProxyError else {
+                return XCTFail("expected a failure, got \(error)")
+            }
+            XCTAssertTrue(detail.contains("no such service"), detail)
+        }
+    }
+
+    // MARK: Helpers
+
+    private func makeSandbox() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("netrunner-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func makeScript(_ body: String, in sandbox: URL) throws -> URL {
+        let url = sandbox.appendingPathComponent("fake-\(UUID().uuidString)")
+        try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+}

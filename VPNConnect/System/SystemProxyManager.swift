@@ -6,6 +6,10 @@ public enum SystemProxyError: LocalizedError, Equatable {
     case cannotListServices(String)
     case snapshotUnavailable
     case restoreFailed(String)
+    /// `networksetup` accepted the command but never finished. It does not use
+    /// PAM: for a set-command it asks the system for authorization, which can
+    /// raise a GUI dialog, so an unanswered dialog blocks it indefinitely.
+    case authorizationTimedOut(String)
 
     public var errorDescription: String? {
         switch self {
@@ -15,6 +19,8 @@ public enum SystemProxyError: LocalizedError, Equatable {
             return "No saved proxy snapshot to restore (proxy was not enabled)"
         case .restoreFailed(let detail):
             return "Failed to restore previous proxy settings: \(detail)"
+        case .authorizationTimedOut(let detail):
+            return "Timed out changing the system proxy: \(detail)"
         }
     }
 }
@@ -107,17 +113,37 @@ private extension NSLock {
 /// credentials from stdin when launched non-interactively).
 public final class NetworkSetupRunner: NetworkSetupRunning, @unchecked Sendable {
 
+    /// How long one `networksetup` call may take before it is treated as stuck.
+    /// The enable/disable paths are user-facing, so waiting forever would freeze
+    /// the app on a prompt the user may not even see.
+    public static let defaultTimeout: TimeInterval = 60
+
+    /// How long a stuck process gets to exit on `SIGTERM` before `SIGKILL`.
+    public static let killGrace: TimeInterval = 2
+
     /// Provides the admin password for auth (read fresh per invocation).
     public var adminPasswordProvider: () -> String
 
-    public init(adminPasswordProvider: @escaping () -> String) {
+    /// The tool to run. Injectable so a test can drive a slow or recording fake
+    /// — no test may touch the machine's real network settings.
+    public let executableURL: URL
+
+    public let timeout: TimeInterval
+
+    public init(
+        adminPasswordProvider: @escaping () -> String,
+        executableURL: URL = URL(fileURLWithPath: "/usr/sbin/networksetup"),
+        timeout: TimeInterval = NetworkSetupRunner.defaultTimeout
+    ) {
         self.adminPasswordProvider = adminPasswordProvider
+        self.executableURL = executableURL
+        self.timeout = timeout
     }
 
     public func run(arguments: [String]) throws -> String {
         let password = adminPasswordProvider()
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+        process.executableURL = executableURL
         process.arguments = arguments
 
         let stdoutPipe = Pipe()
@@ -155,7 +181,24 @@ public final class NetworkSetupRunner: NetworkSetupRunning, @unchecked Sendable 
 
         let semaphore = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in semaphore.signal() }
-        semaphore.wait()
+        // Bounded: the child can be parked on a GUI authorization dialog that
+        // nothing in this process can answer, and this call sits on the
+        // enable/disable path. Draining the pipes after killing the child keeps
+        // the readability handlers and their file descriptors from leaking.
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            if semaphore.wait(timeout: .now() + Self.killGrace) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            _ = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            _ = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            throw SystemProxyError.authorizationTimedOut(
+                "\(executableURL.lastPathComponent) \(arguments.first ?? "") did not answer within "
+                    + "\(Int(timeout))s — it may be waiting on an authorization dialog"
+            )
+        }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
