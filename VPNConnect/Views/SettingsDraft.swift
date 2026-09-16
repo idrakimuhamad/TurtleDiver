@@ -213,6 +213,12 @@ extension SettingsDisplay {
         if lower.contains("disconnected") { return StatusLabel(title: "Disconnected", tone: .neutral) }
         if lower.contains("app exit") { return StatusLabel(title: "App exited", tone: .neutral) }
         if lower.contains("missing settings") { return StatusLabel(title: "Missing settings", tone: .error) }
+        // Before the "token" rule below: a status naming a missing tool says
+        // "stoken is not installed", and the pill must not answer "Token error"
+        // — that is the misdiagnosis this feature exists to end.
+        if lower.contains("missing tool") || lower.contains("not installed") || lower.contains("not found") {
+            return StatusLabel(title: "Missing tool", tone: .error)
+        }
         if lower.contains("token") { return StatusLabel(title: "Token error", tone: .error) }
         if lower.contains("fail") || lower.contains("error") { return StatusLabel(title: "Failed", tone: .error) }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

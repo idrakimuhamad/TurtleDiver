@@ -426,7 +426,24 @@ class VPNManager: ObservableObject {
         
         let settings = SettingsManager.shared
         let withTunneling = settings.useTunneling
-        
+
+        // A missing command-line tool is a setup problem, not a token problem.
+        // Asking stoken for a code when stoken is not installed produced
+        // "Failed to generate token", which points at the PIN and the token
+        // file — the one place the fault is not. Say which tool is absent (and
+        // where), before anything is attempted.
+        let missingTools = ToolPreflight.missing(splitTunneling: withTunneling)
+        if let message = ToolPreflight.message(for: missingTools) {
+            let paths = missingTools.map { "\($0.id): not found" }.joined(separator: ", ")
+            await MainActor.run {
+                self.status = .error(message)
+                self.debugOutput += "Missing tool(s) — \(paths)\n"
+                self.debugOutput += "Install them with: brew install \(missingTools.compactMap(\.formula).joined(separator: " "))\n"
+            }
+            logFailedAttempt(status: "Failed - Missing Tool")
+            return
+        }
+
         // Generate token using stoken
         let token = await generateToken(passcode: settings.vpnPasscode)
         guard !token.isEmpty else {
@@ -898,31 +915,32 @@ class VPNManager: ObservableObject {
         }
     }
     
-    private func logTokenErrorAttempt() {
+    /// Records a failed attempt under a status the History pane can name. The
+    /// status has to describe *why*: a missing `stoken` is not a token error.
+    private func logFailedAttempt(status: String) {
         if let id = currentAttemptId {
             let attempt = ConnectionAttempt(
                 id: id,
                 timestamp: connectionStartTime ?? Date(),
                 host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                status: "Failed - Token Error",
+                status: status,
                 logOutput: debugOutput
             )
             ConnectionHistoryManager.shared.updateAttempt(attempt)
         }
     }
+
+    private func logTokenErrorAttempt() {
+        logFailedAttempt(status: "Failed - Token Error")
+    }
     
     private func binaryPath(_ name: String) -> String? {
-        let candidates = [
-            "/opt/homebrew/bin/\(name)",
-            "/usr/local/bin/\(name)",
-            "/usr/bin/\(name)",
-            "/bin/\(name)"
-        ]
-        let fm = FileManager.default
-        for p in candidates {
-            if fm.isExecutableFile(atPath: p) { return p }
-        }
-        return nil
+        // Delegates to the shared resolver, which searches `$PATH` as well as
+        // the prefixes: the four directories this used to try missed MacPorts
+        // (`/opt/local/bin`) and `~/.local/bin`, so a tool the user had
+        // installed looked absent and the connect failed with a message about
+        // the *token*.
+        ToolResolver.locate(name)
     }
     
     private func startConnectionTimer(timeoutSeconds: Int) {
