@@ -406,11 +406,14 @@ either uses `sudo -n` (no dialog), hands over to macOS's own Touch ID dialog
 last path writes the password anywhere. The privileged body also runs in its own
 process group, recorded in `…/TurtleDiver/run/elevation.pgid`, so teardown
 signals the whole group instead of leaving something behind, and a launch-time
-sweep cleans up a previous run's leftovers. `networksetup` — the other
-elevation path — got the same treatment: it had no deadline at all.
+sweep cleans up a previous run's leftovers — the group that run recorded, and
+nothing else. `networksetup` — the other elevation path — got the same
+treatment: it had no deadline at all.
 
 What the app cannot do is kill a root-owned process it did not start; a non-root
-sender may not signal one. The fix is that it no longer creates them.
+sender may not signal one. The fix is that it no longer creates them. An orphan
+from a build older than this mechanism left no record for the sweep to read, so
+removing one of those needs a root user — or a reboot.
 
 ### Fixed: a predictable PID file
 
