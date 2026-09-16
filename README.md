@@ -82,14 +82,18 @@ brew install stoken
 brew install vpn-slice
 ```
 
-They are looked up in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` and
-`/bin`; if a Connect fails with "Failed to generate token", one of them is
-missing. [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md) plans an in-app **Setup**
-assistant that detects each tool, shows its version and path, and installs the
-missing ones with one click — bundling them into the app is not viable (they
-and their 19 Homebrew dependencies come to 212 MB, and they are LGPL-2.1 /
-GPL-3.0, so redistributing our own copies would add relinking and source-offer
-obligations on top of the re-signing work).
+They are looked up on `$PATH` first and then in `/opt/homebrew/bin`,
+`/usr/local/bin`, `/opt/local/bin`, `~/.local/bin`, `/usr/bin` and `/bin` — the
+prefixes Homebrew and MacPorts use, whether or not the app inherited them. The
+**Setup** pane (⌘, → Application → Setup, or the menu bar's *Check
+Requirements…*) lists each tool with the path it resolved and the version it
+reports, and installs the missing ones with one click — `brew install` run as
+you, with no password. It is advisory: nothing is disabled when a tool is
+absent. A Connect that cannot start says which tool is missing and points at
+that pane. Bundling the tools into the app is not viable (they and their 19
+Homebrew dependencies come to 212 MB, and they are LGPL-2.1 / GPL-3.0, so
+redistributing our own copies would add relinking and source-offer obligations
+on top of the re-signing work).
 
 ## Configuration
 
@@ -402,10 +406,12 @@ probe answers `EPERM` and no PID tier can be trusted to adopt it.
 
 ### Connection Issues
 
-1. Verify all required tools are installed: `brew list openconnect stoken`
-2. Check that vpn-slice is installed: `brew list | grep vpn-slice`
-3. Ensure your VPN credentials are correct
-4. Check debug output for specific error messages
+1. Open **Settings ▸ Setup** (⌘, → Application → Setup, or the menu bar's
+   *Check Requirements…*): every tool should show a green version pill and a
+   path. Anything missing gets an amber badge and an **Install Missing** button;
+   the same `brew install …` line is shown for copying.
+2. Ensure your VPN credentials are correct
+3. Check debug output for specific error messages
 
 ### Token Generation Issues
 

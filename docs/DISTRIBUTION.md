@@ -139,7 +139,7 @@ Measured:
 
 Verdict: **do not bundle.** Everything below delegates to Homebrew.
 
-### Option C — an in-app Setup assistant **(recommended)**
+### Option C — an in-app Setup assistant **(shipped in 2.0.0)**
 
 A new Settings pane, **Setup** (Application group), listing one row per tool:
 
@@ -148,24 +148,31 @@ A new Settings pane, **Setup** (Application group), listing one row per tool:
     stoken          ✓ 0.93                      /opt/homebrew/bin/stoken
     vpn-slice       ✓ 0.16.1                    /opt/homebrew/bin/vpn-slice
     ────────────────────────────────────────────────────────────────────
-    [ Install what's missing ]   [ Copy command ]   [ Re-check ]
+    [ Install Missing ]   [ Copy command ]   [ Check Again ]
+
+What it does today (the plan below differed in three places, noted inline):
 
 - **Detection** — a pure `ToolRequirement` table (name, `--version` argument,
-  minimum version, why it is needed, and the `brew` formula), resolved through
-  PATH *and* the known prefixes, so a MacPorts user (`/opt/local/bin`) or a
-  `~/.local/bin` install is recognised instead of being told "not installed".
-  This also fixes a real defect: today `binaryPath` cannot see those installs.
+  why it is needed, and the `brew` formula), resolved through PATH *and* the
+  known prefixes, so a MacPorts user (`/opt/local/bin`) or a `~/.local/bin`
+  install is recognised instead of being told "not installed". This also fixed
+  a real defect: `binaryPath` could not see those installs. There is no minimum
+  version check — the plan had one, and it is not worth failing a connect over
+  a version Homebrew will refuse to install anyway.
 - **Install** — runs `brew install openconnect stoken vpn-slice` as the *user*
-  (Homebrew must never run as root), streaming output into a scroll view.
-  Homebrew itself, if missing, is offered separately and explains that it needs
-  the administrator password; the app already owns that flow (`sudo -S` with
-  the Keychain password) and would only pre-authenticate — the password is
-  never part of a command line.
-- **Never required** — the pane is advisory. Anyone who manages their own
-  installs can ignore it.
-- **Pre-flight on Connect** — if a required tool is missing, Connect fails with
-  "openconnect was not found — Open Setup" instead of today's misleading
-  "Failed to generate token", and the row explains which tool is at fault.
+  (Homebrew must never run as root), streaming output into a card that appears
+  while it runs. Homebrew itself is **not** bootstrapped and no password is
+  ever asked for: when it is absent the pane says so and links to brew.sh.
+  Installing Homebrew is a bigger commitment than installing three formulae,
+  and it needs root — the app will not take that decision for the user.
+- **Never required** — the pane is advisory. It reports; it disables nothing
+  and changes no setting. Anyone who manages their own installs can ignore it.
+- **Pre-flight on Connect** — if a required tool is missing, Connect stops
+  *before* it asks stoken for a code, and says "stoken is not installed — see
+  Settings ▸ Setup" (naming every absent tool, and the one line that installs
+  them) instead of the misleading "Failed to generate token". The History pane
+  records the attempt as **Failed - Missing Tool**, so the pill reads "Missing
+  tool" and not "Token error".
 - Copy-command remains for anyone who prefers a terminal; the same strings are
   in `README_INSTALL.txt` so the DMG, the `.pkg` and the app agree.
 
@@ -226,10 +233,10 @@ would be us — not Homebrew — redistributing LGPL/GPL binaries.
 
 ### Recommendation
 
-1. **Option C now** — it needs no certificate, no root and no installer
-   scripting, it fixes the detection defect, and it turns a README line into a
-   guided experience. It is the only option that also helps someone who
-   installed by dragging the DMG.
+1. **Option C — done (2.0.0).** It needed no certificate, no root and no
+   installer scripting, it fixed the detection defect, and it turned a README
+   line into a guided experience. It is the only option that also helps someone
+   who installed by dragging the DMG.
 2. **Option D after notarization** — a `turtlediver-tools` formula plus a cask;
    the Setup pane then just says "managed by Homebrew".
 3. **Option B only if the `.pkg` becomes the primary download.**
@@ -239,14 +246,15 @@ would be us — not Homebrew — redistributing LGPL/GPL binaries.
 
 - **Developer ID / Apple Developer Program**: enrol and create the two
   certificates? Without them nothing downloadable can avoid the Gatekeeper
-  prompt; with them `./publish.sh` is finished.
+  prompt; with them `./publish.sh` is finished. Answered: **not enrolling** —
+  the prompt stands, and it is documented in §"Installing without the
+  Gatekeeper prompt". The notarization paths in `publish.sh` stay correct and
+  dormant.
 - **Who may install dependencies?** Option C runs `brew install` from the app
-  but always behind an explicit button click, never silently. Confirm that is
-  acceptable, or restrict the pane to detection plus a copyable command.
-- **Homebrew bootstrap in-app?** The assistant could offer to install Homebrew
-  itself (needs the admin password). Otherwise the pane says "install Homebrew
-  first" and links to brew.sh. Recommendation: **do not bootstrap Homebrew from
-  the app** — it is a bigger commitment than installing three formulae.
+  but always behind an explicit button click, never silently. Answered: the app
+  runs it as the user with no password; the by-hand command is shown too.
+- **Homebrew bootstrap in-app?** Answered: **no.** The pane says "install
+  Homebrew first" and links to brew.sh.
 
 ---
 

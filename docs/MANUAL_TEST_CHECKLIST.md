@@ -130,7 +130,7 @@ is the input).
       the detail, no push-navigation.
 - [ ] The sidebar groups are Connection (VPN, Profiles) / Proxy Engine
       (Dashboard, Policies, Rules, Routing, Rule Sets) / Monitoring (History) /
-      Application (Appearance, Advanced); the footer shows the engine dot,
+      Application (Appearance, Setup, Advanced); the footer shows the engine dot,
       `v2.0.0` and the active profile.
 - [ ] The sidebar can hold its width: drag the divider as far left as it goes
       → it stops at the search field (the placeholder never clips to
@@ -170,6 +170,43 @@ is the input).
       footer off the bottom edge — see `docs/SETTINGS_LAYOUT.md` §3). Check all
       nine: the search field must sit just under the titlebar and the pane
       title must be fully visible, on every pane.
+
+## 0d. Setup pane (2.0.0)
+
+The pane that answers "why won't it connect" when a command-line tool is
+missing. Advisory by design: it reports, it installs nothing silently, and it
+disables nothing.
+
+- [ ] **Settings ▸ Setup** (⌘, → Application → Setup) shows **Required tools**:
+      Homebrew, openconnect, stoken, vpn-slice, each with its resolved path, a
+      version pill taken from that tool's own `--version` output, and one line
+      saying what breaks without it. On a working machine the four read
+      `/opt/homebrew/bin/{brew,openconnect,stoken,vpn-slice}` with `7.0.1`,
+      `9.21`, `0.93`, `0.16.1` (see `screenshots/setup-pane.png`).
+- [ ] The version pill is the *tool's* version, not the first number in the
+      output: openconnect's second line is `Using GnuTLS 3.8.13`, and the pill
+      must still read `9.21`.
+- [ ] The footer under the rows names the search order: `$PATH` first, then
+      `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin` and
+      `~/.local/bin`. A tool installed by MacPorts must be found, and its path
+      must show `/opt/local/bin/…` — that is the bug this pane came with.
+- [ ] **Install** card: the pill reads `ALL INSTALLED` when nothing is missing
+      and **Install Missing** is disabled. With nothing missing, pressing it
+      (were it enabled) must start no process — check with `pgrep -fl brew`.
+- [ ] **By hand** shows the same `brew install openconnect stoken vpn-slice`
+      line as `packaging/README_INSTALL.txt`, with a working copy button.
+- [ ] **Check Again** re-resolves without a restart (no spinner left behind,
+      no change to the paths when nothing has been installed).
+- [ ] The menu bar's **Check Requirements…** item lands on this pane.
+- [ ] **Missing-tool path (needs a machine with a tool removed — not run in
+      2.0.0's verification):** with `stoken` renamed away, Connect must stop
+      before it asks for a token, say `stoken is not installed — see Settings ▸
+      Setup`, and record the attempt as `Failed - Missing Tool`, whose History
+      pill reads **Missing tool** — not **Token error**. The install button then
+      streams Homebrew's output into a **Homebrew output** card.
+- [ ] Install output never reaches `~/Library/Logs/TurtleDiver/vpn.log`:
+      `grep -i 'openconnect stoken vpn-slice' ~/Library/Logs/TurtleDiver/*.log`
+      returns nothing.
 
 ## 1. Profile lifecycle
 
