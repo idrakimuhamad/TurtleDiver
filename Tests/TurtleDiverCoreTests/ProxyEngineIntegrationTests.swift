@@ -423,6 +423,160 @@ final class ProxyEngineIntegrationTests: XCTestCase {
         XCTAssertEqual(received.count, expected, "the relay must deliver every byte after the resume probe")
     }
 
+    // MARK: - Request detail capture
+
+    /// Polls the log until the newest entry for `transport` has a captured
+    /// detail that satisfies `predicate` (capture happens on the relay queue).
+    private func capturedDetail(
+        _ engine: ProxyEngine,
+        transport: RequestTransport,
+        where predicate: (RequestDetail) -> Bool = { _ in true }
+    ) -> RequestDetail? {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let match = engine.requestLog.snapshot()
+                .last { $0.transport == transport }?
+                .detail
+            if let match, predicate(match) { return match }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return nil
+    }
+
+    func testPlainHTTPCapturesTheHeadAndWithholdsCookies() throws {
+        let origin = FakeHTTPServer()!
+        defer { origin.stop() }
+        let (engine, httpPort, _) = try makeEngine(rules: [
+            ProfileRule(type: .final, value: "", policy: "DIRECT")
+        ])
+
+        let client = try connect(host: "127.0.0.1", port: httpPort)
+        try send(client, "GET http://127.0.0.1:\(origin.port)/generate_204 HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:\(origin.port)\r\n"
+            + "User-Agent: turtle-test\r\n"
+            + "Cookie: session=SUPERSECRET\r\n"
+            + "Connection: close\r\n\r\n")
+        _ = try readSome(client, minBytes: 1)
+        TCPClient.closeSocket(client)
+
+        let detail = try XCTUnwrap(capturedDetail(engine, transport: .http) { $0.statusLine != nil },
+                                   "no captured detail for the plain HTTP request")
+        XCTAssertEqual(detail.requestLine?.hasPrefix("GET "), true)
+        XCTAssertEqual(detail.requestLine?.contains("/generate_204"), true)
+        XCTAssertEqual(detail.requestHeaders.first { $0.name == "user-agent" }?.value, "turtle-test")
+
+        // The cookie is the whole reason the switch exists: it is recorded as a
+        // shape, never as a value, until the user asks otherwise.
+        let cookie = try XCTUnwrap(detail.requestHeaders.first { $0.name == "cookie" })
+        XCTAssertTrue(cookie.redacted)
+        XCTAssertEqual(cookie.value, "•••• (19 chars)")
+        XCTAssertFalse(detail.requestHeaders.contains { $0.value.contains("SUPERSECRET") })
+
+        XCTAssertEqual(detail.statusLine, "HTTP/1.1 204 No Content")
+        XCTAssertTrue(detail.responseHeaders.contains { $0.name == "content-length" })
+        XCTAssertEqual(detail.resolvedAddress, "127.0.0.1")
+    }
+
+    func testATunnelCapturesTheClientHelloServerName() throws {
+        let echo = FakeEchoServer()!
+        defer { echo.stop() }
+        let (engine, httpPort, _) = try makeEngine(rules: [
+            ProfileRule(type: .final, value: "", policy: "DIRECT")
+        ])
+
+        // The tunnel target is an address, which is exactly the case the SNI
+        // parsing exists to fix up.
+        let client = try connect(host: "127.0.0.1", port: httpPort)
+        try send(client, "CONNECT 127.0.0.1:\(echo.port) HTTP/1.1\r\nHost: 127.0.0.1:\(echo.port)\r\n\r\n")
+        let reply = try readSome(client, minBytes: 1)
+        XCTAssertTrue(String(decoding: reply, as: UTF8.self).contains("200"))
+
+        try send(client, makeClientHello(serverName: "login.example.com", alpn: ["h2", "http/1.1"]))
+        // Read the echo back so the relay has certainly seen the hello.
+        _ = try readSome(client, minBytes: 4)
+
+        let detail = try XCTUnwrap(capturedDetail(engine, transport: .http) { $0.serverName != nil },
+                                   "the ClientHello was not parsed")
+        XCTAssertEqual(detail.serverName, "login.example.com")
+        XCTAssertEqual(detail.alpn, ["h2", "http/1.1"])
+        XCTAssertEqual(detail.tlsVersion, "TLS 1.3")
+        XCTAssertEqual(detail.resolvedAddress, "127.0.0.1")
+        XCTAssertEqual(detail.requestLine, "CONNECT 127.0.0.1:\(echo.port) HTTP/1.1")
+        TCPClient.closeSocket(client)
+    }
+
+    /// A tunnelled protocol that is not TLS (SSH, a database) never produces a
+    /// ClientHello, so the head captured before the tunnel opened is all there
+    /// is to show — it must be attached on its own, not only via the TLS merge.
+    func testATunnelThatIsNotTLSKeepsItsRequestHead() throws {
+        let echo = FakeEchoServer()!
+        defer { echo.stop() }
+        let (engine, httpPort, _) = try makeEngine(rules: [
+            ProfileRule(type: .final, value: "", policy: "DIRECT")
+        ])
+
+        let client = try connect(host: "127.0.0.1", port: httpPort)
+        try send(client, "CONNECT 127.0.0.1:\(echo.port) HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:\(echo.port)\r\n"
+            + "Proxy-Connection: keep-alive\r\n\r\n")
+        _ = try readSome(client, minBytes: 1)
+        try send(client, Array("SSH-2.0-OpenSSH_9.0\r\n".utf8))
+        _ = try readSome(client, minBytes: 4)
+
+        let detail = try XCTUnwrap(capturedDetail(engine, transport: .http) { $0.requestLine != nil },
+                                   "the CONNECT head was dropped")
+        XCTAssertEqual(detail.requestLine, "CONNECT 127.0.0.1:\(echo.port) HTTP/1.1")
+        XCTAssertEqual(detail.requestHeaders.first { $0.name == "proxy-connection" }?.value, "keep-alive")
+        XCTAssertNil(detail.serverName, "an SSH banner is not a ClientHello")
+        TCPClient.closeSocket(client)
+    }
+
+    func testSOCKS5CapturesTheClientHelloServerName() throws {
+        let echo = FakeEchoServer()!
+        defer { echo.stop() }
+        let (engine, _, socksPort) = try makeEngine(rules: [
+            ProfileRule(type: .final, value: "", policy: "DIRECT")
+        ])
+
+        let client = try connect(host: "127.0.0.1", port: socksPort)
+        try send(client, [0x05, 0x01, 0x00])
+        _ = try readSome(client, minBytes: 2)
+        try send(client, [0x05, 0x01, 0x00, 0x01] + ipv4Bytes("127.0.0.1") + portBytes(echo.port))
+        let reply = try readSome(client, minBytes: 2)
+        XCTAssertEqual(Array(reply.prefix(2)), [0x05, 0x00])
+
+        try send(client, makeClientHello(serverName: "socks.example.com"))
+        _ = try readSome(client, minBytes: 4)
+
+        let detail = try XCTUnwrap(capturedDetail(engine, transport: .socks5) { $0.serverName != nil },
+                                   "the SOCKS5 ClientHello was not parsed")
+        XCTAssertEqual(detail.serverName, "socks.example.com")
+        TCPClient.closeSocket(client)
+    }
+
+    func testTurningCaptureOffStopsDetails() throws {
+        let origin = FakeHTTPServer()!
+        defer { origin.stop() }
+        let (engine, httpPort, _) = try makeEngine(rules: [
+            ProfileRule(type: .final, value: "", policy: "DIRECT")
+        ])
+        engine.requestLog.capturesDetails = false
+
+        let client = try connect(host: "127.0.0.1", port: httpPort)
+        try send(client, "GET http://127.0.0.1:\(origin.port)/generate_204 HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:\(origin.port)\r\nConnection: close\r\n\r\n")
+        _ = try readSome(client, minBytes: 1)
+        TCPClient.closeSocket(client)
+
+        // The row must still be logged; only its detail is skipped.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && engine.requestLog.snapshot().isEmpty {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertFalse(engine.requestLog.snapshot().isEmpty)
+        XCTAssertTrue(engine.requestLog.snapshot().allSatisfy { $0.detail == nil })
+    }
+
     // MARK: - Socket helpers
 
     private func connect(host: String, port: Int) throws -> Int32 {

@@ -37,6 +37,9 @@ public struct RequestEntry: Identifiable, Equatable, Sendable {
     /// Error text when the relay finished abnormally.
     public var error: String?
     public var endedAt: Date?
+    /// Everything the engine could learn about this request without
+    /// decrypting anything (nil = not captured, or nothing to capture).
+    public var detail: RequestDetail?
 
     public var duration: TimeInterval? {
         endedAt.map { $0.timeIntervalSince(startedAt) }
@@ -52,7 +55,8 @@ public struct RequestEntry: Identifiable, Equatable, Sendable {
         bytesToDestination: Int,
         bytesToClient: Int,
         transport: RequestTransport,
-        error: String?
+        error: String?,
+        detail: RequestDetail? = nil
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -65,6 +69,7 @@ public struct RequestEntry: Identifiable, Equatable, Sendable {
         self.transport = transport
         self.error = error
         self.endedAt = nil
+        self.detail = detail
     }
 }
 
@@ -78,6 +83,31 @@ public final class RequestLog: @unchecked Sendable {
     private var byID: [UUID: Int] = [:]
 
     public var onChange: (() -> Void)?
+
+    /// How many of the most recent entries may carry a detail payload. A detail
+    /// is an order of magnitude larger than its row, and nobody scrolls 200
+    /// rows back to read headers, so the oldest details are dropped first —
+    /// the row itself always survives until the ring turns it over.
+    public static let detailCapacity = 200
+
+    private var capturesDetailsStorage = true
+    private var revealsSensitiveHeadersStorage = false
+
+    /// Whether newly captured entries keep a detail payload. The servers read
+    /// this per request, so turning it off takes effect immediately; turning it
+    /// back on cannot recover what was never kept.
+    public var capturesDetails: Bool {
+        get { lock.withLock { capturesDetailsStorage } }
+        set { lock.withLock { capturesDetailsStorage = newValue } }
+    }
+
+    /// Whether sensitive header values (cookies, authorization, tokens) are
+    /// kept as-is. Off by default, and it only affects *new* captures: a value
+    /// withheld at capture time is not held anywhere to reveal later.
+    public var revealsSensitiveHeaders: Bool {
+        get { lock.withLock { revealsSensitiveHeadersStorage } }
+        set { lock.withLock { revealsSensitiveHeadersStorage = newValue } }
+    }
 
     public init(capacity: Int = 1000) {
         self.capacity = max(1, capacity)
@@ -94,6 +124,23 @@ public final class RequestLog: @unchecked Sendable {
         lock.unlock()
         onChange?()
         return entry
+    }
+
+    /// Attaches (or extends) the detail for an entry.
+    ///
+    /// Captures arrive from two directions that race with each other and with
+    /// the entry's own retirement, so a late or repeated capture merges rather
+    /// than replaces, and one for an entry that has already been trimmed away
+    /// is dropped.
+    public func attachDetail(id: UUID, detail: RequestDetail) {
+        guard !detail.isEmpty else { return }
+        lock.lock()
+        if capturesDetailsStorage, let index = byID[id] {
+            entries[index].detail = (entries[index].detail ?? RequestDetail()).merged(with: detail)
+            trimDetailsLocked()
+        }
+        lock.unlock()
+        onChange?()
     }
 
     /// Updates an in-flight entry when its relay finishes.
@@ -124,6 +171,18 @@ public final class RequestLog: @unchecked Sendable {
         byID.removeAll()
         lock.unlock()
         onChange?()
+    }
+
+    /// Drops details from the oldest entries once too many carry one.
+    private func trimDetailsLocked() {
+        var carrying = entries.reduce(0) { $0 + ($1.detail == nil ? 0 : 1) }
+        guard carrying > Self.detailCapacity else { return }
+        for index in entries.indices where carrying > Self.detailCapacity {
+            if entries[index].detail != nil {
+                entries[index].detail = nil
+                carrying -= 1
+            }
+        }
     }
 
     private func trimIfNeededLocked() {

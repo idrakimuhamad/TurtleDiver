@@ -10,23 +10,29 @@ release.
 - [ ] App builds and launches: Xcode ▶ or
       `xcodebuild -project VPNConnect.xcodeproj -scheme VPNConnect build`.
 
-## 0a. Bundle-identifier rename (1.6.0) — one-time, run before installing 1.6.0
+## 0a. Bundle-identifier rename (2.0.0) — one-time, run before installing 2.0.0
 
-Installing 1.6.0 over 1.5.0 changes the app's identity, so this is the one
+Installing 2.0.0 over 1.5.0 changes the app's identity, so this is the one
 section that has to be done **before** the new build is launched (the old plist
 is the input).
 
 - [ ] Note what the old build had: `plutil -p
       ~/Library/Preferences/com.idraki.turtle.vpn.plist | grep -c .` (the
       renamed app reads `…/com.xvii.kurakura.vpn.plist` from now on).
-- [ ] Quit 1.5.0, install 1.6.0, launch it → the launch log
+- [ ] Quit 1.5.0, install 2.0.0, launch it → the launch log
       (`~/Library/Logs/TurtleDiver/launch.log`) starts with
-      `Step 0: Migrating settings and credentials from older bundle ids...` and
-      reports a non-zero number of settings keys (0 only on a clean install).
+      `Step 0: Migrating settings from older bundle ids...` and reports a
+      non-zero number of settings keys (0 only on a clean install).
+- [ ] **The window comes up and the app is usable while the next step is
+      pending** — `Step 0b: Migrating credentials …` is logged, but the launch
+      does not wait for it. (It used to: the credential copy blocked step 0, and
+      one first launch sat there for 10h56m before any window existed.)
 - [ ] **macOS asks once per credential whether TurtleDiver may read a Keychain
       item created by the old app identity.** Click *Always Allow*; never
       script this. A cancelled prompt leaves that credential uncopied — the VPN
-      pane shows *NOT SET* and you can retype it.
+      pane shows *NOT SET* and you can retype it. Retyping is safe: the copy
+      re-checks each item just before writing and will not overwrite a value
+      that appeared while the dialog was open.
 - [ ] The VPN pane still shows the organization domain, username and profile
       it had before the rename, and the four switches are where you left them
       (settings copied).
@@ -38,7 +44,7 @@ is the input).
       `security find-generic-password -s com.idraki.turtle.vpn >/dev/null &&
       echo kept` → `kept` (the user's own reconnect script reads them by name).
       Do **not** print a value (`-w`), only the status.
-- [ ] Relaunch → step 0 reports `credentials: 0` (the copy happens once) and no
+- [ ] Relaunch → `Step 0b done. credentials: 0` (the copy happens once) and no
       Keychain prompt appears again.
 - [ ] Advanced → Storage → *Preferences* shows `com.xvii.kurakura.vpn`.
 - [ ] **Reset All…** (after a confirmation) clears the credentials from *both*
@@ -125,7 +131,7 @@ is the input).
 - [ ] The sidebar groups are Connection (VPN, Profiles) / Proxy Engine
       (Dashboard, Policies, Rules, Routing, Rule Sets) / Monitoring (History) /
       Application (Appearance, Advanced); the footer shows the engine dot,
-      `v1.6.0` and the active profile.
+      `v2.0.0` and the active profile.
 - [ ] The sidebar can hold its width: drag the divider as far left as it goes
       → it stops at the search field (the placeholder never clips to
       `Search setting:`) and the sidebar never disappears (see
@@ -186,6 +192,46 @@ is the input).
 - [ ] `no-resolve` on an IP-CIDR rule: request to a bare hostname skips the
       rule (visible via the matched-rule column).
 - [ ] Pause freezes the request table; Clear empties it.
+
+## 2b. Request details (2.0.0)
+
+Requires the engine ON and Settings → Dashboard → *Record request details* ON
+(the default). Details are **memory only** — they are never written to
+`vpn.log`.
+
+- [ ] `curl -x http://127.0.0.1:6152 http://cp.cloudflare.com/generate_204 -I`
+      → the row's subtitle shows the response status; **click the row** and the
+      sheet opens with **Request** (`GET http://…/generate_204 HTTP/1.1` plus
+      `user-agent: curl/…`) and **Response** (`HTTP/1.1 204 No Content`).
+- [ ] **Copy All** puts the whole sheet on the clipboard; each section's own
+      *Copy* copies just that section.
+- [ ] Redaction: repeat with `-H 'Cookie: secret=abc123'` → the header reads
+      `•••• (16 chars)`, and the value is nowhere:
+      `grep -c abc123 ~/Library/Logs/TurtleDiver/vpn.log` → `0`.
+- [ ] Settings → Dashboard → **Show sensitive header values** ON, repeat the
+      curl → the cookie now reads `secret=abc123`. Turn it back off: only
+      captures made while it was on ever held the value.
+- [ ] **Record request details** OFF → new rows still appear (host, rule,
+      policy, bytes) but their sheet says *No request head was captured.*
+- [ ] Tunnel SNI: `curl -x http://127.0.0.1:6152 https://www.apple.com -I` →
+      the **TLS handshake** section names `www.apple.com` with a version and
+      `h2`; **Response** explains that it is encrypted. Nothing is decrypted.
+- [ ] SOCKS5 SNI: `curl -x socks5h://127.0.0.1:6153 https://www.apple.com -I`
+      → the row was `1.2.3.4:443`, and the sheet names the host anyway.
+- [ ] A REJECT row opens too: the request line and headers are captured before
+      the block, and **Error** reads `rejected`.
+- [ ] Bounds: at most 32 header rows per section, values cut at 512 bytes
+      (`…`), and once more than 200 newer requests have arrived the oldest rows
+      no longer have a detail (the row itself stays).
+- [ ] A hung upstream must not take the engine with it. With the VPN **down**
+      (so a rule pointing at the corporate `PAC Fallback` group cannot connect),
+      `curl -x http://127.0.0.1:6152 https://teams.microsoft.com/ -m 12` hangs on
+      its own connect timeout — while a second,
+      `curl -x http://127.0.0.1:6152 http://cp.cloudflare.com/generate_204`,
+      still answers `204` in milliseconds.
+- [ ] Every row opens the sheet wherever it is clicked (time, host, policy or
+      size column) — the tooltip hint sits on the table's toolbar, not over the
+      rows it would otherwise swallow the click for.
 
 ## 3. Policies & groups
 

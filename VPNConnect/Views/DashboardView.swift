@@ -13,6 +13,7 @@ struct DashboardView: View {
         Form {
             engineSection
             policySection
+            detailSection
             requestSection
         }
         .formStyle(.grouped)
@@ -154,6 +155,43 @@ struct DashboardView: View {
             Text("timeout")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.orange)
+        }
+    }
+
+    // MARK: Request details
+
+    /// Two switches, because they answer two different questions: whether to
+    /// keep detail at all, and whether to keep the parts of it that are
+    /// somebody's credentials. The second one is off until asked for.
+    private var detailSection: some View {
+        Section {
+            Toggle("Record request details", isOn: Binding(
+                get: { settings.recordRequestDetails },
+                set: { on in
+                    settings.recordRequestDetails = on
+                    controller.refreshRequestDetailSettings()
+                }
+            ))
+            .padding(.vertical, 4)
+
+            Toggle("Show sensitive header values", isOn: Binding(
+                get: { settings.revealSensitiveHeaders },
+                set: { on in
+                    settings.revealSensitiveHeaders = on
+                    controller.refreshRequestDetailSettings()
+                }
+            ))
+            .disabled(!settings.recordRequestDetails)
+            .help("Applies to requests made from now on: a value hidden at capture time is not kept anywhere to reveal later.")
+            .padding(.vertical, 4)
+        } header: {
+            Text("Request details")
+                .font(.system(size: 12, weight: .regular))
+                .textCase(.uppercase)
+        } footer: {
+            // Short: macOS renders section footers on one line and truncates.
+            Text("Memory only, never in the debug log. Sensitive values stay hidden unless allowed.")
+                .font(.system(size: 11))
         }
     }
 

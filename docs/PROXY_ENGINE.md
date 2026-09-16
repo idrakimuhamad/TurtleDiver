@@ -40,7 +40,9 @@ client ──▶ listener (HTTP / SOCKS5)
 
 Every request (including rejections and failures) lands in the `RequestLog`
 ring buffer (last 1000) with host, port, matched rule, policy, byte counts,
-duration, and error text — the Phase 5 dashboard renders it.
+duration, and error text — the Phase 5 dashboard renders it. The newest 200
+entries also carry a **request detail** (see below), which the dashboard's row
+sheet renders.
 
 ## HTTP listener
 
@@ -92,10 +94,48 @@ default for tests).
   Regression test:
   `testRelayResumeProbeSurvivesBackpressureWithoutExclusivityTrap` (crashes the
   test runner with a fatal access conflict if the probe is put back inline).
+- Connects (DNS + TCP + an upstream proxy handshake) run off the relay queues
+  on `ConnectScheduler`: a *bounded concurrent* pool, not a serial queue. A
+  connect blocks for its whole timeout, so an unreachable upstream — a
+  corporate proxy group with the VPN down is the usual one — used to hold the
+  single connect slot and starve every unrelated dial behind it; the engine
+  looked dead, not slow. 8 at a time; a hung upstream costs one slot.
+  Regression tests: `ConnectSchedulerTests` (a slow dial must not delay the
+  dials behind it, and the cap is respected).
 - EOF from one side half-closes the other (`shutdown(SHUT_WR)`) so
   FIN-signaled protocols relay cleanly; both sides EOF → teardown.
 - Teardown is idempotent: `finish(with:)` cancels sources (cancel handlers
   close the fds), snapshots metrics, and fires `onFinished` once.
+
+## Request detail capture
+
+`RelayStreamObserver` sees every chunk the relay forwards, in both directions,
+and is **observe-only**: it cannot alter, reorder or drop a byte, and its
+transport is a single copy it hands to a parser. Nothing is decrypted — the
+capture reads what the client already sends in the clear.
+
+| Transport | Request | Response | TLS |
+| --- | --- | --- | --- |
+| `http://` (absolute-form) | request line + headers | status line + headers | — |
+| `CONNECT` tunnel | CONNECT line + headers | encrypted (the sheet says so) | SNI, version, ALPN |
+| SOCKS5 | — | — | SNI, version, ALPN |
+| `REJECT` | request line + headers | — | — |
+
+- `RequestDetail` owns the caps and the redaction: at most 32 headers per
+  message, values truncated at 512 bytes (`…` marks the cut), and only the
+  newest `RequestLog.detailCapacity` (200) entries keep a detail — a detail for
+  a trimmed or unknown entry id is dropped.
+- `HeaderRedaction` withholds `Authorization`, `Proxy-Authorization`, `Cookie`,
+  `Set-Cookie`, `X-Api-Key` and anything matching *token / secret / password /
+  credential / session / cookie* as `•••• (N chars)`, **at capture time**, so the
+  value never enters the process. `RequestLog.revealsSensitiveHeaders` (off by
+  default) only affects captures made after it is switched on.
+- `HTTPResponseHead.probe` and `TLSClientHello.probe` return
+  `incomplete` / `notHTTP` / `notTLS` / `parsed` instead of guessing: an
+  `incomplete` result asks the observer to keep buffering (bounded —
+  `TLSClientHello.maxBytes` / `HTTPResponseHead.limit`), a `not*` result ends
+  the capture for that connection. A SOCKS5 row is an address, so its SNI is
+  the only way to learn the hostname at all.
 
 ## Verifying manually
 
@@ -116,13 +156,28 @@ in-process fake servers: CONNECT round-trips, absolute-form → origin-form
 rewriting, traffic through an upstream CONNECT proxy (and upstream 403 →
 502), SOCKS5 greeting/CONNECT/domain addressing/reject/command-and-method
 errors, 400 hardening, dead-destination 502, request-log accuracy (rule,
-policy, bytes) and ring-buffer trimming — 17 integration tests (incl. the relay backpressure regression) among the 273 core tests.
+policy, bytes) and ring-buffer trimming — 21 integration tests (incl. the relay backpressure regression and four end-to-end capture tests: plain-HTTP head + withheld cookie, CONNECT SNI, SOCKS5 SNI, capture-off) among the 420 core tests.
+
+`Tests/TurtleDiverCoreTests/TLSClientHelloTests.swift` (11 tests) parses
+hand-built ClientHellos — SNI, ALPN, `supported_versions` with GREASE ignored,
+a handshake split across records, truncation → `incomplete`, a non-TLS stream →
+`notTLS`, and an oversized record that gives up at the cap instead of buffering
+without bound.
+
+`Tests/TurtleDiverCoreTests/RequestDetailTests.swift` (20 tests) covers the
+redaction table, the header-count and value-length caps, `merged(with:)`
+(a later leg must fill gaps without clearing what is already known), the
+response-head probe, the detail ring (only the newest 200 kept, unknown ids
+dropped, `capturesDetails = false` refuses everything), and the two settings
+defaults.
 
 `VPNConnect/Engine/DisplayFormat.swift` holds the engine→UI display helpers as
 Foundation-only types so their edge cases are unit-testable
-(`Tests/TurtleDiverCoreTests/DisplayFormatTests.swift`, 20 tests): request time
+(`Tests/TurtleDiverCoreTests/DisplayFormatTests.swift`, 29 tests): request time
 / byte / size / duration formatting (`0 KB`, never a negative duration, two
-decimals once a request finishes), and `DebugLogParser`, which splits the raw
+decimals once a request finishes), the row subtitle's detail summary and the
+detail sheet's sections/rows/copyable text (including "a withheld value is never
+rendered"), and `DebugLogParser`, which splits the raw
 `VPNManager.debugOutput` into the last 400 `[timestamp] [tag] body` lines and
 classifies severity **from the content** (`[SEND]`, *error*, *warning*) rather
 than by stream — openconnect writes ordinary progress to stderr, so colouring

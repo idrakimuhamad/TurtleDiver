@@ -170,10 +170,13 @@ enum KeychainHelper {
     ///
     /// Safe to run on every launch — it only looks at a legacy item when the
     /// current one is missing — and it *copies* rather than moves, because the
-    /// old items are read by name from outside this app. Running it can raise
-    /// the system's "wants to access" key dialog once per item, which is why
-    /// only the app calls it (at launch, with the user present) and tests never
-    /// do.
+    /// old items are read by name from outside this app.
+    ///
+    /// **Do not call this on the main thread.** Reading another identity's item
+    /// raises the system's "wants to access" dialog, and `SecItemCopyMatching`
+    /// blocks until it is answered: on the main thread that stalls the launch
+    /// before the window exists. Use `migrateLegacyServicesInBackground` from
+    /// the app; tests never call either.
     @discardableResult
     static func migrateLegacyServicesIfNeeded() -> [String] {
         let plan = KeychainMigration.sources(
@@ -182,13 +185,31 @@ enum KeychainHelper {
             legacyServices: AppIdentity.legacyBundleIdentifiers,
             read: { service, account in read(account: account, service: service) }
         )
-        var migrated: [String] = []
-        for item in plan {
-            guard let value = read(account: item.account, service: item.service) else { continue }
-            persist(password: value, account: item.account, service: serviceName)
-            migrated.append(item.account)
+        return KeychainMigration.apply(
+            plan: plan,
+            currentService: serviceName,
+            read: { service, account in read(account: account, service: service) },
+            write: { service, account, value in
+                persist(password: value, account: account, service: service)
+            }
+        )
+    }
+
+    /// Runs the credential migration off the main thread and reports how many
+    /// accounts were copied, on the main queue.
+    ///
+    /// The dialog is unavoidable — the items belong to the app's previous
+    /// identity — so the only thing that can be fixed is *what waits*: this way
+    /// the window is up, the menu bar works, and the prompt simply sits on top
+    /// until it is answered. A first launch after the rename stalled for nearly
+    /// eleven hours in the field when this ran on the main thread.
+    static func migrateLegacyServicesInBackground(
+        completion: @escaping @Sendable (Int) -> Void = { _ in }
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            let copied = migrateLegacyServicesIfNeeded().count
+            DispatchQueue.main.async { completion(copied) }
         }
-        return migrated
     }
 }
 
@@ -226,5 +247,30 @@ enum KeychainMigration {
             plan.append((account, source))
         }
         return plan
+    }
+
+    /// Copies a plan into the current service and returns the accounts copied.
+    ///
+    /// Each item is re-checked against the current service immediately before
+    /// it is written. The plan is built from reads that may already be minutes
+    /// old — the user can answer the access dialog, see *NOT SET* in the VPN
+    /// pane, and type the credential in — and a stale plan must never overwrite
+    /// what they just entered.
+    ///
+    /// - Parameter write: `write(service, account, value)`.
+    static func apply(
+        plan: [(account: String, service: String)],
+        currentService: String,
+        read: (_ service: String, _ account: String) -> String?,
+        write: (_ service: String, _ account: String, _ value: String) -> Void
+    ) -> [String] {
+        var copied: [String] = []
+        for item in plan {
+            guard read(currentService, item.account)?.isEmpty ?? true else { continue }
+            guard let value = read(item.service, item.account), !value.isEmpty else { continue }
+            write(currentService, item.account, value)
+            copied.append(item.account)
+        }
+        return copied
     }
 }

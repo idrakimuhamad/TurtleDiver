@@ -322,4 +322,110 @@ final class SecretHygieneTests: XCTestCase {
     func testTheAppStoresUnderTheIdentityTheMigrationCopiesInto() {
         XCTAssertEqual(KeychainHelper.serviceName, AppIdentity.bundleIdentifier)
     }
+
+    // MARK: Applying the plan
+
+    /// The apply step exists because the reads that built the plan can be
+    /// minutes old: answering the access dialog is not instant, and the VPN
+    /// pane is already on screen showing *NOT SET* while it waits.
+    private func apply(
+        _ plan: [(account: String, service: String)],
+        items: [String: [String: String]]
+    ) -> (copied: [String], written: [(String, String, String)]) {
+        var store = items
+        var written: [(String, String, String)] = []
+        let copied = KeychainMigration.apply(
+            plan: plan,
+            currentService: "com.xvii.kurakura.vpn",
+            read: { service, account in store[service]?[account] },
+            write: { service, account, value in
+                store[service, default: [:]][account] = value
+                written.append((service, account, value))
+            }
+        )
+        return (copied, written)
+    }
+
+    func testApplyingThePlanCopiesIntoTheCurrentService() {
+        let result = apply(
+            [("vpnPassword", "com.idraki.turtle.vpn")],
+            items: ["com.idraki.turtle.vpn": ["vpnPassword": "old"]]
+        )
+
+        XCTAssertEqual(result.copied, ["vpnPassword"])
+        XCTAssertEqual(result.written.count, 1)
+        XCTAssertEqual(result.written.first?.0, "com.xvii.kurakura.vpn")
+        XCTAssertEqual(result.written.first?.2, "old")
+    }
+
+    /// The user retyped the credential while the dialog was open — their value
+    /// wins, and the stale plan does not clobber it.
+    func testAValueThatAppearedWhileTheDialogWasOpenIsNotOverwritten() {
+        let result = apply(
+            [("vpnPassword", "com.idraki.turtle.vpn")],
+            items: [
+                "com.idraki.turtle.vpn": ["vpnPassword": "old"],
+                "com.xvii.kurakura.vpn": ["vpnPassword": "typed by the user"],
+            ]
+        )
+
+        XCTAssertTrue(result.copied.isEmpty)
+        XCTAssertTrue(result.written.isEmpty)
+    }
+
+    /// An empty item counts as missing, so a user who saved an empty field
+    /// (the VPN pane's Save writes what is on screen) cannot block the copy.
+    func testAnEmptyCurrentValueDoesNotBlockTheCopy() {
+        let result = apply(
+            [("vpnPassword", "com.idraki.turtle.vpn")],
+            items: [
+                "com.idraki.turtle.vpn": ["vpnPassword": "old"],
+                "com.xvii.kurakura.vpn": ["vpnPassword": ""],
+            ]
+        )
+
+        XCTAssertEqual(result.copied, ["vpnPassword"])
+        XCTAssertEqual(result.written.first?.2, "old")
+    }
+
+    func testAnAccountWhoseLegacyValueVanishedIsSkipped() {
+        let result = apply([("vpnPassword", "com.idraki.turtle.vpn")], items: [:])
+
+        XCTAssertTrue(result.copied.isEmpty)
+        XCTAssertTrue(result.written.isEmpty)
+    }
+
+    /// Request details hold headers — cookies included — and live only in the
+    /// requests table's memory. `vpn.log` is a file on disk that outlives the
+    /// app, so the capture path must not be able to write to it at all.
+    func testTheRequestCapturePathNeverReferencesTheDebugLog() throws {
+        let engine = repoRoot.appendingPathComponent("VPNConnect/Engine")
+        let captureFiles = [
+            "RequestDetail.swift", "TLSClientHello.swift", "RelayStreamObserver.swift",
+            "RelayConnection.swift", "HTTPProxyServer.swift", "SOCKS5Server.swift",
+        ]
+        let forbidden = ["debugOutput", "logSend(", "DebugLog", "VpnConnectionLogger", "vpn.log"]
+
+        for name in captureFiles {
+            let text = try String(contentsOf: engine.appendingPathComponent(name), encoding: .utf8)
+            // Comments are allowed to *talk* about the log (and do, to record
+            // why the bytes stay in memory); code is not allowed to reach it.
+            let code = text
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
+            for symbol in forbidden {
+                XCTAssertFalse(code.contains(symbol),
+                               "\(name) mentions \(symbol): captured request bytes must never reach a log")
+            }
+        }
+    }
+
+    private var repoRoot: URL {
+        // …/Tests/TurtleDiverAppTests/SecretHygieneTests.swift -> repo root
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
 }

@@ -21,6 +21,12 @@ struct RequestsCard: View {
     @State private var query = ""
     @State private var filter: Filter = .all
     @State private var confirmClear = false
+    /// The row whose detail sheet is open — the copy from the moment of the
+    /// click, used only as the trigger and as the fallback. The sheet renders
+    /// `selectedEntry`, which re-reads the row: a request's detail lands *after*
+    /// the row appears (the ClientHello is only sent once the tunnel is up), so
+    /// freezing the click-time copy would show an empty sheet.
+    @State private var selected: RequestEntry?
 
     enum Filter: String, CaseIterable, Identifiable {
         case all = "All"
@@ -39,13 +45,13 @@ struct RequestsCard: View {
                 emptyState
             } else if compactRows {
                 ForEach(visible.reversed()) { entry in
-                    StackedRequestRow(entry: entry)
+                    StackedRequestRow(entry: entry) { selected = entry }
                 }
             } else {
                 columnHeader
                 Divider().opacity(0.5)
                 ForEach(Array(visible.reversed().enumerated()), id: \.element.id) { index, entry in
-                    WideRequestRow(entry: entry, striped: !index.isMultiple(of: 2))
+                    WideRequestRow(entry: entry, striped: !index.isMultiple(of: 2)) { selected = entry }
                 }
             }
         }
@@ -56,6 +62,19 @@ struct RequestsCard: View {
                     .fill(Color.secondary.opacity(0.07))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.secondary.opacity(0.12)))
             }
+        }
+        .sheet(item: $selected) { entry in
+            if let live = RequestFormat.selectedEntry(in: visible, id: entry.id, fallback: entry) {
+                RequestDetailSheet(entry: live)
+            } else {
+                Text("This request is no longer in the list.")
+                    .foregroundStyle(.secondary)
+                    .padding(40)
+            }
+        }
+        .onChange(of: controller.requests) { _, rows in
+            guard let open = selected, let live = rows.first(where: { $0.id == open.id }) else { return }
+            selected = live
         }
         .alert("Clear the request log?", isPresented: $confirmClear) {
             Button("Cancel", role: .cancel) {}
@@ -127,6 +146,10 @@ struct RequestsCard: View {
             .disabled(controller.requests.isEmpty)
             .help("Clear the request log")
         }
+        // The hint lives on the toolbar, not on the table: a tooltip attached to
+        // the rows pops up under the pointer and swallows the click that was
+        // aimed at the row it describes.
+        .help("Click a row to see what the engine could read from it")
     }
 
     private func togglePause() {
@@ -211,6 +234,11 @@ private struct WideRequestRow: View {
     let entry: RequestEntry
     /// Alternating row tint, so a long list reads as rows rather than a wall.
     var striped = false
+    /// Opens the detail sheet. Every row is clickable — even one with no
+    /// captured detail carries the time, rule, policy and byte counts.
+    var onOpen: () -> Void = {}
+
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -271,8 +299,11 @@ private struct WideRequestRow: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(rowBackground)
+        .background(hovering ? Color.accentColor.opacity(0.14) : rowBackground)
         .opacity(entry.endedAt == nil ? 1 : 0.9)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onOpen)
     }
 
     /// A rejected request is tinted (like a failing row in a log viewer); the
@@ -287,6 +318,9 @@ private struct WideRequestRow: View {
 
 private struct StackedRequestRow: View {
     let entry: RequestEntry
+    var onOpen: () -> Void = {}
+
+    @State private var hovering = false
 
     var body: some View {
         HStack {
@@ -327,6 +361,128 @@ private struct StackedRequestRow: View {
                 .frame(width: 56, alignment: .trailing)
         }
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onOpen)
+        .background(hovering ? Color.accentColor.opacity(0.14) : Color.clear)
+    }
+}
+
+// MARK: - Detail sheet
+
+/// Everything the engine could read from one request, with no claim of more.
+///
+/// Deliberately a sheet rather than an expanding row: a header list is the one
+/// thing in this window whose height is set by a remote server, and a sheet
+/// keeps that out of the table's layout entirely.
+private struct RequestDetailSheet: View {
+    let entry: RequestEntry
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    private var sections: [RequestFormat.DetailSection] {
+        RequestFormat.detailSections(entry)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(sections) { section in
+                        sectionView(section)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Divider()
+            footer
+        }
+        .frame(width: 620, height: 540)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: entry.policy == BuiltinPolicy.reject.rawValue
+                ? "hand.raised.fill" : "arrow.left.arrow.right")
+                .font(.system(size: 12))
+                .foregroundStyle(RequestFormat.policyColor(entry.policy))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(verbatim: "\(entry.host):\(entry.port)")
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(RequestFormat.ruleText(entry.rule))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Text(entry.policy)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(RequestFormat.policyColor(entry.policy))
+            Button("Done") { dismiss() }
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Button(copied ? "Copied" : "Copy All") {
+                let text = RequestFormat.detailText(entry)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                copied = true
+            }
+            .help("Copy every section as plain text")
+            Text("Select any value to copy just that part.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func sectionView(_ section: RequestFormat.DetailSection) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(section.title.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            if section.rows.isEmpty {
+                Text("—")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(section.rows) { row in
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(row.name)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 132, alignment: .leading)
+                            .lineLimit(3)
+                        Text(row.value)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(row.redacted ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            if let note = section.note {
+                Text(note)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

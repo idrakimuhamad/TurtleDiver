@@ -16,7 +16,12 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
 - **System Proxy** (1.3.0): one-click HTTP/HTTPS/SOCKS system proxy across all
   network services, with snapshot & restore and crash repair
 - **Dashboard** (1.3.0): live request table (host, rule, policy, traffic,
-  duration), latency badges, select-group overrides
+  duration), latency badges, select-group overrides — click a row for the full
+  **request details** (see below)
+- **Request details** (2.0.0): what each row actually sent — request line and
+  headers, the HTTP response status and headers, and, for an encrypted tunnel,
+  the TLS ClientHello's server name (SNI), version and ALPN protocol. Credential
+  headers are recorded as `•••• (N chars)` until you ask for them
 - **Routing** (1.3.0): assign a policy per domain/domain-suffix/IP-CIDR in a
   friendly list (quick-add, inline edit, drag-reorder), plus a **PAC import
   wizard** that converts an existing `FindProxyForURL` script into rules and
@@ -33,10 +38,10 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   between launches, and the window expands itself when the tunnel comes up or
   when you switch the proxy engine on. The VPN/engine/system-proxy switches sit
   in the main window, so the everyday loop never needs Settings
-- **Renamed app** (1.6.0): the bundle identifier is now
+- **Renamed app** (2.0.0): the bundle identifier is now
   `com.xvii.kurakura.vpn` (it was `com.idraki.turtle.vpn`). Preferences and
   Keychain items are carried over on first launch — see
-  [Renaming the app](#renaming-the-app-160)
+  [Renaming the app](#renaming-the-app-200)
 - **Settings** (1.4.0): a native sidebar-and-detail window — **Connection**
   (VPN, Profiles), **Proxy Engine** (Dashboard, Policies, Rules, Routing,
   Rule Sets),
@@ -170,7 +175,43 @@ request through the active profile's rules. See:
 
 The engine is independent of the VPN: it can run with or without a tunnel, and
 when split tunneling is active, vpn-slice targets are auto-added as DIRECT
-rules so corporate traffic always flows through the tunnel.
+rules so corporate traffic always flows through the tunnel. Outbound connects
+run on a bounded concurrent pool, so an unreachable upstream (a corporate proxy
+while off-VPN) costs one slot and its own timeout — never the whole engine.
+
+### Request details (2.0.0)
+
+Click any row in the dashboard's request table (Settings → **Dashboard**) to
+open a sheet with what was sent and what came back:
+
+- **General** — the row itself: host, port, rule, policy, size, duration, the
+  address the relay actually connected to, and any capture note.
+- **Request** — the request line and the request headers. For `http://` this is
+  the whole head; for `CONNECT` it is the CONNECT line plus its own headers.
+- **Response** — status line and response headers, captured on the plain-HTTP
+  leg. A tunnel's response stays encrypted, and the sheet says so rather than
+  showing an empty box.
+- **TLS handshake** — the server name (SNI), version and ALPN protocol read
+  from the client's ClientHello. The ClientHello is cleartext by design, so this
+  is where a `CONNECT 1.2.3.4:443` (or a SOCKS5 row, which only ever had an
+  address) learns the hostname it was really for.
+
+Nothing is decrypted and no certificate is inspected: TLS 1.3 encrypts the
+certificate message, so there is no chain to show. Each section has a
+**Copy** button, and **Copy All** puts the whole sheet on the clipboard.
+
+Sensitive header values — `Authorization`, `Cookie`, `Set-Cookie`,
+`Proxy-Authorization`, `X-Api-Key` and anything whose name looks like a
+token, secret or password — are replaced with `•••• (N chars)` **at capture
+time**, so the value is never held in memory at all. Settings → Dashboard →
+**Show sensitive header values** opts out of that redaction for new captures
+(useful when a session cookie is what you are debugging). Capture itself can be
+turned off with **Record request details**; both switches are off-safe for
+existing installs (capture defaults on, reveal defaults off).
+
+Details are bounded — at most 32 headers per message, values truncated at 512
+bytes, and only the newest 200 rows keep a detail — and they live in memory
+only. They never reach `vpn.log`, which a source-scan test enforces.
 
 ### Routing (1.3.0)
 
@@ -180,7 +221,7 @@ first match wins, with the active profile's `FINAL` as catch-all. *Import PAC*
 in the toolbar pastes or loads a `.pac` file, previews the proxies, groups,
 rules and diagnostics it would create, and applies them to the active profile.
 
-### Renaming the app (1.6.0)
+### Renaming the app (2.0.0)
 
 The bundle identifier is `com.xvii.kurakura.vpn` — it names both the
 preferences domain and the Keychain service, so the first launch after the
@@ -270,7 +311,9 @@ The application consists of several key components:
   the system-proxy intent
 - **Profile / ProfileManager**: Surge-compatible `.conf` profiles under
   `~/Library/Application Support/TurtleDiver/Profiles`
-- **Engine**: HTTP and SOCKS5 listeners, relay, rule matching
+- **Engine**: HTTP and SOCKS5 listeners, relay, rule matching, and the
+  observe-only capture behind the request-detail sheet (`RequestDetail`,
+  `TLSClientHello`, `RelayStreamObserver`)
 - **RuleSetStore**: remote `[Rule Set]` download/cache (HTTPS only, 8 MB cap,
   keeps the last good copy, `0600` files)
 - **System**: `SystemProxyManager` (snapshot/apply/restore) and the vpn-slice
@@ -302,6 +345,12 @@ The application consists of several key components:
   pipeline used to give it. See `OpenConnectLaunch.swift`; the flow is covered
   end-to-end by `OpenConnectLaunchTests` against a fake `sudo`/`openconnect`
   pair, and the file is created `0600`.
+- Request details hold headers, and headers hold cookies. They are kept in the
+  requests table's memory only, redacted at capture time by default, and the
+  capture path is forbidden from touching the log at all (enforced by
+  `testTheRequestCapturePathNeverReferencesTheDebugLog`). Turning on
+  **Show sensitive header values** changes what the *next* captures keep — it
+  cannot resurrect a value the app already refused to store.
 
 ### Fixed: a predictable PID file
 

@@ -146,6 +146,7 @@ final class EngineController: ObservableObject {
 
         let store = PolicyStore(profile: profileManager.activeProfile, autoStartTesting: true)
         self.engine = ProxyEngine(profile: profileManager.activeProfile, policyStore: store)
+        refreshRequestDetailSettings()
 
         // Retire the legacy PAC path (its local server is gone): an armed PAC
         // pointing at 127.0.0.1:8765 would black-hole everything it proxied.
@@ -339,6 +340,18 @@ final class EngineController: ObservableObject {
     func refreshRequests() {
         requests = engine.requestLog.snapshot()
         policySummaries = engine.policyStore.summaries()
+    }
+
+    /// Pushes the two request-detail switches into the log the servers read.
+    ///
+    /// The servers ask the log per request rather than being handed a config at
+    /// construction, because the engine is built once and the switches are
+    /// meant to take effect immediately. Called from here rather than from
+    /// `SettingsManager`'s property observers: the manager is also live in
+    /// tests and in the launch path, where there is no engine to talk to.
+    func refreshRequestDetailSettings() {
+        engine.requestLog.capturesDetails = settings.recordRequestDetails
+        engine.requestLog.revealsSensitiveHeaders = settings.revealSensitiveHeaders
     }
 
     /// Clears the engine's request log.

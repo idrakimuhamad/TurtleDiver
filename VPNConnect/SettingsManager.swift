@@ -49,6 +49,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let useTunneling = "useTunneling"
         static let useProxyEngine = "useProxyEngine"
         static let dashboardExpanded = "mainWindowDashboardExpanded"
+        static let recordRequestDetails = "recordRequestDetails"
+        static let revealSensitiveHeaders = "revealSensitiveHeaders"
         static let settingsPane = "settingsPane"
         static let ruleSetAutoRefresh = "ruleSetAutoRefresh"
     }
@@ -229,6 +231,23 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
     @Published var ruleSetAutoRefresh: Bool = false {
         didSet { defaults.set(ruleSetAutoRefresh, forKey: Keys.ruleSetAutoRefresh) }
     }
+
+    /// Whether the request table keeps a detail payload (request line, headers,
+    /// the TLS handshake's public facts). On by default — it is the point of
+    /// the feature — and held in memory only: nothing here is ever written to
+    /// `vpn.log`, and old details age out of the ring buffer.
+    @Published var recordRequestDetails: Bool = true {
+        didSet { defaults.set(recordRequestDetails, forKey: Keys.recordRequestDetails) }
+    }
+
+    /// Whether sensitive header values (cookies, authorization, tokens) are
+    /// kept as-is instead of `•••• (N chars)`. Off by default, and it applies
+    /// only to *new* captures: a value withheld at capture time is not kept
+    /// anywhere to be revealed later, so flipping this does not resurrect old
+    /// cookies — it stops hiding the next ones.
+    @Published var revealSensitiveHeaders: Bool = false {
+        didSet { defaults.set(revealSensitiveHeaders, forKey: Keys.revealSensitiveHeaders) }
+    }
     
     func updateStokenTokenURL(_ url: URL) {
         stokenTokenFilePath = url.path
@@ -257,6 +276,11 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         dashboardExpanded = defaults.bool(forKey: Keys.dashboardExpanded)
         settingsPane = defaults.string(forKey: Keys.settingsPane) ?? SettingsCatalog.defaultRoute.rawValue
         ruleSetAutoRefresh = defaults.bool(forKey: Keys.ruleSetAutoRefresh)
+        // Absent key = never answered = default on. `bool(forKey:)` cannot tell
+        // "off" from "unset", and reading an unset key as off would silently
+        // ship the feature disabled for every existing install.
+        recordRequestDetails = defaults.object(forKey: Keys.recordRequestDetails) as? Bool ?? true
+        revealSensitiveHeaders = defaults.bool(forKey: Keys.revealSensitiveHeaders)
         
         // Load theme
         if let raw = defaults.string(forKey: "appTheme"), let t = AppTheme(rawValue: raw) {

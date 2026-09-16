@@ -157,3 +157,53 @@ final class SettingsCatalogTests: XCTestCase {
                        SettingsSidebar.minWidth)
     }
 }
+
+/// The two Dashboard switches that decide whether request details are captured
+/// and whether sensitive header values are readable.
+@MainActor
+final class RequestDetailSettingsTests: XCTestCase {
+
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUpWithError() throws {
+        suiteName = "turtlediver.request.detail.tests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDownWithError() throws {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+    }
+
+    /// Capture on, reveal off. An install that has never seen these keys must
+    /// get the feature working but must not print anyone's cookies.
+    func testDefaultsAreCaptureOnAndRevealOff() {
+        let settings = SettingsManager(defaults: defaults)
+        XCTAssertTrue(settings.recordRequestDetails)
+        XCTAssertFalse(settings.revealSensitiveHeaders)
+    }
+
+    /// The distinction that made the capture flag awkward: a stored `false` is
+    /// an answer and must survive, unlike an absent key.
+    func testAStoredOffIsRespected() {
+        defaults.set(false, forKey: "recordRequestDetails")
+        defaults.set(true, forKey: "revealSensitiveHeaders")
+
+        let settings = SettingsManager(defaults: defaults)
+        XCTAssertFalse(settings.recordRequestDetails)
+        XCTAssertTrue(settings.revealSensitiveHeaders)
+    }
+
+    func testBothSwitchesPersist() {
+        let first = SettingsManager(defaults: defaults)
+        first.recordRequestDetails = false
+        first.revealSensitiveHeaders = true
+
+        let second = SettingsManager(defaults: defaults)
+        XCTAssertFalse(second.recordRequestDetails)
+        XCTAssertTrue(second.revealSensitiveHeaders)
+    }
+}

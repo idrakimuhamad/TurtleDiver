@@ -223,6 +223,29 @@ final class SOCKS5Server: @unchecked Sendable {
             bytesToDestination: 0, bytesToClient: 0, transport: .socks5, error: nil
         ))
 
+        // The client speaks SOCKS5 to us and TLS to the site; the ClientHello's
+        // SNI is the only place the site's name exists on this connection.
+        let capture = requestLog.capturesDetails
+        let observer = RelayStreamObserver()
+        if capture {
+            observer.onClientPrefix = { [weak self] bytes in
+                switch TLSClientHello.probe(bytes) {
+                case .incomplete:
+                    return false
+                case .notTLS:
+                    return true
+                case .parsed(let summary):
+                    var detail = RequestDetail()
+                    detail.serverName = summary.serverName
+                    detail.tlsVersion = summary.version
+                    detail.alpn = summary.alpn
+                    detail.resolvedAddress = observer.peerAddress
+                    self?.requestLog.attachDetail(id: entry.id, detail: detail)
+                    return true
+                }
+            }
+        }
+
         // Bind address in the success reply: 0.0.0.0:0 (client ignores it).
         guard io.write(SOCKS5Server.reply(code: 0x00)) else { return Self.close(clientFD) }
         if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
@@ -241,7 +264,11 @@ final class SOCKS5Server: @unchecked Sendable {
             )
             self?.relayRegistry.release(relay)
         }
-        relay.start(decision: decision, destination: destination, timeoutSeconds: connectTimeout) { error in
+        relay.start(
+            decision: decision, destination: destination,
+            timeoutSeconds: connectTimeout,
+            observer: capture ? observer : nil
+        ) { error in
             if let error {
                 // Connect failed after the success greeting was sent: the
                 // relay's onFinished closure owns log-finish + release, and

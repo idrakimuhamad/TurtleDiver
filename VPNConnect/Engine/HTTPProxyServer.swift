@@ -314,13 +314,29 @@ final class HTTPProxyServer: @unchecked Sendable {
             return
         }
 
+        // What can be read in the clear, built once here so the rejected path
+        // — the one where you most want to know what was blocked — carries the
+        // same detail as a tunnelled one. Nothing is decrypted: for a CONNECT
+        // this is the request line and whatever headers the client put on the
+        // CONNECT itself.
+        let capture = requestLog.capturesDetails
+        let reveal = requestLog.revealsSensitiveHeaders
+        var requestDetail = RequestDetail()
+        if capture {
+            requestDetail.requestLine = "\(head.method) \(head.target) \(head.version)"
+            requestDetail.captureRequestHeaders(
+                head.headers.map { ($0.name, $0.value) }, revealSensitive: reveal
+            )
+        }
+
         // REJECT: immediate close (tiny-gif variant comes later).
         if case .reject = decision {
-            requestLog.append(.init(
+            let rejected = requestLog.append(.init(
                 host: destination.host, port: destination.port, rule: outcome.rule,
                 policy: "REJECT", bytesToDestination: 0, bytesToClient: 0,
                 transport: .http, error: "rejected"
             ))
+            if capture { requestLog.attachDetail(id: rejected.id, detail: requestDetail) }
             respondSimple(clientFD: clientFD, status: "403 Forbidden", body: "rejected by rule")
             return
         }
@@ -332,6 +348,33 @@ final class HTTPProxyServer: @unchecked Sendable {
         ))
 
         if isConnect {
+            // Attach what is already readable before a single tunnel byte
+            // flows: the ClientHello only arrives once the tunnel is up, and a
+            // tunnelled protocol that is not TLS (SSH, a database) never sends
+            // one — its CONNECT line would otherwise be dropped entirely.
+            if capture { requestLog.attachDetail(id: entry.id, detail: requestDetail) }
+            // The tunnel's first bytes are the client's TLS ClientHello — the
+            // one place a hostname appears in the clear on an encrypted stream.
+            let observer = RelayStreamObserver()
+            if capture {
+                let base = requestDetail
+                observer.onClientPrefix = { [weak self] bytes in
+                    switch TLSClientHello.probe(bytes) {
+                    case .incomplete:
+                        return false
+                    case .notTLS:
+                        return true // not TLS: there is nothing here to read
+                    case .parsed(let summary):
+                        var merged = base
+                        merged.serverName = summary.serverName
+                        merged.tlsVersion = summary.version
+                        merged.alpn = summary.alpn
+                        merged.resolvedAddress = observer.peerAddress
+                        self?.requestLog.attachDetail(id: entry.id, detail: merged)
+                        return true
+                    }
+                }
+            }
             // Establish first so we can report success/failure honestly.
             let relay = RelayConnection(clientFD: clientFD, queue: relayRegistry.queue)
             relayRegistry.retain(relay)
@@ -342,6 +385,7 @@ final class HTTPProxyServer: @unchecked Sendable {
             relay.start(
                 decision: decision, destination: destination,
                 timeoutSeconds: connectTimeout,
+                observer: capture ? observer : nil,
                 // The relay owns the client fd end to end: on a failed connect
                 // IT sends the 502 and closes. Writing/closing here too would
                 // double-close the fd (and can hit a recycled fd of an
@@ -373,6 +417,29 @@ final class HTTPProxyServer: @unchecked Sendable {
             requestBytes.append(contentsOf: leftover)
         }
 
+        // Plain HTTP: the response head comes back in the clear on the
+        // destination→client leg, so the status line and response headers are
+        // readable without touching the (unencrypted anyway) body.
+        let observer = RelayStreamObserver()
+        if capture {
+            let base = requestDetail
+            observer.onServerPrefix = { [weak self] bytes in
+                switch HTTPResponseHead.probe(bytes) {
+                case .incomplete:
+                    return false
+                case .notHTTP:
+                    return true
+                case .parsed(let statusLine, let headers):
+                    var merged = base
+                    merged.statusLine = statusLine
+                    merged.captureResponseHeaders(headers, revealSensitive: reveal)
+                    merged.resolvedAddress = observer.peerAddress
+                    self?.requestLog.attachDetail(id: entry.id, detail: merged)
+                    return true
+                }
+            }
+        }
+
         let relay = RelayConnection(clientFD: clientFD, queue: relayRegistry.queue)
         relayRegistry.retain(relay)
         relay.onFinished = { [weak self] metrics, error in
@@ -383,6 +450,7 @@ final class HTTPProxyServer: @unchecked Sendable {
             decision: decision, destination: destination,
             timeoutSeconds: connectTimeout,
             initialBytes: requestBytes,
+            observer: capture ? observer : nil,
             // Relay owns the fd: it sends the 502 and closes on failure.
             errorReply: { error in
                 Self.gatewayErrorResponse(body: "connect failed: \(error.localizedDescription)")

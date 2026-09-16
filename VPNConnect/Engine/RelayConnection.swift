@@ -50,6 +50,40 @@ public struct RelayDestination: Equatable, Sendable {
 
 // MARK: - Outbound Connector
 
+/// Runs blocking connects off the relay queues, a bounded number at a time.
+///
+/// A connect blocks for as long as its timeout, and an unreachable upstream (a
+/// corporate proxy while the VPN is down, say) blocks for the whole of it.
+/// Running those on a *serial* queue takes the whole engine down with the
+/// upstream: every other dial waits its turn behind one that is going to fail
+/// anyway, so one dead proxy is indistinguishable from a dead engine — new
+/// requests sit there until the client gives up, including requests that had
+/// nothing to do with the dead proxy.
+///
+/// Concurrent, with a cap, so a hung upstream costs one slot instead of all of
+/// them. The cap bounds how many threads the blocking dials hold.
+public final class ConnectScheduler {
+    private let queue: DispatchQueue
+    private let slots: DispatchSemaphore
+
+    /// - Parameter limit: how many connects may block at once. Values below 1
+    ///   would deadlock, so they are clamped to 1.
+    public init(limit: Int = 8, queue: DispatchQueue = DispatchQueue.global(qos: .userInitiated)) {
+        self.slots = DispatchSemaphore(value: max(1, limit))
+        self.queue = queue
+    }
+
+    /// Runs `body` (a blocking connect) as soon as a slot is free. The slot is
+    /// held for exactly as long as `body` runs.
+    public func run(_ body: @escaping () -> Void) {
+        queue.async {
+            self.slots.wait()
+            defer { self.slots.signal() }
+            body()
+        }
+    }
+}
+
 /// Establishes the outbound TCP connection for one relayed request according
 /// to the resolved policy decision. Split out from the pump so tests can
 /// exercise policy plumbing without real networks.
@@ -224,6 +258,29 @@ public final class RelayConnection: @unchecked Sendable {
         return Int(UInt16(bigEndian: addr.sin_port))
     }
 
+    /// Peer address of `fd`, numeric (nil when unavailable). Used only to
+    /// report which server a hostname resolved to; both families are handled,
+    /// so an IPv6 peer is not reported as garbage IPv4.
+    static func peerAddress(_ fd: Int32) -> String? {
+        var storage = sockaddr_storage()
+        var len = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let result = withUnsafeMutablePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getpeername(fd, $0, &len) }
+        }
+        guard result == 0 else { return nil }
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let info = withUnsafePointer(to: &storage) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getnameinfo($0, len, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+            }
+        }
+        guard info == 0 else { return nil }
+        let address = String(cString: host)
+        // A scoped IPv6 link-local address carries a "%en0" suffix that means
+        // nothing to the reader of a request row.
+        return address.isEmpty ? nil : address.split(separator: "%").first.map(String.init)
+    }
+
     /// Peer port of `fd` for trace correlation (0 when unavailable).
     static func remotePort(_ fd: Int32) -> Int {
         var addr = sockaddr_in()
@@ -240,9 +297,7 @@ public final class RelayConnection: @unchecked Sendable {
     /// proxy handshakes) runs here, NOT on the shared relay queue: these are
     /// blocking operations that can take seconds, and serializing them behind
     /// the relay queue would stall every active connection's pumping.
-    /// A serial queue bounds thread usage; new connects queue up but live
-    /// relays keep relaying.
-    private static let connectQueue = DispatchQueue(label: "com.turtlediver.engine.connect", qos: .userInitiated)
+    private static let connects = ConnectScheduler(limit: 8)
 
     // MARK: Endpoints
 
@@ -289,6 +344,11 @@ public final class RelayConnection: @unchecked Sendable {
 
     private var finishedError: Error?
 
+    /// Optional prefix watcher, called from `queue` only. Set from the relay
+    /// queue in `start` (never from the caller's thread) so its buffers are
+    /// confined to the same serial queue the reads run on.
+    private var observer: RelayStreamObserver?
+
     public init(clientFD: Int32, queue: DispatchQueue) {
         self.clientFD = clientFD
         self.queue = queue
@@ -305,6 +365,9 @@ public final class RelayConnection: @unchecked Sendable {
         destination: RelayDestination,
         timeoutSeconds: Double,
         initialBytes: [UInt8]? = nil,
+        /// Watches the first bytes of either leg (see `RelayStreamObserver`).
+        /// Purely an observer: the bytes forwarded are never altered.
+        observer: RelayStreamObserver? = nil,
         errorReply: ((Error) -> [UInt8])? = nil,
         completion: @escaping (Error?) -> Void
     ) {
@@ -317,8 +380,8 @@ public final class RelayConnection: @unchecked Sendable {
         lifecycle = .connecting
         lifecycleLock.unlock()
 
-        // Slow, blocking phase on the dedicated connect queue.
-        Self.connectQueue.async { [weak self] in
+        // Slow, blocking phase on the dedicated connect scheduler.
+        Self.connects.run { [weak self] in
             guard let self else { return }
             do {
                 let fd = try OutboundConnector.connect(
@@ -337,6 +400,10 @@ public final class RelayConnection: @unchecked Sendable {
                         return
                     }
                     self.outboundFD = fd
+                    self.observer = observer
+                    // Read from the relay queue, before any byte can be read,
+                    // so the capture handlers see it without a lock.
+                    observer?.setPeerAddress(Self.peerAddress(fd))
                     // The connector restores blocking mode for its callers;
                     // the relay pump REQUIRES non-blocking (dispatch sources
                     // + EAGAIN-driven backpressure). A blocking outbound fd
@@ -444,6 +511,9 @@ public final class RelayConnection: @unchecked Sendable {
         var chunk = [UInt8](repeating: 0, count: Self.bufferSize)
         let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, Self.bufferSize) }
         if n > 0 {
+            // Observe before buffering: forwarding is unconditional either way,
+            // so this cannot reorder or drop a byte.
+            observer?.observe(chunk: Array(chunk[0..<n]), direction: clientSide ? .toDestination : .toClient)
             buffer.append(contentsOf: chunk[0..<n])
             lifecycleLock.lock()
             if clientSide {
