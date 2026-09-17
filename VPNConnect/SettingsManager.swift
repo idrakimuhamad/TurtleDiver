@@ -53,6 +53,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let revealSensitiveHeaders = "revealSensitiveHeaders"
         static let settingsPane = "settingsPane"
         static let ruleSetAutoRefresh = "ruleSetAutoRefresh"
+        static let updatesCheckEnabled = "updatesCheckEnabled"
     }
 
     /// `UserDefaults` keys that older builds wrote and nothing reads any more:
@@ -232,6 +233,15 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         didSet { defaults.set(ruleSetAutoRefresh, forKey: Keys.ruleSetAutoRefresh) }
     }
 
+    /// Whether the app asks GitHub for the newest release when it starts. On by
+    /// default — an update nobody is told about is an update nobody installs —
+    /// and the request carries no account and nothing about this machine. Off
+    /// means the check never runs on its own; pressing Check Now still works,
+    /// because that is a request the user just made.
+    @Published var updatesCheckEnabled: Bool = true {
+        didSet { defaults.set(updatesCheckEnabled, forKey: Keys.updatesCheckEnabled) }
+    }
+
     /// Whether the request table keeps a detail payload (request line, headers,
     /// the TLS handshake's public facts). On by default — it is the point of
     /// the feature — and held in memory only: nothing here is ever written to
@@ -276,6 +286,10 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         dashboardExpanded = defaults.bool(forKey: Keys.dashboardExpanded)
         settingsPane = defaults.string(forKey: Keys.settingsPane) ?? SettingsCatalog.defaultRoute.rawValue
         ruleSetAutoRefresh = defaults.bool(forKey: Keys.ruleSetAutoRefresh)
+        // Same reasoning as `recordRequestDetails` below: the key is absent on
+        // every install that predates it, and `bool(forKey:)` cannot tell that
+        // apart from an explicit "off".
+        updatesCheckEnabled = defaults.object(forKey: Keys.updatesCheckEnabled) as? Bool ?? true
         // Absent key = never answered = default on. `bool(forKey:)` cannot tell
         // "off" from "unset", and reading an unset key as off would silently
         // ship the feature disabled for every existing install.

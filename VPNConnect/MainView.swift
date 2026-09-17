@@ -17,6 +17,9 @@ struct MainView: View {
     @ObservedObject private var engine = EngineController.shared
     /// Profile switches must re-render the header pill.
     @ObservedObject private var profiles = ProfileModelBridge.shared
+    /// A newer release, if the launch check found one. Nothing else in this
+    /// window depends on the network, so this is the only remote fact on screen.
+    @ObservedObject private var updates = UpdateModel.shared
 
     /// Set when the window expanded itself (the tunnel came up). A manual
     /// choice always wins and clears the flag, so we never auto-collapse a
@@ -40,6 +43,12 @@ struct MainView: View {
 
             statusHero
                 .padding(.horizontal, 14)
+
+            if let offer = updates.offer {
+                updateBanner(offer)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+            }
 
             toggles
                 .padding(.horizontal, 14)
@@ -70,6 +79,48 @@ struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showSettings)) { _ in
             (NSApp.delegate as? AppDelegate)?.showSettings()
         }
+    }
+
+    /// One row, and only while there is something newer to act on. It sits under
+    /// the status hero in both window states, because an update is worth knowing
+    /// about whether or not the dashboard is open — and it leaves on its own once
+    /// the release stops being newer, so it is never wallpaper.
+    ///
+    /// It opens the Updates pane rather than downloading anything: this window
+    /// has no business installing software.
+    private func updateBanner(_ offer: UpdateOffer) -> some View {
+        Button {
+            (NSApp.delegate as? AppDelegate)?.openSettingsRoute(.updates)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(verbatim: "TurtleDiver \(offer.version) is available")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text("What's new…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(0.30))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("Open the Updates pane")
     }
 
     // MARK: - Header

@@ -39,10 +39,11 @@ final class SettingsCatalogTests: XCTestCase {
     }
 
     /// Setup is the pane a stuck user is sent to, so it sits in Application
-    /// next to Appearance, above the technical Advanced pane.
-    func testSetupSitsInApplicationAboveAdvanced() {
+    /// next to Appearance, above the technical Advanced pane. Updates is the
+    /// other thing a user comes looking for by name rather than by concept.
+    func testSetupAndUpdatesSitInApplicationAboveAdvanced() {
         let application = SettingsCatalog.items(in: .application).map(\.route)
-        XCTAssertEqual(application, [.appearance, .setup, .advanced])
+        XCTAssertEqual(application, [.appearance, .setup, .updates, .advanced])
     }
 
     // MARK: Copy

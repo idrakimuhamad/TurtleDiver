@@ -130,7 +130,7 @@ is the input).
       the detail, no push-navigation.
 - [ ] The sidebar groups are Connection (VPN, Profiles) / Proxy Engine
       (Dashboard, Policies, Rules, Routing, Rule Sets) / Monitoring (History) /
-      Application (Appearance, Setup, Advanced); the footer shows the engine dot,
+      Application (Appearance, Setup, Updates, Advanced); the footer shows the engine dot,
       `v2.0.0` and the active profile.
 - [ ] The sidebar can hold its width: drag the divider as far left as it goes
       → it stops at the search field (the placeholder never clips to
@@ -207,6 +207,49 @@ disables nothing.
 - [ ] Install output never reaches `~/Library/Logs/TurtleDiver/vpn.log`:
       `grep -i 'openconnect stoken vpn-slice' ~/Library/Logs/TurtleDiver/*.log`
       returns nothing.
+
+## 0e. Updates pane (2.1.0)
+
+The pane that answers "is there a newer TurtleDiver". It checks, and that is
+all it does: nothing here downloads and nothing installs.
+
+- [ ] **Settings ▸ Updates** (⌘, → Application → Updates) shows **TurtleDiver**
+      with the installed version, one line under it, and a status pill; then
+      **When to check**, then **Newer release** only when there is one.
+- [ ] On a build that is the newest release, the pill reads `UP TO DATE` and
+      the line under **Installed** reads `TurtleDiver 2.0.0 is the newest
+      release`; there is no **Newer release** card.
+- [ ] **Check Now** replaces the pill with `CHECKING` while it runs, and the
+      window keeps painting: the check must not freeze the interface (the
+      request waits on a socket, so it runs off the main actor).
+- [ ] **Last checked** reads `Never checked` before the first check, then
+      `Checked just now`, then coarse ages (`Checked 5 min ago`, `Checked 2 h
+      ago`, `Checked 1 day ago`). A *failed* check must not move it: after a
+      failure the row still reads what the last successful check said.
+- [ ] Offline, the pill reads `NOT CHECKED` and the line under **Installed** is
+      one short sentence of the app's own making (`No internet connection`),
+      never a raw error and never an `Optional(...)`.
+- [ ] **Check for updates at launch** is on in a fresh install, including one
+      that predates the preference: `plutil -p ~/Library/Preferences/
+      com.xvii.kurakura.vpn.plist | grep updatesCheckEnabled` may be absent and
+      the toggle must still be on. Switching it off and relaunching stops the
+      launch check: `grep 'Step 9 done' ~/Library/Logs/TurtleDiver/launch.log`
+      then reads `enabled: false`, and the pill stays `NOT CHECKED` until
+      **Check Now**.
+- [ ] **Available state (needs a build older than the newest release — not run
+      in 2.1.0's verification):** the pill reads `AVAILABLE`, the line names
+      the version, **Newer release** names the tag and the disk image, and
+      **Open Release Page** opens the release in the default browser. A release
+      with no disk image this app would install says so instead —
+      `Version X is available, but not as a download`.
+- [ ] The pane offers nothing it cannot do: there is no **Download** and no
+      **Install** button anywhere in it (P1 checks; downloading is a later
+      release).
+- [ ] A newer release also appears twice more, and both open this pane: a row
+      under the status hero in the main window, and an **Update Available —
+      X…** item in the menu bar menu. Neither is present while up to date.
+- [ ] The check sends no credentials and no machine facts: it is one GET to
+      `api.github.com/repos/idrakimuhamad/TurtleDiver/releases/latest`.
 
 ## 1. Profile lifecycle
 

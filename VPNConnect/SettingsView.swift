@@ -168,6 +168,8 @@ struct SettingsView: View {
             HistoryView()
         case .setup:
             SetupView()
+        case .updates:
+            UpdatesView()
         case .advanced:
             AdvancedView()
         case .dashboard, .policies, .rules, .routing, .ruleSets, .profiles:

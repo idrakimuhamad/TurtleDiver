@@ -19,6 +19,7 @@ public enum SettingsRoute: String, Hashable, CaseIterable, Identifiable, Sendabl
     case history
     case appearance
     case setup
+    case updates
     case advanced
 
     public var id: String { rawValue }
@@ -165,6 +166,16 @@ public enum SettingsCatalog {
             group: .application,
             keywords: ["homebrew", "brew", "openconnect", "stoken", "vpn-slice", "tools",
                        "install", "missing", "path", "dependencies", "requirements"]
+        ),
+        SettingsItem(
+            route: .updates,
+            title: "Updates",
+            subtitle: "Check for a newer release of the app itself",
+            symbol: "arrow.down.circle.fill",
+            tint: .indigo,
+            group: .application,
+            keywords: ["update", "upgrade", "release", "version", "newer", "github",
+                       "check", "download"]
         ),
         SettingsItem(
             route: .advanced,

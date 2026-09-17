@@ -166,6 +166,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         resizeWindowForContent()
         StartupLog.write("Step 8: Initial window height set")
         
+        // 9. Ask whether there is a newer release — last, and off the main
+        // thread. Last because a launch must never wait on the network, and
+        // off the main thread because the request waits on a socket. The
+        // setting is read here and passed in, so "off" means this line does
+        // nothing at all; the check reads a version number and cannot install
+        // anything, so nothing here needs the user's attention first.
+        StartupLog.write("Step 9: Update check (background)...")
+        let checkForUpdates = SettingsManager.shared.updatesCheckEnabled
+        Task { await UpdateModel.shared.checkIfEnabled(checkForUpdates) }
+        StartupLog.write("Step 9 done. enabled: \(checkForUpdates)")
+
         StartupLog.write("applicationDidFinishLaunching complete")
     }
     
@@ -274,6 +285,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// "why won't it connect" when a command-line tool is missing.
     @objc func showToolSetup() {
         openSettingsRoute(.setup)
+    }
+
+    /// Menu bar: jump to the pane that says a newer version exists. Reached from
+    /// the status item's row, which only appears when there is one — an update
+    /// notification that lingers after the update is a notification nobody
+    /// reads.
+    @objc func showUpdates() {
+        openSettingsRoute(.updates)
     }
 
     /// Opens Settings, optionally deep-linking to a route (menu bar actions;
@@ -465,6 +484,19 @@ final class MenuBarManager: NSObject {
                 }
             }
             .store(in: &cancellables)
+
+        // The update row comes and goes with the answer, so the menu is rebuilt
+        // on every change of phase. The first delivery is the current phase, so
+        // a build that already knows gets its row on the next run of the loop.
+        UpdateModel.shared.$phase
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.updateMenu(status: self.lastKnownStatus)
+                }
+            }
+            .store(in: &cancellables)
     }
     
     private func updateStatusItem(for status: VPNStatus) {
@@ -601,6 +633,17 @@ final class MenuBarManager: NSObject {
         requirementsItem.target = self
         menu.addItem(requirementsItem)
 
+        // Only while there is something newer to say. The check runs after the
+        // menu is first built, so this row appears when the answer arrives —
+        // `setupBindings` rebuilds the menu on every change of phase.
+        if let offer = UpdateModel.shared.offer {
+            let updateItem = NSMenuItem(title: "Update Available — \(offer.version)…",
+                                        action: #selector(openUpdates),
+                                        keyEquivalent: "")
+            updateItem.target = self
+            menu.addItem(updateItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         // 5. Quit
@@ -725,6 +768,12 @@ final class MenuBarManager: NSObject {
     @objc private func openDashboard() {
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.openSettingsRoute(.dashboard)
+        }
+    }
+
+    @objc private func openUpdates() {
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.showUpdates()
         }
     }
 

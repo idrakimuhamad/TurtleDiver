@@ -72,6 +72,7 @@ let package = Package(
                 "Views/RulesEditorView.swift",
                 "Views/SettingsDesign.swift",
                 "Views/SetupView.swift",
+                "Views/UpdatesView.swift",
                 "Engine/DisplayFormat.swift",
                 "Engine/RelayStreamObserver.swift",
                 "Engine/RequestDetail.swift",
@@ -98,7 +99,7 @@ let package = Package(
                 "System/BoundedProcess.swift",
                 "System/ElevationPolicy.swift",
                 "System/ExistingConnection.swift",
-            "System/LifecycleLog.swift",
+                "System/LifecycleLog.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/ProcessStartTime.swift",
                 "System/SystemProxyManager.swift",
@@ -115,7 +116,8 @@ let package = Package(
                 "Views/MainWindowLayout.swift",
                 "Views/SettingsCatalog.swift",
                 "Views/SettingsDraft.swift",
-                "Views/ToolSetupModel.swift"
+                "Views/ToolSetupModel.swift",
+                "Views/UpdateModel.swift"
             ]
         ),
         .testTarget(

@@ -169,6 +169,21 @@ public enum SettingsDisplay {
         return "Updated \(days) day\(days == 1 ? "" : "s") ago"
     }
 
+    /// "Checked 4 min ago" / "Never checked", for the Updates pane. Coarse like
+    /// `ruleSetAge`, and for the same reason: the minute does not change what
+    /// the user should do about it.
+    public static func updateChecked(_ checkedAt: Date?, now: Date = Date()) -> String {
+        guard let checkedAt else { return "Never checked" }
+        let seconds = max(0, now.timeIntervalSince(checkedAt))
+        if seconds < 90 { return "Checked just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "Checked \(minutes) min ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "Checked \(hours) h ago" }
+        let days = hours / 24
+        return "Checked \(days) day\(days == 1 ? "" : "s") ago"
+    }
+
     /// "Refreshes every day" / "Manual refresh only".
     public static func ruleSetRefresh(interval: Int?) -> String {
         guard let interval, interval > 0 else { return "Refreshes when you ask" }

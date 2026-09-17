@@ -328,6 +328,34 @@ final class RuleSetDisplayTests: XCTestCase {
         XCTAssertEqual(SettingsDisplay.ruleSetAge(summary()), "Never downloaded")
     }
 
+    // MARK: Update check
+
+    func testTheUpdateCheckAgeIsCoarse() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        func age(_ seconds: TimeInterval) -> String {
+            SettingsDisplay.updateChecked(now.addingTimeInterval(-seconds), now: now)
+        }
+        XCTAssertEqual(age(0), "Checked just now")
+        XCTAssertEqual(age(89), "Checked just now")
+        XCTAssertEqual(age(120), "Checked 2 min ago")
+        XCTAssertEqual(age(3600 * 5), "Checked 5 h ago")
+        XCTAssertEqual(age(86400), "Checked 1 day ago")
+        XCTAssertEqual(age(86400 * 3), "Checked 3 days ago")
+    }
+
+    /// The check never runs before it is asked for, so the row has to say that
+    /// rather than imply a check happened at some unstated time.
+    func testAnUnrunUpdateCheckSaysSo() {
+        XCTAssertEqual(SettingsDisplay.updateChecked(nil), "Never checked")
+    }
+
+    /// A clock that moved backwards must not produce "-4 h ago" here either.
+    func testAFutureUpdateCheckReadsAsJustNow() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(SettingsDisplay.updateChecked(now.addingTimeInterval(600), now: now),
+                       "Checked just now")
+    }
+
     func testRefreshCadenceIsWords() {
         XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: nil), "Refreshes when you ask")
         XCTAssertEqual(SettingsDisplay.ruleSetRefresh(interval: 0), "Refreshes when you ask")
