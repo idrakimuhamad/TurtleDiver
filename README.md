@@ -108,10 +108,6 @@ on top of the re-signing work).
    - **Passcode**: Your RSA token passcode
    - **Slice URLs**: URLs/IP addresses to route through VPN (one per line)
 
-### Loading Existing Configuration
-
-The app can automatically load settings from your existing config file at `/Users/idraki/Documents/proxy/config.cfg` if it exists.
-
 ## Usage
 
 ### Connecting

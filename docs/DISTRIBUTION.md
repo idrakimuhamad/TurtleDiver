@@ -51,8 +51,8 @@ notary service whether Apple has seen this exact binary.
 certificate.**
 
     $ security find-identity -v -p codesigning
-      1) … "Apple Development: Richard Chow (WGJR368TV3)"
-      2) … "Apple Development: idrakimuhamad@gmail.com (TDBMW53WY6)"
+      1) … "Apple Development: <your name> (<CERTIFICATE-ID>)"
+      2) … "Apple Development: <you@example.com> (<CERTIFICATE-ID>)"
       2 valid identities found
 
 Only *Apple Development* leaves exist, and they cannot be notarized. (The

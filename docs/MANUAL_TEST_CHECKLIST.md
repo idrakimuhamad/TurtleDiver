@@ -360,12 +360,12 @@ except the last step below is covered by `OpenConnectLaunchTests` (which runs
 both plans against a fake `sudo`/`sed`/`openconnect` trio, so no real sudo,
 `/etc/hosts` or network is touched); these steps confirm the real thing.
 
-Verified 2026-09-15 against a real connect to `vpn.rhbgroup.com`: openconnect's
-argv held only options (`--force-dpd=10 --reconnect-timeout=604800
+Verified 2026-09-15 against a real connect: openconnect's argv held only
+options (`--force-dpd=10 --reconnect-timeout=604800
 --user=<id> --pid-file …/run/openconnect.pid -s …/vpn-slice <host> …`) with no
 credential-shaped token, the log recorded `Credential stdin: 43 bytes, 3 lines`
-(= 8+1, 12+1, 20+1) and an argv-free `Pipeline:` line, and vpn-slice went on to
-resolve its host list.
+— a byte count, not the values — and an argv-free `Pipeline:` line, and
+vpn-slice went on to resolve its host list.
 
 - [ ] Connect the VPN from the app → the tunnel comes up exactly as before
       (the shell now `read`s the three credentials from stdin, and openconnect
@@ -375,7 +375,7 @@ resolve its host list.
       `ps -p <pid> -o command= | tr ' ' '\n' | grep -cE '^(<admin>|<pin>|<password>)'`
       → `0`. (Never `pgrep -f`/`ps` with args on a machine with real
       credentials: the *pre-1.5.0* build printed them.)
-- [ ] `ps -p <pid> -o command=` still shows `--force-dpd=10 … vpn.rhbgroup.com`
+- [ ] `ps -p <pid> -o command=` still shows `--force-dpd=10 … <host>`
       → the connection is genuinely openconnect with the usual options.
 - [ ] `stat -f %Lp ~/Library/Application\ Support/TurtleDiver/run` → `700`, and
       `/tmp/turtlediver.pid` is gone once a new connection starts. (The pid file
