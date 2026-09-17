@@ -73,11 +73,15 @@ final class RepoPrivacyGuardTests: XCTestCase {
     ///  * `github.com/idrakimuhamad` is the repository owner's own account. It
     ///    is already named by the clone URL, so it is public by construction,
     ///    and the README links to a sibling project of theirs.
+    ///  * `api.github.com/repos/idrakimuhamad` is the release feed the app asks
+    ///    for its own newest version. The same account again, through the API's
+    ///    host rather than the web one.
     ///
     /// Anything else that contains a marker is a finding, not an exemption.
     private static let permittedLiterals: [String] = [
         "com.idraki.turtle.vpn",
         "github.com/idrakimuhamad",
+        "api.github.com/repos/idrakimuhamad",
     ]
 
     /// The one file that has to contain the markers, because it is the list of
