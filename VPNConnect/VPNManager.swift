@@ -221,6 +221,9 @@ class VPNManager: ObservableObject {
     /// whole bug: `pam_tid` answers first, the pipe is left full, and the
     /// `sudo` sits on a dialog nobody was told about.
     private var elevation: ElevationStrategy = .storedPassword
+    /// Ends a tunnel this app raised as root. The connect path elevates, so the
+    /// teardown has to be able to as well; see `ElevatedTermination`.
+    let elevatedTerminator = ElevatedTerminator()
 
     /// Set when the launch script reported a named elevation failure. Matched
     /// exactly, so openconnect's own output cannot pass for one.
@@ -344,19 +347,28 @@ class VPNManager: ObservableObject {
         if let pid = OpenConnectPidFile.recordedPid() {
             // Blocking call — this is called from applicationWillTerminate on the main thread,
             // but it's essential to give openconnect time to restore network settings before exit.
-            switch terminateGracefully(pid: pid, timeoutSeconds: 3) {
+            // `mayPrompt: false` is the quit path's rule: a dialog that nothing
+            // answers would hold the quit open and leave a blocked `sudo`
+            // behind. Only `sudo -n` and a piped stored password are allowed.
+            switch terminateGracefully(pid: pid, timeoutSeconds: 3, mayPrompt: false) {
             case .exitedCleanly:
                 debugOutput += "openconnect exited cleanly on quit\n"
                 OpenConnectPidFile.discard()
             case .forceKilled:
                 debugOutput += "openconnect force-killed on quit (network may need manual restore)\n"
                 OpenConnectPidFile.discard()
+            case .endedWithElevation:
+                debugOutput += "openconnect ended with elevation on quit\n"
+                OpenConnectPidFile.discard()
             case .notPermitted:
                 // An openconnect started through sudo is root-owned, so this user
-                // cannot signal it at all. The launch sweep reaps the process
-                // group the connect recorded, which is what ends one of those.
+                // cannot signal it, and the quit path may not put a dialog in
+                // front of anybody. The process-group record is the handle on
+                // that tunnel — it is *not* what ends it; the launch sweep
+                // deliberately leaves a group that still holds an openconnect
+                // alone. The next Disconnect (or connect) can still end it.
                 // The record stays: it is the only handle on a live tunnel.
-                debugOutput += "PID \(pid) is root-owned — leaving it to the process-group record\n"
+                debugOutput += "PID \(pid) is root-owned and the quit cannot ask — leaving the process-group record\n"
             case .notAnOpenConnect:
                 debugOutput += "PID \(pid) is not an openconnect — left alone\n"
                 OpenConnectPidFile.discard()
@@ -383,32 +395,31 @@ class VPNManager: ObservableObject {
         
         let settings = SettingsManager.shared
         
-        // Log disconnection attempt
-        if let id = currentAttemptId {
-            let duration = connectionStartTime.map { Date().timeIntervalSince($0) }
-            let attempt = ConnectionAttempt(
-                id: id,
-                timestamp: connectionStartTime ?? Date(),
-                host: settings.vpnHost.isEmpty ? "Unknown" : settings.vpnHost,
-                status: "Disconnected",
-                duration: duration,
-                logOutput: debugOutput
-            )
-            ConnectionHistoryManager.shared.updateAttempt(attempt)
-        }
-        
         // STEP 1: Gracefully terminate openconnect (allows clean network teardown)
+        //
+        // The elevation in this call is what makes a disconnect work at all. The
+        // tunnel this app raised through `sudo` is owned by root, so no signal
+        // this user sends reaches it; the app asks for the same elevation that
+        // started it. `mayPrompt` is true because a person is here and asked.
+        var tunnelEnded = true
         if let pid = OpenConnectPidFile.recordedPid() {
             debugOutput += "Terminating openconnect (PID: \(pid)) gracefully...\n"
-            switch terminateGracefully(pid: pid) {
+            switch terminateGracefully(pid: pid, mayPrompt: true) {
             case .exitedCleanly:
                 debugOutput += "openconnect exited cleanly, network restored\n"
                 OpenConnectPidFile.discard()
             case .forceKilled:
                 debugOutput += "openconnect force-killed (network may need manual restore)\n"
                 OpenConnectPidFile.discard()
+            case .endedWithElevation:
+                debugOutput += "openconnect ended with elevation, network restored\n"
+                OpenConnectPidFile.discard()
             case .notPermitted:
-                debugOutput += "openconnect (PID: \(pid)) is root-owned — this app cannot signal it\n"
+                // The tunnel is still up. The record is the handle on it, so it
+                // stays — and the status below says so, because "Disconnected"
+                // over a live tunnel is the report that hid this bug.
+                tunnelEnded = false
+                debugOutput += "openconnect (PID: \(pid)) is still running — the tunnel is still up\n"
             case .notAnOpenConnect:
                 debugOutput += "PID \(pid) is not an openconnect — left alone\n"
                 OpenConnectPidFile.discard()
@@ -423,8 +434,12 @@ class VPNManager: ObservableObject {
         // (e.g. sudo cache expired), the next connection's shell command pipeline
         // handles the cleanup before connecting.
         
-        // STEP 2: Clean up PID file
-        try? FileManager.default.removeItem(atPath: pidFilePath)
+        // STEP 2: Clean up the PID file — but only when the tunnel is actually
+        // gone. The record is how a later disconnect, or the next connect, finds
+        // a surviving process again.
+        if tunnelEnded {
+            try? FileManager.default.removeItem(atPath: pidFilePath)
+        }
         
         // STEP 3: Gracefully terminate the bash/sudo wrapper process
         outputPipe?.fileHandleForReading.readabilityHandler = nil
@@ -448,9 +463,34 @@ class VPNManager: ObservableObject {
         process = nil
         cancelConnectionTimer()
         
-        status = .disconnected
-        debugOutput += "VPN disconnected\n"
-        stopDurationTimer()
+        // The history row and the status both come *after* the attempt, and both
+        // say what is true. "Disconnected" written before the signal was even
+        // sent is what made a live tunnel look like a finished one.
+        if let id = currentAttemptId {
+            let duration = connectionStartTime.map { Date().timeIntervalSince($0) }
+            let attempt = ConnectionAttempt(
+                id: id,
+                timestamp: connectionStartTime ?? Date(),
+                host: settings.vpnHost.isEmpty ? "Unknown" : settings.vpnHost,
+                status: tunnelEnded ? "Disconnected" : "Failed - Still Connected",
+                duration: duration,
+                logOutput: debugOutput
+            )
+            ConnectionHistoryManager.shared.updateAttempt(attempt)
+        }
+        
+        if tunnelEnded {
+            status = .disconnected
+            debugOutput += "VPN disconnected\n"
+            stopDurationTimer()
+        } else {
+            // `.connected` is the honest state: the tunnel really is up. It is
+            // also the only state that keeps the button saying "Disconnect" —
+            // `.error` would rename it "Reconnect" and invite a second tunnel on
+            // top of the one that is still running.
+            status = .connected
+            debugOutput += "VPN NOT disconnected — openconnect is still running\n"
+        }
         reapLaunchProcessGroupInBackground()
     }
     
@@ -811,7 +851,11 @@ class VPNManager: ObservableObject {
             self.debugOutput += "Found existing openconnect (PID: \(pid), \(source)). Terminating...\n"
         }
 
-        let outcome = terminateGracefully(pid: pid)
+        // `mayPrompt: true`: the user just asked to connect, so a dialog is
+        // expected in this flow (the launch itself may raise one) — and a
+        // leftover root-owned tunnel from a previous attempt has to be ended
+        // before a second one is raised on top of it.
+        let outcome = terminateGracefully(pid: pid, mayPrompt: true)
 
         await MainActor.run {
             switch outcome {
@@ -820,7 +864,9 @@ class VPNManager: ObservableObject {
             case .forceKilled:
                 self.debugOutput += "Existing openconnect force-killed\n"
             case .notPermitted:
-                self.debugOutput += "Existing openconnect (PID: \(pid)) is root-owned — this app cannot signal it\n"
+                self.debugOutput += "Existing openconnect (PID: \(pid)) is root-owned and could not be ended\n"
+            case .endedWithElevation:
+                self.debugOutput += "Existing openconnect ended with elevation\n"
             case .notAnOpenConnect:
                 self.debugOutput += "PID \(pid) is not an openconnect — left alone\n"
             }
@@ -1247,7 +1293,7 @@ class VPNManager: ObservableObject {
     @discardableResult
     /// Stops an openconnect, and says truthfully what happened.
     ///
-    /// Two things are deliberately different from the version this replaces.
+    /// Three things are deliberately different from the version this replaces.
     /// First, the pid is verified: `openconnect.pid` is a plain file, and a
     /// stale or recycled pid in it names somebody else's process. Nothing is
     /// signalled until `ps` says the pid is an openconnect.
@@ -1257,9 +1303,30 @@ class VPNManager: ObservableObject {
     /// user may not signal. An openconnect started through `sudo` is owned by
     /// root, so that test reported the app's own tunnel as "exited cleanly"
     /// without ever having signalled it.
-    private func terminateGracefully(pid: Int32, timeoutSeconds: TimeInterval = 3.0) -> TerminationOutcome {
+    ///
+    /// Third, a root-owned tunnel is actually *ended* rather than only named:
+    /// the signal is sent through the same elevation the connect used. Naming
+    /// the failure was honest but useless — the user pressed Disconnect and the
+    /// tunnel stayed up.
+    /// - Parameter mayPrompt: whether this caller may put a system dialog in
+    ///   front of the user. There is deliberately no default: at quit a dialog
+    ///   that nothing answers would hold the quit open and leave a blocked root
+    ///   `sudo` behind, so every call site has to say which path it is.
+    private func terminateGracefully(
+        pid: Int32,
+        timeoutSeconds: TimeInterval = 3.0,
+        mayPrompt: Bool
+    ) -> TerminationOutcome {
         guard OpenConnectProcess.isOpenConnect(pid: pid) else { return .notAnOpenConnect }
         guard OpenConnectProcess.isRunning(pid: pid) else { return .exitedCleanly }
+
+        // The owner is read before anything is sent. A root-owned process
+        // refuses both signals, so asking costs the timeout and then reports a
+        // failure that was never in doubt.
+        if ProcessOwner.belongsToAnotherUser(pid) {
+            debugOutput += "openconnect (PID: \(pid)) belongs to another user — the signal needs elevation\n"
+            return terminateWithElevation(pid: pid, mayPrompt: mayPrompt)
+        }
 
         _ = kill(pid, SIGTERM)
 
@@ -1272,7 +1339,37 @@ class VPNManager: ObservableObject {
         // Only force-kill as last resort — this may leave network in a bad state
         _ = kill(pid, SIGKILL)
         usleep(200_000)
-        return OpenConnectProcess.isRunning(pid: pid) ? .notPermitted : .forceKilled
+        if !OpenConnectProcess.isRunning(pid: pid) { return .forceKilled }
+
+        // Still there after signals this user *may* send. It may simply hold
+        // privileges the owner check could not see, so elevation gets one turn
+        // before the app calls the tunnel unkillable.
+        return terminateWithElevation(pid: pid, mayPrompt: mayPrompt)
+    }
+
+    /// Ends a tunnel through the same elevation that started it.
+    ///
+    /// The group recorded by the connect is preferred to the pid: the launch is
+    /// one group — the wrapper shell, the `sudo`, and `openconnect` — and
+    /// signalling only the pid leaves the other two to be orphaned. The group is
+    /// used only while it verifiably still holds this tunnel's pid.
+    private func terminateWithElevation(pid: Int32, mayPrompt: Bool) -> TerminationOutcome {
+        let target: ElevatedTerminator.Target = ElevationRecord.read().map { .group($0) } ?? .pid(pid)
+        let outcome = elevatedTerminator.end(
+            target,
+            openConnectPid: pid,
+            strategy: elevation,
+            adminPassword: SettingsManager.shared.adminPassword,
+            mayPrompt: mayPrompt
+        )
+        switch outcome {
+        case .ended:
+            debugOutput += "openconnect (PID: \(pid)) ended with elevation\n"
+            return .endedWithElevation
+        case .stillRunning(let detail), .refused(let detail):
+            debugOutput += "Elevation: \(detail)\n"
+            return .notPermitted
+        }
     }
     
     private func forceTerminate() {
@@ -1286,9 +1383,15 @@ class VPNManager: ObservableObject {
         // Gracefully terminate openconnect (allows clean network teardown) — but
         // only a pid that is verified to be an openconnect.
         if let pid = OpenConnectPidFile.recordedPid() {
-            switch terminateGracefully(pid: pid) {
+            // `mayPrompt: false`: the connect just timed out — very possibly
+            // because a dialog went unanswered — so this path must not put up
+            // another one. `sudo -n` and a piped stored password still apply.
+            switch terminateGracefully(pid: pid, mayPrompt: false) {
             case .notPermitted:
-                debugOutput += "openconnect (PID: \(pid)) is root-owned — this app cannot signal it\n"
+                debugOutput += "openconnect (PID: \(pid)) is root-owned and could not be ended\n"
+            case .endedWithElevation:
+                debugOutput += "openconnect ended with elevation\n"
+                OpenConnectPidFile.discard()
             case .notAnOpenConnect:
                 debugOutput += "PID \(pid) is not an openconnect — left alone\n"
                 OpenConnectPidFile.discard()

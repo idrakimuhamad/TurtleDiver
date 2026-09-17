@@ -502,15 +502,32 @@ except the dialog itself is covered by `ElevationPolicyTests`,
       → a plausible pgid, and `ps -o pid=,pgid=,comm= -g <pgid>` shows the
       wrapper (names only — never `ps` with args).
 - [ ] Disconnect, then `ps -o comm= -g <pgid>` → nothing. No `sudo`, no
-      `openconnect`, and `pgrep -x sudo` is empty.
+      `openconnect`, and `pgrep -x sudo` is empty. (A disconnect straight after a
+      connect has a warm `sudo` timestamp, so it takes the silent path: no
+      dialog.)
+- [ ] **The elevated disconnect (2.0.0 fix).** Connect, wait for the tunnel to be
+      up and the pill to read `Connected · <host> · <duration>`, then run
+      `sudo -k` on purpose to cool the timestamp, then press **Disconnect** →
+      macOS shows its own Touch ID / password dialog (the app cannot answer it;
+      **a human must**). Answer it → the tunnel ends, the log ends with
+      `openconnect ended with elevation, network restored`, the history row for
+      the attempt reads `Disconnected`, and `ps -o pid= -g <pgid>` is empty.
+      Without a `pam_tid` line the dialog is sudo's password prompt instead.
+- [ ] Same, but **cancel** the dialog → the tunnel stays up, the button still
+      says *Disconnect*, the log says `VPN NOT disconnected — openconnect is
+      still running`, the history row reads `Failed - Still Connected`, and
+      `run/openconnect.pid` still exists — so pressing Disconnect again retries
+      instead of forgetting the process. **This is the case the previous build
+      got wrong**: it reported `Disconnected` over a live tunnel.
+- [ ] **Never** observed, and not something to test: the app cannot signal a
+      root-owned orphan it has no record of — a non-root sender may not signal a
+      root-owned process, and the app will not guess at a pid. A tunnel whose
+      record is gone is left alone; kill it as root yourself if you want it gone.
+      (A tunnel the app *does* have a record for is the case above.)
 - [ ] Relaunch the app → `~/Library/Logs/TurtleDiver/launch.log` has
       `Step 0c: Sweeping stale elevation groups (background)...` and
       `Step 0c done.` followed by the decision. With no leftovers it is
       `nothingToDo`.
-- [ ] **Never** observed, and not something to test: the app cannot kill a
-      root-owned orphan that a *previous* build created — a non-root sender may
-      not signal a root-owned process. The remedy is to leave it or kill it as
-      root yourself; it exits on its own.
 - [ ] System proxy *toggle* with `networksetup` made slow or a dialog left open
       → the app reports `Timed out changing the system proxy: …` within ~60 s and
       stays responsive. (Simulated in `BoundedNetworkSetupRunnerTests`; the real

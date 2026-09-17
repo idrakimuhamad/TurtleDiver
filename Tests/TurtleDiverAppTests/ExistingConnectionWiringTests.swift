@@ -81,7 +81,10 @@ final class ExistingConnectionWiringTests: XCTestCase {
     func testEverySignalGoesThroughTheVerifyingTerminator() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
 
-        let start = try XCTUnwrap(code.range(of: "private func terminateGracefully(pid: Int32"))
+        // The parameters are wrapped, so the anchor is the declaration itself:
+        // what matters below is the *order* of the guard, the signal and the
+        // switch, not the shape of the signature.
+        let start = try XCTUnwrap(code.range(of: "private func terminateGracefully("))
         let end = try XCTUnwrap(code.range(of: "private func forceTerminate()"))
         let body = code[start.lowerBound..<end.lowerBound]
 

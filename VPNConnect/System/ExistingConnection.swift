@@ -232,7 +232,13 @@ public enum TerminationOutcome: Equatable, Sendable {
     case notAnOpenConnect
     case exitedCleanly
     case forceKilled
-    /// Still alive and this user may not signal it. The launch sweep's process
-    /// group record is what ends one of those.
+    /// Ended through the same elevation the launch used. Needed because an
+    /// openconnect started through `sudo` is owned by root and no signal this
+    /// user sends can reach it — for `SIGTERM` or for `SIGKILL`.
+    case endedWithElevation
+    /// Still alive after everything this app may do: the signal was refused
+    /// (`EPERM` on a root-owned process) and the elevated attempt was not
+    /// available or did not take. The process group record is only the handle on
+    /// such a tunnel, not the thing that ends it.
     case notPermitted
 }

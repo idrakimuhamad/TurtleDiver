@@ -106,6 +106,7 @@ subshell and anything else this user owns goes with it.
 `killpg` is honest about its limits: it reaches every member the sender may
 signal and silently skips the rest, so a root-owned `sudo`/`openconnect` in the
 group survives. That is exactly why the fix is to stop creating the situation.
+(Ending a tunnel the group could not reach is a separate path — see §6.)
 `killpg(pgid, 0)` answers success while *any* member is still signalable, so a
 surviving group is not read as proof that everything in it died, and a group
 that is left alive keeps its record (see below). `setsid` does not exist on
@@ -133,6 +134,8 @@ reported rather than pretended away.
 | `ps -o comm= -g` in the sweep | 3 s | treat the group as unknown |
 | `ps -o etime=` reading an adopted tunnel's start time | 3 s | no duration: it counts from the adoption |
 | `networksetup` (system proxy) | 60 s + 2 s grace | terminate, then SIGKILL, then `authorizationTimedOut` |
+| `ps -o user=` reading a pid's owner | 3 s | the owner is unknown, so the user-level path is tried |
+| elevated `sudo … kill` | 20 s | terminate the `sudo`, then SIGKILL it, and report the failure |
 | `/etc/hosts` cleanup on quit | 5 s | report and let the next connect retry |
 
 That last `ps` read is not an elevation wait; it is here because this table is
@@ -155,6 +158,62 @@ the start instant as a parameter, so each caller states which one it means and
 nothing recomputes it; the adopter feeds both the timer and the history row from
 one local.
 
+### 6. End a tunnel this user cannot signal
+
+A tunnel the app raised through `sudo` is **root-owned**. Every signal this user
+sends it is refused with `EPERM` — for `SIGTERM` and for `SIGKILL` alike — so for
+a while Disconnect and the quit both reported a disconnect that had not happened
+and left the tunnel up. Three things were wrong, and they compounded:
+
+1. `disconnect()` wrote `status = .disconnected` and a `"Disconnected"` history
+   row *unconditionally*, after a signal the kernel had refused. A live tunnel
+   was reported as a finished one, on screen and in the record.
+2. Neither path had any way to reach a root-owned process, so the report was not
+   merely early — it was unachievable.
+3. A quit-time comment claimed the launch sweep would reap the group instead.
+   It will not: `ElevationSweep.decide` returns `.leaveAlive` for a group that
+   still holds an `openconnect`, deliberately. The record is a **handle** on such
+   a tunnel, never the thing that ends it.
+
+Ending it needs root, and the app already knows how to get root: the same
+`ElevationStrategy` the connect used. `ElevatedTerminator` routes that decision
+through the *verifying* terminator, so every call site is fixed at once:
+
+- **Verify first.** A pid is only ever signalled after `OpenConnectProcess`
+  says it is an `openconnect` and is still running. A stale or recycled pid in
+  the pid file cannot become a root signal.
+- **Read the owner before spending the timeout.** `ps -o user=` (bounded) names
+  the owning user; a different name means `EPERM` is certain, so the app goes
+  straight to the elevated form instead of waiting three seconds to learn
+  nothing.
+- **`sudo -n` is always tried first.** It never prompts, fails in milliseconds
+  when the timestamp is cold, and a just-connected tunnel has a warm one. The
+  stronger forms are only *sent* while the process is still there: `send` stops
+  at the first plan that works, so a password or a dialog is never spent on a
+  process that is already gone.
+- **A group is only signalled as root while `ps -o pid= -g <pgid>` still lists
+  the verified `openconnect`.** Pids and groups are recycled, and
+  `run/elevation.pgid` may hold a group from a previous run.
+- **`mayPrompt` is a parameter with no default**, so every call site has to say
+  which path it is. `disconnect()` and the pre-connect cleanup may raise the
+  system dialog, because a person is there and asked. `cleanupOnTermination()`
+  and `forceTerminate()` may not: a dialog nothing answers is what held a quit
+  open and left a blocked `sudo` behind — the original defect in §2.
+- **The verdict is the liveness check, never `sudo`'s exit status.** A `sudo`
+  that exits 0 having killed nothing is a failure, and a signal that was accepted
+  and ignored is a failure too. The outcome has five cases and every `switch`
+  handles all five, so `endedWithElevation` cannot be forgotten.
+- **A failed disconnect says so.** The status stays `.connected` (`.error` would
+  rename the hero button *Reconnect* and invite a second tunnel on top of the one
+  that is still running), the history row reads `Failed - Still Connected`, and
+  the pid record is kept — it is how a retry finds the process again.
+
+That last point is the one the user saw: "press Disconnect → the tunnel ends" is
+the promise, and a report that outruns the effect breaks it. What the app can
+guarantee is narrower and honest: **Disconnect ends the tunnel whenever the
+signal can be delivered, asks for the privilege when it cannot, and reports
+`Still Connected` when even that did not take.**
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:
@@ -163,11 +222,21 @@ These are deliberate and should not be "fixed" later:
   reads them. Enabling or disabling Touch ID for sudo is the user's decision,
   made with their own editor or their vendor's instructions. See
   `docs/DISTRIBUTION.md`.
-- **The app never kills a root-owned `openconnect`.** That process restores
-  routes and DNS on its way out; killing it is how a machine loses its network.
-- **The app cannot reap a pre-existing root-owned orphan**, and no message or
-  document says it can. It prevents orphans (process groups) and reports
-  leftovers (the sweep).
+- **The app never signals a process it has not verified is an `openconnect`**,
+  and it never sends *root* a signal the user has not authorised. Ending a tunnel
+  that root owns needs root, so the app asks for the same elevation that started
+  it: `sudo -n` and a stored password are authorisation already given, and the
+  system dialog is asked for at the moment the user presses *Disconnect* (or
+  *Connect*). The quit path may use only the two silent forms.
+- **The app never kills a root-owned `openconnect` without a graceful attempt
+  first.** That process restores routes and DNS on its way out, so `SIGTERM` goes
+  first and `SIGKILL` is only the escalation. If neither takes, the tunnel stays
+  up and the app says `Failed - Still Connected` rather than reporting a
+  disconnect that did not happen.
+- **The launch cannot reap a pre-existing root-owned orphan**, and no message or
+  document says it can. The sweep reaps only a group the app can signal, and it
+  deliberately leaves a group that still holds an `openconnect` alone; ending
+  such a tunnel is the *Disconnect* path in §6, not the sweep.
 - **No silent fallback between elevation paths.** A chosen path that fails is
   reported as a failure. Falling back would re-create the hang this document is
   about.
