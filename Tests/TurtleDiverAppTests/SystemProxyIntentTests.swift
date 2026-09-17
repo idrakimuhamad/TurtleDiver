@@ -136,7 +136,10 @@ final class SystemProxyIntentTests: XCTestCase {
             defaults: defaults,
             snapshotURL: directory.appendingPathComponent("proxy-snapshot.json")
         )
-        let controller = EngineController(profileManager: manager, settings: .shared, systemProxy: systemProxy)
+        let controller = EngineController(
+            profileManager: manager, settings: .shared, systemProxy: systemProxy,
+            tunnel: StubTunnelStatus()
+        )
         return Harness(
             controller: controller,
             manager: manager,
@@ -275,7 +278,8 @@ final class SystemProxyIntentTests: XCTestCase {
         let relaunched = EngineController(
             profileManager: h.manager,
             settings: .shared,
-            systemProxy: h.systemProxy
+            systemProxy: h.systemProxy,
+            tunnel: StubTunnelStatus()
         )
         if !relaunched.engineRunning { relaunched.startEngine() }
         XCTAssertTrue(relaunched.engineRunning, relaunched.lastError ?? "")

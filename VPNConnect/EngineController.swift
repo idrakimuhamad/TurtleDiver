@@ -54,6 +54,37 @@ final class ProfileModelBridge: ObservableObject {
     }
 }
 
+// MARK: - Tunnel Status Seam
+
+/// Where `EngineController` reads the tunnel's state, and the one place it writes
+/// a line of tunnel-diagnostic text.
+///
+/// A seam rather than a direct read of `VPNManager.shared`: creating that
+/// singleton performs the launch-time adoption of a tunnel the app did not
+/// start, so *building an engine controller in a test* adopted whatever
+/// `openconnect` was running on the machine and wrote the user's pid file.
+/// `LiveTunnelStatus` is the app's wiring; a test passes a stub.
+protocol TunnelStatusSource: AnyObject {
+    var status: VPNStatus { get }
+    var statusChanges: AnyPublisher<VPNStatus, Never> { get }
+    func log(_ line: String)
+}
+
+/// The app's tunnel: the real manager, including its launch-time adoption.
+///
+/// Deliberately lazy — nothing here touches `VPNManager.shared` until one of
+/// these members is used, so constructing this object is not the same as
+/// creating the manager.
+final class LiveTunnelStatus: TunnelStatusSource {
+    var status: VPNStatus { VPNManager.shared.status }
+
+    var statusChanges: AnyPublisher<VPNStatus, Never> {
+        VPNManager.shared.$status.eraseToAnyPublisher()
+    }
+
+    func log(_ line: String) { VPNManager.shared.debugOutput += line }
+}
+
 // MARK: - Engine Controller
 
 /// App-side glue between the proxy engine and the rest of the app:
@@ -100,6 +131,9 @@ final class EngineController: ObservableObject {
     private let settings: SettingsManager
     /// Injected so tests never touch the login keychain.
     private let secrets: SecretStore
+    /// The tunnel's state, injected so tests never create `VPNManager.shared`
+    /// (which adopts the machine's own tunnel — see `TunnelStatusSource`).
+    private let tunnel: TunnelStatusSource
     private var cancellables = Set<AnyCancellable>()
 
     /// Cached remote rule lists. Injected so tests never read or write the
@@ -132,11 +166,13 @@ final class EngineController: ObservableObject {
         settings: SettingsManager = .shared,
         systemProxy: SystemProxyManager? = nil,
         secrets: SecretStore = KeychainBackedSecrets(),
-        ruleSets: RuleSetStore? = nil
+        ruleSets: RuleSetStore? = nil,
+        tunnel: TunnelStatusSource = LiveTunnelStatus()
     ) {
         self.profileManager = profileManager
         self.settings = settings
         self.secrets = secrets
+        self.tunnel = tunnel
         self.ruleSets = ruleSets ?? RuleSetStore()
         self.systemProxy = systemProxy ?? SystemProxyManager(
             runner: SystemProxyManager.defaultRunner(adminPasswordProvider: {
@@ -597,12 +633,12 @@ final class EngineController: ObservableObject {
     // MARK: VPN tie-in
 
     private var vpnConnected: Bool {
-        if case .connected = VPNManager.shared.status { return true }
+        if case .connected = tunnel.status { return true }
         return false
     }
 
     private func observeVPNStatus() {
-        VPNManager.shared.$status
+        tunnel.statusChanges
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 self?.handleVPNStatus(status)
@@ -625,7 +661,7 @@ final class EngineController: ObservableObject {
         guard settings.useTunneling else { return }
         let (generated, invalid) = VPNRuleGenerator.rules(forTargets: settings.vpnSliceURLs)
         if !invalid.isEmpty {
-            VPNManager.shared.debugOutput += "[Engine] Skipped unrecognizable vpn-slice targets: \(invalid.joined(separator: ", "))\n"
+            tunnel.log("[Engine] Skipped unrecognizable vpn-slice targets: \(invalid.joined(separator: ", "))\n")
         }
         guard !generated.isEmpty else { return }
 

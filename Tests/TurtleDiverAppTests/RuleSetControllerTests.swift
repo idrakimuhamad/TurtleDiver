@@ -85,7 +85,8 @@ final class RuleSetControllerTests: XCTestCase {
             profileManager: manager,
             settings: settings,
             systemProxy: systemProxy,
-            ruleSets: store
+            ruleSets: store,
+            tunnel: StubTunnelStatus()
         )
         return (controller, manager)
     }

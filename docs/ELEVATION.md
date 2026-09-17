@@ -214,6 +214,27 @@ guarantee is narrower and honest: **Disconnect ends the tunnel whenever the
 signal can be delivered, asks for the privilege when it cannot, and reports
 `Still Connected` when even that did not take.**
 
+### 7. A test never adopts the machine's own tunnel
+
+Adoption is not a read. It records the pid in `run/openconnect.pid`, publishes
+`.connected` and writes a history row — all of them the *user's* state. Creating
+`VPNManager.shared` is what performs it, so any test that reached the manager
+adopted whatever `openconnect` happened to be running on the machine: the app
+suite wrote the user's real pid file, and the rule-set tests took a different
+path depending on whether a tunnel was up.
+
+Two guards, one at each end:
+
+| Guard | Where | What it stops |
+|---|---|---|
+| `VPNManager.adoptsExistingConnectionsAtLaunch` | `VPNManager.init` | a test host (XCTest's `XCTestConfigurationFilePath`, or XCTest itself loaded) never adopts |
+| `TunnelStatusSource` | `EngineController.init` | the controller reads an injected tunnel, so building one never creates the manager |
+
+`LiveTunnelStatus` is the app's wiring, and it touches the manager only when one
+of its members is used — so taking the default is not the same as creating the
+manager. Test call sites pass `StubTunnelStatus`, and
+`TunnelAdoptionHygieneTests` fails if one of them goes back to the default.
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:

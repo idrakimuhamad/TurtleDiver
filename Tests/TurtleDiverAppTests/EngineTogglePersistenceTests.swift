@@ -68,7 +68,8 @@ final class EngineTogglePersistenceTests: XCTestCase {
         let controller = EngineController(
             profileManager: manager,
             settings: .shared,
-            systemProxy: systemProxy
+            systemProxy: systemProxy,
+            tunnel: StubTunnelStatus()
         )
         return (controller, manager, runner)
     }

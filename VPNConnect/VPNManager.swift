@@ -198,6 +198,25 @@ enum VPNStatus: Equatable {
 
 class VPNManager: ObservableObject {
     static let shared = VPNManager()
+
+    /// Whether this process adopts a tunnel it did not start, the first time the
+    /// manager is created.
+    ///
+    /// False in a test host. Adoption is not a read: it records the pid, writes
+    /// the user's own pid file and publishes `.connected`. From a test process
+    /// that meant the suite adopted whatever `openconnect` happened to be
+    /// running on the machine — writing the real run directory, and running the
+    /// rule-set tests down a different path depending on it. The app adopts; a
+    /// test does not.
+    static let adoptsExistingConnectionsAtLaunch = !isTestHost
+
+    /// XCTest sets `XCTestConfigurationFilePath` for the process it runs, and the
+    /// XCTest framework is only linked into a test bundle. Either signal is
+    /// enough; a test host is a test host.
+    private static var isTestHost: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
     
     @Published var status: VPNStatus = .disconnected
     @Published var debugOutput: String = ""
@@ -259,7 +278,10 @@ class VPNManager: ObservableObject {
     private var pipeClosed = false
     
     private init() {
-        // Check for existing openconnect process on launch
+        // Check for existing openconnect process on launch — except from a test,
+        // which would otherwise adopt the machine's own tunnel and write the
+        // user's pid file. See `adoptsExistingConnectionsAtLaunch`.
+        guard Self.adoptsExistingConnectionsAtLaunch else { return }
         DispatchQueue.main.async { [weak self] in
             self?.checkForExistingConnection()
         }
