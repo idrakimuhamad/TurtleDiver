@@ -105,6 +105,7 @@ let package = Package(
                 "System/SystemProxyManager.swift",
                 "System/ToolProcess.swift",
                 "System/ToolResolver.swift",
+                "System/UpdateArtifact.swift",
                 "System/UpdateFeed.swift",
                 "System/VPNRuleGenerator.swift"
             ],
