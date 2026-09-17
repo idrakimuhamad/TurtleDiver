@@ -114,12 +114,12 @@ final class TLSClientHelloTests: XCTestCase {
     /// The whole point of the feature: a CONNECT target of "1.2.3.4:443" gains
     /// the name the client actually asked for.
     func testServerNameIsReadFromATunnelWhoseTargetWasAnAddress() {
-        let bytes = makeClientHello(serverName: "vpn.rhbgroup.com")
+        let bytes = makeClientHello(serverName: "vpn.example.com")
 
         guard case .parsed(let summary) = TLSClientHello.probe(bytes) else {
             return XCTFail("expected a parsed summary")
         }
-        XCTAssertEqual(summary.serverName, "vpn.rhbgroup.com")
+        XCTAssertEqual(summary.serverName, "vpn.example.com")
     }
 
     func testAClientConnectingToAnIPHasNoServerNameButStillParses() {

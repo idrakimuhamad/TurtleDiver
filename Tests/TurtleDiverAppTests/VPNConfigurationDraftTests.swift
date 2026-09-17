@@ -8,7 +8,7 @@ import TurtleDiverCore
 final class VPNConfigurationDraftTests: XCTestCase {
 
     private func draft(host: String = "vpn.example.com",
-                       username: String = "451799",
+                       username: String = "10001",
                        password: String = "pw",
                        passcode: String = "123456",
                        adminPassword: String = "admin",
@@ -104,13 +104,13 @@ final class SettingsDisplayTests: XCTestCase {
     }
 
     func testHomeIsAbbreviated() {
-        let home = "/Users/idraki"
+        let home = "/Users/someone"
         XCTAssertEqual(SettingsDisplay.abbreviateHome("\(home)/Library/Logs/TurtleDiver/vpn.log", home: home),
                        "~/Library/Logs/TurtleDiver/vpn.log")
     }
 
     func testPathsOutsideHomeAreLeftAlone() {
-        let home = "/Users/idraki"
+        let home = "/Users/someone"
         XCTAssertEqual(SettingsDisplay.abbreviateHome("/tmp/TurtleDiver-launch.log", home: home),
                        "/tmp/TurtleDiver-launch.log")
         XCTAssertEqual(SettingsDisplay.abbreviateHome("/Volumes/Backup/logs", home: home),
@@ -118,11 +118,11 @@ final class SettingsDisplayTests: XCTestCase {
     }
 
     /// A sibling directory that merely starts with the home path must not be
-    /// rewritten: `/Users/idraki2` is not inside `/Users/idraki`.
+    /// rewritten: `/Users/someone2` is not inside `/Users/someone`.
     func testOnlyARealPathComponentBoundaryCounts() {
-        let home = "/Users/idraki"
-        XCTAssertEqual(SettingsDisplay.abbreviateHome("/Users/idraki2/Library", home: home),
-                       "/Users/idraki2/Library")
+        let home = "/Users/someone"
+        XCTAssertEqual(SettingsDisplay.abbreviateHome("/Users/someone2/Library", home: home),
+                       "/Users/someone2/Library")
         XCTAssertEqual(SettingsDisplay.abbreviateHome(home, home: home), "~")
     }
 

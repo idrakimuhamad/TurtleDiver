@@ -18,10 +18,12 @@ import TurtleDiverSystem
 /// path without needing a VPN.
 final class OpenConnectLaunchTests: XCTestCase {
 
-    // Distinctive values so a containment check cannot pass by accident.
-    private let admin = "ADMIN-pw-1q2w3e4r"
-    private let pin = "PIN-1qa2ws309418"
-    private let password = "VPN-vymTip-vedju1"
+    // Distinctive values so a containment check cannot pass by accident — and
+    // deliberately fictitious, so a fixture can never be mistaken for a real
+    // credential (or become one as the placeholder is edited).
+    private let admin = "ADMIN-pw-placeholder"
+    private let pin = "PIN-placeholder"
+    private let password = "VPN-pw-placeholder"
 
     private func makePlan(host: String = "vpn.example.com",
                           arguments: [String]? = nil,
@@ -31,7 +33,7 @@ final class OpenConnectLaunchTests: XCTestCase {
                           pgidFile: String = "/tmp/turtlediver-test-elevation.pgid") -> OpenConnectLaunchPlan {
         OpenConnectCommand.launchPlan(
             openconnectPath: openconnectPath,
-            arguments: arguments ?? ["--force-dpd=10", "--user=451799", "--pid-file", "/tmp/pid", host],
+            arguments: arguments ?? ["--force-dpd=10", "--user=10001", "--pid-file", "/tmp/pid", host],
             adminPassword: admin,
             pin: pin,
             vpnPassword: password,
@@ -133,7 +135,7 @@ final class OpenConnectLaunchTests: XCTestCase {
 
         XCTAssertTrue(script.contains("sudo '/opt/homebrew/bin/openconnect'"))
         XCTAssertTrue(script.contains("'--force-dpd=10'"))
-        XCTAssertTrue(script.contains("'--user=451799'"))
+        XCTAssertTrue(script.contains("'--user=10001'"))
         // The host stays last, after the options, and the launch is the last
         // thing in the group's body.
         XCTAssertTrue(script.contains("'vpn.example.com'; } & job=$!"),
