@@ -106,6 +106,7 @@ let package = Package(
                 "System/ToolProcess.swift",
                 "System/ToolResolver.swift",
                 "System/UpdateArtifact.swift",
+                "System/UpdateBundle.swift",
                 "System/UpdateFeed.swift",
                 "System/VPNRuleGenerator.swift"
             ],

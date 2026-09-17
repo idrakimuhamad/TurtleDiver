@@ -27,6 +27,19 @@ public enum AppIdentity {
     /// exist under it too.
     public static let legacyBundleIdentifiers = ["com.idraki.turtle.vpn", "com.turtlediver"]
 
+    /// The team whose signature a downloaded update is allowed to come from.
+    ///
+    /// This is the updater's trust anchor, and the signature alone is what it
+    /// can be: the project holds no Developer ID certificate and notarizes
+    /// nothing, so Gatekeeper's own verdict (`spctl`) refuses every release this
+    /// app could ever publish. What *can* be insisted on is that the
+    /// application inside a downloaded image was signed by this team — the same
+    /// one that signs the running app — which `UpdateBundle.swift` does before
+    /// anything is written over it.
+    ///
+    /// Must match `DEVELOPMENT_TEAM` in `VPNConnect.xcodeproj`.
+    public static let updateTeamIdentifier = "KT7QU923S8"
+
     /// Keychain services to try, in order, when a read misses: the current name
     /// first, then the legacy ones, without duplicates.
     public static var keychainServiceChain: [String] {
