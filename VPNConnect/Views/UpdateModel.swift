@@ -114,8 +114,17 @@ public final class UpdateModel: ObservableObject {
 
     /// "Checked just now" / "Never" — a pure formatter, so it can be tested
     /// without waiting for time to pass.
+    ///
+    /// The instant is a parameter because the pane draws this line once and
+    /// then hands it a fresh date on every tick: a window left open all day
+    /// must not go on claiming the check was "just now".
+    public func checkedText(at date: Date) -> String {
+        SettingsDisplay.updateChecked(lastChecked, now: date)
+    }
+
+    /// The same line, as of the moment the model last read the clock.
     public var checkedText: String {
-        SettingsDisplay.updateChecked(lastChecked, now: now())
+        checkedText(at: now())
     }
 
     // MARK: Actions

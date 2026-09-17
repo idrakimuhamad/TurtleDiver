@@ -240,6 +240,26 @@ final class UpdateModelTests: XCTestCase {
         }
     }
 
+    // MARK: - How old the answer is
+
+    /// The age line speaks about the instant it is given, because the pane
+    /// hands it a `TimelineView` tick. An accessor that read the clock itself
+    /// would pass every test here and still leave the pane frozen.
+    func testTheAgeLineSpeaksAboutTheInstantItIsGiven() async {
+        let stub = StubFeed(body: feed(tag: "v2.0.0"))
+        let model = makeModel(feed: stub)
+
+        await model.check()
+        let checkedAt = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(model.lastChecked, checkedAt)
+
+        XCTAssertEqual(model.checkedText(at: checkedAt.addingTimeInterval(30)), "Checked just now")
+        XCTAssertEqual(model.checkedText(at: checkedAt.addingTimeInterval(2 * 60)), "Checked 2 min ago")
+        XCTAssertEqual(model.checkedText(at: checkedAt.addingTimeInterval(5 * 60)), "Checked 5 min ago")
+        XCTAssertEqual(model.checkedText(at: checkedAt.addingTimeInterval(3 * 3600)), "Checked 3 h ago")
+        XCTAssertEqual(model.checkedText(at: checkedAt.addingTimeInterval(50 * 3600)), "Checked 2 days ago")
+    }
+
     func testAFreshModelHasNotAskedAnythingYet() {
         let model = makeModel(feed: StubFeed())
 

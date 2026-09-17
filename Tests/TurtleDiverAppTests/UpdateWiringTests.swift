@@ -141,6 +141,23 @@ final class UpdateWiringTests: XCTestCase {
         XCTAssertFalse(code.contains("URLSession"), "the pane itself must not make requests")
     }
 
+    /// The age line is redrawn on a clock, and it is drawn from *that* clock's
+    /// date. A `TimelineView` whose closure ignored `context.date` would tick
+    /// happily and re-draw the same frozen wording, which is the bug this pins:
+    /// the pane said "Checked just now" while the check was eight minutes old.
+    func testTheAgeLineIsRedrawnOnAClockRatherThanFrozenWhenDrawn() throws {
+        let code = try strippedCode(at: pane)
+
+        let clock = try XCTUnwrap(code.range(of: "TimelineView(.periodic(from: .now, by: 30))"),
+                                  "the age line has to be redrawn on a clock")
+        let drawn = try XCTUnwrap(code.range(of: "caption: model.checkedText(at: context.date)"),
+                                  "the redraw must speak about the new date, not the one it was created with")
+        XCTAssertLessThan(clock.lowerBound, drawn.lowerBound,
+                          "the date must come from the clock that redraws the row")
+        XCTAssertFalse(code.contains("caption: model.checkedText,"),
+                       "no row may read the age from the frozen clock while the pane is open")
+    }
+
     /// Both the check and its failures are the connection log's business, and
     /// the connection log carries request lines — so neither file may write to
     /// it, or a version number ends up beside a tunnel's diagnostics.

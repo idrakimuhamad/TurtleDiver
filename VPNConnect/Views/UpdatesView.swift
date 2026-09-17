@@ -64,16 +64,22 @@ struct UpdatesView: View {
                               caption: "The check is off the main thread, so a slow reply never "
                                     + "holds up the window",
                               isOn: $settings.updatesCheckEnabled)
-            SettingsRow(label: "Last checked", caption: model.checkedText, isLast: true) {
-                HStack(spacing: 8) {
-                    if model.isChecking {
-                        ProgressView().controlSize(.small)
+            // Drawn once per render, so it is drawn again on a clock: a pane
+            // left open overnight must not still be saying "Checked just now".
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                SettingsRow(label: "Last checked",
+                            caption: model.checkedText(at: context.date),
+                            isLast: true) {
+                    HStack(spacing: 8) {
+                        if model.isChecking {
+                            ProgressView().controlSize(.small)
+                        }
+                        Button("Check Now") {
+                            Task { await model.check() }
+                        }
+                        .controlSize(.small)
+                        .disabled(model.isChecking)
                     }
-                    Button("Check Now") {
-                        Task { await model.check() }
-                    }
-                    .controlSize(.small)
-                    .disabled(model.isChecking)
                 }
             }
         }
