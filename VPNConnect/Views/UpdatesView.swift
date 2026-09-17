@@ -5,14 +5,22 @@ import SwiftUI
 import TurtleDiverSystem
 #endif
 
-/// Whether a newer TurtleDiver exists.
+/// Whether a newer TurtleDiver exists, and getting it.
 ///
-/// This is the *check*, and only the check: it asks, and it reports what it
-/// found. Nothing here downloads or installs, which is why the one row that acts
-/// is "Open Release Page" — a thing that does exactly what it says, today.
+/// The check asks and reports. The install is the user's second decision: it
+/// downloads the release over HTTPS, checks it against the published SHA-256 and
+/// against its own code signature, and only then touches the app on disk — or,
+/// where the app is not the user's to replace, hands the verified installer to the
+/// Finder. Nothing is ever downloaded on its own, and nothing is installed while
+/// the VPN is up, because installing means quitting and quitting ends the tunnel.
 struct UpdatesView: View {
     @ObservedObject private var settings = SettingsManager.shared
     @ObservedObject private var model = UpdateModel.shared
+    @ObservedObject private var vpn = VPNManager.shared
+
+    /// Set by the first click when a tunnel is up, so that the second click is a
+    /// second decision rather than a surprise.
+    @State private var confirmingDisconnect = false
 
     var body: some View {
         SettingsPane(title: "Updates",
@@ -94,7 +102,7 @@ struct UpdatesView: View {
         SettingsCard("Newer release", note: offerNote(offer)) {
             SettingsRow(label: "Version \(offer.version)",
                         caption: offer.withheldReason ?? "Tagged \(offer.tag)",
-                        isLast: true) {
+                        isLast: !offer.canInstall) {
                 HStack(spacing: 8) {
                     if let installer = offer.installer {
                         SettingsMonoValue(value: installer.name)
@@ -107,13 +115,110 @@ struct UpdatesView: View {
                     .help(offer.pageURL.map(\.absoluteString) ?? "This release has no page URL")
                 }
             }
+            // A release with nothing this app would install keeps the release-page
+            // row alone: there is no install to offer, so no install row appears.
+            if offer.canInstall {
+                SettingsRow(label: "Install",
+                            caption: installCaption(offer),
+                            isLast: true) {
+                    installControls
+                }
+            }
         }
     }
 
     private func offerNote(_ offer: UpdateOffer) -> String {
         offer.canInstall
-            ? "This pane checks; it does not download or install. Open the release page to get it."
+            ? "Anything downloaded is checked against the release's published SHA-256 and its "
+                + "code signature before a single file on disk is touched, and nothing is ever "
+                + "downloaded unless you ask for it."
             : "This release has nothing this app would install, so the release page is all there is."
+    }
+
+    // MARK: Installing
+
+    /// What the row says. The install's own sentence wins as soon as there is one;
+    /// until then this explains what the button is about to do.
+    private func installCaption(_ offer: UpdateOffer) -> String {
+        if let message = model.installMessage { return message }
+        if isConnected {
+            return "Installing quits the app, and quitting ends the VPN tunnel, so this "
+                + "disconnects first."
+        }
+        return "Downloads \(offer.installer?.name ?? "the release"), checks it, and replaces "
+            + "this app — or puts it in the Finder if this app cannot replace itself."
+    }
+
+    @ViewBuilder
+    private var installControls: some View {
+        HStack(spacing: 8) {
+            if let text = model.installStatusText {
+                SettingsPill(text: text, tone: installTone)
+            }
+            if model.isInstalling {
+                ProgressView().controlSize(.small)
+            }
+            if model.waitingVersion != nil {
+                // The app on disk is already the new one; this process is not.
+                Button("Restart Now") { restart() }
+                    .controlSize(.small)
+            } else if let image = model.revealedImage {
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([image])
+                }
+                .controlSize(.small)
+            } else {
+                installButton
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var installButton: some View {
+        if isConnected && !confirmingDisconnect {
+            Button("Disconnect and Update…") { confirmingDisconnect = true }
+                .controlSize(.small)
+                .disabled(model.isInstalling)
+        } else if isConnected {
+            Button("Disconnect and Install") { startInstall(disconnecting: true) }
+                .controlSize(.small)
+                .disabled(model.isInstalling)
+        } else {
+            Button("Download and Install") { startInstall(disconnecting: false) }
+                .controlSize(.small)
+                .disabled(model.isInstalling)
+        }
+    }
+
+    private var installTone: SettingsPill.Tone {
+        switch model.installStatusTone {
+        case .ok: return .ok
+        case .attention: return .warn
+        case .neutral: return .neutral
+        }
+    }
+
+    private var isConnected: Bool { vpn.status == .connected }
+
+    /// `disconnecting` is true only when the user asked for both, in two clicks.
+    ///
+    /// The tunnel state the model is given is the user's *intent*, not a status
+    /// read: `VPNManager.disconnect()` returns before the process is gone, so
+    /// reading the status here would race the disconnect this very click asked
+    /// for. A connected app that was *not* told to disconnect passes `true`, and
+    /// the model refuses — which is the promise the tests pin.
+    private func startInstall(disconnecting: Bool) {
+        if disconnecting { vpn.disconnect() }
+        confirmingDisconnect = false
+        Task { await model.install(isTunnelUp: !disconnecting) }
+    }
+
+    /// Quits into the build that was just installed. The waiter is started before
+    /// the quit, and if it cannot start the app stays put: leaving the user with
+    /// nothing open would be worse than leaving them on the old build.
+    private func restart() {
+        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+        delegate.relaunchAfterUpdate(at: URL(fileURLWithPath: Bundle.main.bundlePath))
     }
 
     private func open(_ url: URL?) {

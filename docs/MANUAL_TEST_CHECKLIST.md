@@ -208,10 +208,10 @@ disables nothing.
       `grep -i 'openconnect stoken vpn-slice' ~/Library/Logs/TurtleDiver/*.log`
       returns nothing.
 
-## 0e. Updates pane (2.1.0)
+## 0e. Updates pane — checking (2.1.0)
 
-The pane that answers "is there a newer TurtleDiver". It checks, and that is
-all it does: nothing here downloads and nothing installs.
+The pane that answers "is there a newer TurtleDiver". The first half of it
+checks; the install half is § 0f.
 
 - [ ] **Settings ▸ Updates** (⌘, → Application → Updates) shows **TurtleDiver**
       with the installed version, one line under it, and a status pill; then
@@ -242,14 +242,57 @@ all it does: nothing here downloads and nothing installs.
       **Open Release Page** opens the release in the default browser. A release
       with no disk image this app would install says so instead —
       `Version X is available, but not as a download`.
-- [ ] The pane offers nothing it cannot do: there is no **Download** and no
-      **Install** button anywhere in it (P1 checks; downloading is a later
-      release).
+- [ ] The pane offers nothing it cannot do: on a build that is up to date
+      there is no **Download** and no **Install** button anywhere in it, and on
+      one that is not, every button in the pane is one of the rows in § 0f.
 - [ ] A newer release also appears twice more, and both open this pane: a row
       under the status hero in the main window, and an **Update Available —
       X…** item in the menu bar menu. Neither is present while up to date.
 - [ ] The check sends no credentials and no machine facts: it is one GET to
       `api.github.com/repos/idrakimuhamad/TurtleDiver/releases/latest`.
+
+## 0f. Updates pane — installing (2.1.0)
+
+What a click does: fetch the release's disk image, verify it, and either replace
+this app with it or point the Finder at it. Every step below is a *newer*
+release than the installed build, which means a scratch build or a bumped
+`MARKETING_VERSION` — a build that *is* the newest release never shows an
+**Install** row at all.
+
+- [ ] On an offer, **Install** shows a caption naming what would be downloaded
+      and a **Download and Install** button. Pressing it replaces that row's
+      content with `DOWNLOADING`, and the window keeps painting: the download
+      runs off the main actor.
+- [ ] The download lands in `~/Library/Application Support/TurtleDiver/Updates/`
+      (`ls -ld` shows `drwx------`) and, on this app's development machine, no
+      disk image is left mounted afterwards (`mount | grep -c turtle` is `0` and
+      the 0700 mount point is gone).
+- [ ] A successful install replaces this app when it sits in a directory the
+      user can write, and then reads `INSTALLED` with **Restart Now**, and the
+      line `TurtleDiver X is installed. It takes effect when the app restarts.`
+      `codesign -dv /Applications/TurtleDiver.app` afterwards names the new
+      version's build.
+- [ ] Where the app cannot write itself in (an admin-owned `/Applications`),
+      it does not elevate: the pill reads `INSTALLER READY`, the line names the
+      `.dmg` in the Finder, and **Show in Finder** reveals the *verified* image.
+- [ ] **Restart Now** quits the app and reopens it on the new build, and the
+      quit is the ordinary one: `~/Library/Logs/TurtleDiver/lifecycle.log` gains
+      a `will-terminate-began`/`will-terminate-ended` pair for the old pid, and
+      the system proxy is restored on the way out (as in § 0b).
+- [ ] While the VPN is connected the pane does not offer to install: the button
+      reads **Disconnect and Update…**, and pressing it changes only the button,
+      to **Disconnect and Install**. No download starts on the first press
+      (nothing new under `~/Library/Application Support/TurtleDiver/Updates/`).
+- [ ] Pressing **Disconnect and Install** with the tunnel up disconnects first
+      and *then* downloads and installs; the tunnel does not come back up on the
+      new build by itself.
+- [ ] A release the app will not install is refused with one sentence and no
+      download: a bad checksum reads `The downloaded file is not the file
+      TurtleDiver X.sha256 describes`, and a different team's signature reads
+      `... and this app only installs releases signed by KT7QU923S8`.
+- [ ] A failed download or install leaves the check alone: **Installed** still
+      names the running version, **Newer release** still names the offer, and
+      the pill under it reads `NOT INSTALLED`.
 
 ## 1. Profile lifecycle
 

@@ -39,24 +39,47 @@ public final class UpdateModel: ObservableObject {
         case neutral
     }
 
+    /// Where an install has got to. Separate from `Phase`, because the check and
+    /// the install are two different questions and the pane has to be able to
+    /// show both answers at once (a newer release may be known *and* installing).
+    public enum InstallPhase: Equatable {
+        case idle
+        case downloading
+        case installing
+        /// The app on disk is the new one; this process is still the old one.
+        case installed(ReleaseVersion)
+        /// Verified, but the app could not replace itself where it lives.
+        case revealed(version: ReleaseVersion, imageURL: URL)
+        /// A deliberate no, with the reason.
+        case refused(String)
+        case failed(String)
+    }
+
     public static let shared = UpdateModel()
 
     @Published public private(set) var phase: Phase = .idle
     /// When a check last *succeeded*. A failed check deliberately leaves this
     /// alone, so "Last checked" never reads as a success beside a failure.
     @Published public private(set) var lastChecked: Date?
+    @Published public private(set) var installPhase: InstallPhase = .idle
 
     /// The version this build reports about itself, from the bundle.
     public let runningVersion: ReleaseVersion?
 
     private let checker: UpdateChecker
+    private let downloader: UpdateDownloader
+    private let installer: any UpdateInstalling
     private let now: () -> Date
 
     public init(checker: UpdateChecker = UpdateChecker(),
+                downloader: UpdateDownloader = UpdateDownloader(),
+                installer: any UpdateInstalling = UpdateInstaller(),
                 runningVersion: ReleaseVersion? = UpdateFeed.runningVersion(
                     fromShortVersionString: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String),
                 now: @escaping () -> Date = Date.init) {
         self.checker = checker
+        self.downloader = downloader
+        self.installer = installer
         self.runningVersion = runningVersion
         self.now = now
     }
@@ -127,6 +150,62 @@ public final class UpdateModel: ObservableObject {
         checkedText(at: now())
     }
 
+    // MARK: The install, as the pane sees it
+
+    /// True while the button must be busy and unpressable.
+    public var isInstalling: Bool {
+        installPhase == .downloading || installPhase == .installing
+    }
+
+    /// The version waiting for a relaunch, when the app on disk is already new.
+    public var waitingVersion: ReleaseVersion? {
+        if case .installed(let version) = installPhase { return version }
+        return nil
+    }
+
+    /// The verified installer to point out, when the app could not install it.
+    public var revealedImage: URL? {
+        if case .revealed(_, let url) = installPhase { return url }
+        return nil
+    }
+
+    /// The pill beside the buttons, while something is happening or after it.
+    public var installStatusText: String? {
+        switch installPhase {
+        case .idle: return nil
+        case .downloading: return "Downloading"
+        case .installing: return "Installing"
+        case .installed: return "Ready to restart"
+        case .revealed: return "Installer ready"
+        case .refused, .failed: return "Not installed"
+        }
+    }
+
+    public var installStatusTone: StatusTone {
+        switch installPhase {
+        case .installed, .revealed: return .ok
+        case .refused, .failed: return .attention
+        case .idle, .downloading, .installing: return .neutral
+        }
+    }
+
+    /// One sentence about the install, or `nil` when there is nothing to say.
+    public var installMessage: String? {
+        switch installPhase {
+        case .idle, .downloading, .installing:
+            return nil
+        case .installed(let version):
+            return "TurtleDiver \(version) is installed. It takes effect when the app restarts."
+        case .revealed(_, let url):
+            return "The verified installer \(url.lastPathComponent) is in the Finder: "
+                + "this app cannot replace itself where it lives."
+        case .refused(let reason):
+            return reason
+        case .failed(let reason):
+            return reason
+        }
+    }
+
     // MARK: Actions
 
     /// The launch check. It takes the setting rather than reading it: that keeps
@@ -174,5 +253,84 @@ public final class UpdateModel: ObservableObject {
         case .failure(let error):
             phase = .failed(error.errorDescription ?? "Could not check for updates")
         }
+    }
+
+    /// Downloads a verified release and installs it, or explains why it will not.
+    ///
+    /// The tunnel state is a parameter rather than a read of `VPNManager`: this
+    /// type is unit-tested and stays out of the connection's business. Installing
+    /// means quitting, and quitting drops the tunnel, so a connected app refuses
+    /// — the caller that *did* ask for a disconnect passes `false`, because that
+    /// click was the instruction to end the tunnel.
+    public func install(isTunnelUp: Bool) async {
+        guard !isInstalling else { return }
+        guard let running = runningVersion else {
+            installPhase = .failed("This build does not say what version it is, "
+                                   + "so there is nothing to install over it")
+            return
+        }
+        guard let offer else {
+            installPhase = .refused("There is no release to install")
+            return
+        }
+        guard offer.canInstall else {
+            installPhase = .refused(offer.withheldReason
+                                    ?? "That release has no download this app can verify")
+            return
+        }
+        guard !isTunnelUp else {
+            installPhase = .refused("Disconnect the VPN first: installing quits the app, "
+                                    + "and quitting ends the tunnel")
+            return
+        }
+
+        installPhase = .downloading
+        let downloader = self.downloader
+        let download = await Task.detached(priority: .utility) { () -> Result<DownloadedUpdate, Error> in
+            do {
+                return .success(try downloader.fetch(offer))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        let downloaded: DownloadedUpdate
+        switch download {
+        case .success(let file):
+            downloaded = file
+        case .failure(let error):
+            installPhase = .failed(Self.sentence(for: error))
+            return
+        }
+
+        installPhase = .installing
+        let installer = self.installer
+        let install = await Task.detached(priority: .utility) { () -> Result<InstallOutcome, Error> in
+            do {
+                return .success(try installer.install(downloaded, running: running))
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        switch install {
+        case .success(.replaced(let version)):
+            installPhase = .installed(version)
+        case .success(.revealed(let version, let imageURL)):
+            installPhase = .revealed(version: version, imageURL: imageURL)
+        case .failure(let error):
+            installPhase = .failed(Self.sentence(for: error))
+        }
+    }
+
+    /// Every refusal in this feature reaches the interface as a whole sentence:
+    /// the artifact and bundle errors carry their own, and a surprise is at
+    /// least described rather than swallowed. A bridged `NSError` is not a
+    /// `LocalizedError`, which is why the last line is not redundant.
+    static func sentence(for error: Error) -> String {
+        if let described = (error as? LocalizedError)?.errorDescription, !described.isEmpty {
+            return described
+        }
+        return error.localizedDescription
     }
 }

@@ -124,21 +124,104 @@ final class UpdateWiringTests: XCTestCase {
 
     // MARK: - What the pane promises
 
-    /// This pane checks. It cannot download and it cannot install, so it must not
-    /// offer to — the row that acts opens the release page, which is a thing that
-    /// works today.
-    func testThePaneChecksAndDoesNotPretendToInstall() throws {
+    /// The pane now downloads and installs, and these are the promises that come
+    /// with that: an install is offered only where the release carries something
+    /// this app would verify, the pane itself still makes no request, and the row
+    /// that always works is still there for a release it will not install.
+    func testThePaneOnlyOffersAnInstallForAReleaseItWouldVerify() throws {
         let code = try strippedCode(at: pane)
 
         XCTAssertNotNil(code.range(of: "Button(\"Open Release Page\")"),
-                        "the acting row must be the one that works")
-        XCTAssertFalse(code.contains("Button(\"Download"),
-                       "there is no download path yet, so there must be no download button")
-        XCTAssertFalse(code.contains("Button(\"Install"),
-                       "there is no install path yet, so there must be no install button")
-        XCTAssertFalse(code.contains("installer.url"),
-                       "the pane must not fetch the release's files")
+                        "the acting row that always works must stay")
+        XCTAssertNotNil(code.range(of: "Button(\"Download and Install\")"))
+        XCTAssertNotNil(code.range(of: "if offer.canInstall {"),
+                        "the install row appears only where there is something to install")
+        XCTAssertNotNil(code.range(of: "isLast: !offer.canInstall"),
+                        "and a release without one leaves the release-page row as the last row")
+
+        // The pane drives the model; it must not grow its own network or its own
+        // file handling.
         XCTAssertFalse(code.contains("URLSession"), "the pane itself must not make requests")
+        XCTAssertFalse(code.contains("FileDigest"), "and it must not hash anything itself")
+        XCTAssertFalse(code.contains("hdiutil"), "nor mount anything itself")
+    }
+
+    /// Installing means quitting, and quitting ends the tunnel — so a connected
+    /// app asks twice. This pins both halves: the first click only arms the
+    /// second, and the second is the one that disconnects and installs.
+    func testTheConnectedAppAsksTwiceBeforeItDisconnectsAndInstalls() throws {
+        let code = try strippedCode(at: pane)
+
+        let first = try XCTUnwrap(code.range(of: "Button(\"Disconnect and Update…\")"),
+                                  "the first click has to say what is coming")
+        XCTAssertNotNil(code.range(of: "confirmingDisconnect = true"),
+                        "the first click only arms the second")
+        let second = try XCTUnwrap(code.range(of: "Button(\"Disconnect and Install\")"),
+                                   "the second click is the one that acts")
+        XCTAssertLessThan(first.lowerBound, second.lowerBound)
+
+        let start = try body(of: "private func startInstall", in: code)
+        XCTAssertLessThan(start.count, 2_000)
+        let disconnect = try XCTUnwrap(start.range(of: "vpn.disconnect()"))
+        let install = try XCTUnwrap(start.range(of: "model.install(isTunnelUp:"))
+        XCTAssertLessThan(disconnect.lowerBound, install.lowerBound,
+                          "the tunnel goes down before the install is asked for")
+
+        // And the button that downloads without disconnecting is only for an app
+        // that is not connected at all.
+        let button = try body(of: "private var installButton", in: code)
+        XCTAssertLessThan(button.count, 2_000)
+        XCTAssertNotNil(button.range(of: "if isConnected && !confirmingDisconnect {"),
+                        "a connected app is offered the first click, never the install")
+        XCTAssertNotNil(button.range(of: "} else if isConnected {"),
+                        "and only the arming click reaches it")
+        XCTAssertNotNil(code.range(of: "vpn.status == .connected"),
+                        "and that is read from the connection, not remembered")
+    }
+
+    /// The refusal has to happen before anything is downloaded, and the work
+    /// itself has to run off the main actor — a download is minutes of a blocked
+    /// window if it runs on the thread that paints it.
+    func testTheInstallIsRefusedBeforeItDownloadsAndRunsOffTheMainActor() throws {
+        let code = try strippedCode(at: model)
+        let install = try body(of: "public func install(isTunnelUp: Bool) async", in: code)
+        XCTAssertLessThan(install.count, 5_000, "the slice must be the method, not the rest of the file")
+
+        let refusal = try XCTUnwrap(install.range(of: "guard !isTunnelUp else {"),
+                                    "a connected app must refuse")
+        let download = try XCTUnwrap(install.range(of: "downloader.fetch(offer)"),
+                                     "the download is the thing being ordered")
+        XCTAssertLessThan(refusal.lowerBound, download.lowerBound,
+                          "the refusal must come first: a refused install downloads nothing")
+
+        let firstDetached = try XCTUnwrap(install.range(of: "Task.detached"))
+        XCTAssertLessThan(firstDetached.lowerBound, download.lowerBound,
+                          "the download must not run on the main actor")
+        let installerCall = try XCTUnwrap(install.range(of: "installer.install(downloaded, running: running)"))
+        let lastDetached = try XCTUnwrap(install.range(of: "Task.detached", options: .backwards))
+        XCTAssertLessThan(lastDetached.lowerBound, installerCall.lowerBound,
+                          "and neither must the install")
+    }
+
+    /// Restarting into the new build goes through the ordinary quit, so the
+    /// teardown the app already guarantees — proxy, engine, tunnel — is the one
+    /// that runs. A second, faster quit path is how an update leaves a system
+    /// proxy pointing at a dead engine.
+    func testTheRelaunchUsesTheOrdinaryQuitAndArrangesItFirst() throws {
+        let code = try strippedCode(at: appDelegate)
+        let relaunch = try body(of: "func relaunchAfterUpdate", in: code)
+        XCTAssertLessThan(relaunch.count, 2_000)
+
+        let waiter = try XCTUnwrap(relaunch.range(of: "UpdateRelaunch().relaunch("))
+        let quit = try XCTUnwrap(relaunch.range(of: "NSApp.terminate(nil)"))
+        XCTAssertLessThan(waiter.lowerBound, quit.lowerBound,
+                          "nothing may quit before something is arranged to reopen it")
+        // One quit path, and it is the one that already tears things down.
+        XCTAssertFalse(relaunch.contains("cleanupOnTermination"),
+                       "the teardown belongs to the quit, not to the update")
+        XCTAssertFalse(relaunch.contains("shutdown()"))
+
+        XCTAssertNotNil(code.range(of: "NSApp.delegate as? AppDelegate") , "the pane reaches the delegate through AppKit")
     }
 
     /// The age line is redrawn on a clock, and it is drawn from *that* clock's
@@ -158,9 +241,9 @@ final class UpdateWiringTests: XCTestCase {
                        "no row may read the age from the frozen clock while the pane is open")
     }
 
-    /// Both the check and its failures are the connection log's business, and
-    /// the connection log carries request lines — so neither file may write to
-    /// it, or a version number ends up beside a tunnel's diagnostics.
+    /// Both the check, its failures and an install are the connection log's
+    /// business, and the connection log carries request lines — so neither file
+    /// may write to it, or a version number ends up beside a tunnel's diagnostics.
     func testTheUpdatePathNeverWritesToTheConnectionLog() throws {
         for path in [model, pane] {
             let code = try strippedCode(at: path)

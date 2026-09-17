@@ -295,6 +295,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         openSettingsRoute(.updates)
     }
 
+    /// Quits into the build that was just installed.
+    ///
+    /// The waiter is started *first*, and if it cannot start this returns `false`
+    /// without quitting: an app that quits with nothing arranged to reopen it
+    /// leaves the user staring at an empty desktop, which is worse than leaving
+    /// them on the build they already have. The quit itself is the ordinary one,
+    /// so the system proxy and the engine are torn down exactly as on any other
+    /// quit — the teardown does not get a second, faster path.
+    @discardableResult
+    func relaunchAfterUpdate(at appURL: URL) -> Bool {
+        do {
+            try UpdateRelaunch().relaunch(pid: ProcessInfo.processInfo.processIdentifier,
+                                          appURL: appURL)
+        } catch {
+            StartupLog.write("Could not arrange the relaunch: \(error.localizedDescription)")
+            return false
+        }
+        NSApp.terminate(nil)
+        return true
+    }
+
     /// Opens Settings, optionally deep-linking to a route (menu bar actions;
     /// nil = root menu).
     func openSettingsRoute(_ route: SettingsRoute?) {

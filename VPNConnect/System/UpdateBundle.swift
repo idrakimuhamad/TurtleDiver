@@ -273,7 +273,17 @@ public enum InstallOutcome: Equatable, Sendable {
 /// Anywhere else — the system `/Applications`, an administrator's directory —
 /// the installer is handed to the Finder instead, because this app never
 /// elevates on its own initiative.
-public struct UpdateInstaller: Sendable {
+/// Swapping the app for a downloaded one.
+///
+/// A seam rather than a direct call: the model owns the *decision* to install,
+/// and a test asserting that decision — that it is refused while the tunnel is
+/// up, that a download failure never reaches the installer — should not have to
+/// build a disk image first.
+public protocol UpdateInstalling: Sendable {
+    func install(_ downloaded: DownloadedUpdate, running: ReleaseVersion) throws -> InstallOutcome
+}
+
+public struct UpdateInstaller: Sendable, UpdateInstalling {
     public static let ditto = URL(fileURLWithPath: "/usr/bin/ditto")
     /// Copying a 6 MB app on the same volume is a moment's work.
     public static let copyTimeout: TimeInterval = 120

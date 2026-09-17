@@ -108,6 +108,7 @@ let package = Package(
                 "System/UpdateArtifact.swift",
                 "System/UpdateBundle.swift",
                 "System/UpdateFeed.swift",
+                "System/UpdateRelaunch.swift",
                 "System/VPNRuleGenerator.swift"
             ],
             sources: [

@@ -41,6 +41,7 @@
 		7C0FFEEA000000000000000A /* UpdateFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001A /* UpdateFeed.swift */; };
 		7C0FFEEA000000000000000D /* UpdateArtifact.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001D /* UpdateArtifact.swift */; };
 		7C0FFEEA000000000000000E /* UpdateBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001E /* UpdateBundle.swift */; };
+		7C0FFEEA000000000000000F /* UpdateRelaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001F /* UpdateRelaunch.swift */; };
 		7C0FFEEA000000000000000B /* UpdateModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001B /* UpdateModel.swift */; };
 		7C0FFEEA000000000000000C /* UpdatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001C /* UpdatesView.swift */; };
 		7C0FFEE80000000000000001 /* RuleSet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE80000000000000011 /* RuleSet.swift */; };
@@ -97,6 +98,7 @@
 		7C0FFEEA000000000000001A /* UpdateFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateFeed.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001D /* UpdateArtifact.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateArtifact.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001E /* UpdateBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateBundle.swift; sourceTree = "<group>"; };
+		7C0FFEEA000000000000001F /* UpdateRelaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateRelaunch.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001B /* UpdateModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateModel.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001C /* UpdatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdatesView.swift; sourceTree = "<group>"; };
 		7C0FFEE80000000000000011 /* RuleSet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleSet.swift; sourceTree = "<group>"; };
@@ -251,6 +253,7 @@
 				7C0FFEEA000000000000001A /* UpdateFeed.swift */,
 				7C0FFEEA000000000000001D /* UpdateArtifact.swift */,
 				7C0FFEEA000000000000001E /* UpdateBundle.swift */,
+				7C0FFEEA000000000000001F /* UpdateRelaunch.swift */,
 				7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */,
 			);
 			path = System;
@@ -393,6 +396,7 @@
 				7C0FFEEA000000000000000A /* UpdateFeed.swift in Sources */,
 				7C0FFEEA000000000000000D /* UpdateArtifact.swift in Sources */,
 				7C0FFEEA000000000000000E /* UpdateBundle.swift in Sources */,
+				7C0FFEEA000000000000000F /* UpdateRelaunch.swift in Sources */,
 				7C0FFEEA000000000000000B /* UpdateModel.swift in Sources */,
 				7C0FFEEA000000000000000C /* UpdatesView.swift in Sources */,
 				7C0FFEE30000000000000001 /* SystemProxyManager.swift in Sources */,
