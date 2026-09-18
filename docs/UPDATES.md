@@ -152,7 +152,9 @@ two-click path, so the bare button — the one the disconnected case exists for 
 refused itself. Pressing it, live, with no `openconnect` running at all, is how
 that was found: the pane answered "Disconnect the VPN first".
 `UpdateWiringTests.testTheBareInstallReportsThePanesOwnKnowledgeOfTheTunnel`
-fails if the reported state goes back to a constant.
+fails if the reported state goes back to a constant. It ships in **2.1.1**,
+together with the resolution change below it — 2.1.0's own gate passed the
+user's *intent* (`!disconnecting`) rather than the connection's state.
 
 ## The first install, end to end
 
@@ -198,9 +200,9 @@ failure this pane cannot report, and it is worth knowing what it looks like.
 
 `docs/MANUAL_TEST_CHECKLIST.md` § 0e walks the check and § 0f the install. The
 short version: a build older than the newest release is the only way to see an
-offer at all, and `MARKETING_VERSION` is what the app compares — so a `2.1.0`
-build can only ever read `UP TO DATE` while the newest release is `v2.1.0`. To
-see the offer itself, build a copy that claims an older version (the
+offer at all, and `MARKETING_VERSION` is what the app compares — so a build reads
+`UP TO DATE` exactly while its own `MARKETING_VERSION` is the newest release's
+version. To see the offer itself, build a copy that claims an older version (the
 scratch-build recipe in § 0f); the feed, the gates and the install have also
 been exercised against the real published release.
 
