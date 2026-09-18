@@ -73,18 +73,26 @@ and `/Applications`.
 
 ## Installing
 
-Where the app sits in a directory it can write, it replaces itself: the disk
-image is mounted read-only at a private 0700 mount point, the app inside is
-copied out with `ditto` — `FileManager.copyItem` can drop extended attributes
-and resource forks, and a signature covers those, so the copy would fail its own
-verification — the **copy** is verified again where it now sits, and only then
-is it swapped in with `replaceItemAt`.
+Where the directory the app sits in is writable by this user, it replaces
+itself: the disk image is mounted read-only at a private 0700 mount point, the
+app inside is copied out with `ditto` — `FileManager.copyItem` can drop extended
+attributes and resource forks, and a signature covers those, so the copy would
+fail its own verification — the **copy** is verified again where it now sits,
+and only then is it swapped in with `replaceItemAt`.
 
-Where the app cannot write (`/Applications` belongs to an administrator on a
-Mac this app was not installed on as the owner), it does **not** elevate. It
-points the Finder at the verified image and the user finishes the job. A
-self-updater that quietly asks for an administrator password to replace itself
-is a self-updater that can be talked into replacing anything.
+Where that directory is not writable, it does **not** elevate. It points the
+Finder at the verified image and the user finishes the job. A self-updater that
+quietly asks for an administrator password to replace itself is a self-updater
+that can be talked into replacing anything.
+
+The test is the **parent directory**, not the bundle, and that distinction is
+worth being exact about because the two disagree in the common case: a bundle
+installed by the `.pkg` is owned by `root`, but it sits in `/Applications`,
+which on a normal Mac is `root:admin` `drwxrwxr-x` and therefore writable by an
+administrator — so that copy still replaces itself. What the check is really
+asking is "can this user rename an entry in this directory", which is also what
+makes the swap itself work. The reveal path is for a copy somewhere it cannot
+write at all (another user's Applications folder, a read-only volume).
 
 On either path the mount is detached (twice, `-force` on the second try) and the
 mount point removed, including when a gate refuses.

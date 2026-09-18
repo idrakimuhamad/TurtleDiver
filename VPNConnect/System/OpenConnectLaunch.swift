@@ -348,9 +348,13 @@ public enum OpenConnectPidFile {
 
     /// Creates `run/` with `0700` before openconnect is launched.
     ///
-    /// openconnect runs as root through sudo, so it can write the file anywhere
-    /// — but the directory has to exist first, and the modes are reapplied in
-    /// case an earlier version created it differently.
+    /// The directory has to exist before the launch for two reasons: this app
+    /// records the pid of a launched or adopted tunnel here, and `--pid-file`
+    /// points into it. openconnect is *not* the writer — it only writes that
+    /// file when it backgrounds ("Save the pid to PIDFILE when backgrounding")
+    /// and the launch never passes `--background`; `ExistingConnectionWiringTests`
+    /// pins that half. The modes are reapplied in case an earlier version
+    /// created the directory differently.
     @discardableResult
     public static func prepareDirectory(for pidFile: URL = OpenConnectPidFile.path) -> Bool {
         let directory = pidFile.deletingLastPathComponent()
