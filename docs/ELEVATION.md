@@ -51,28 +51,80 @@ orphan can.
 ### 1. Decide before launching
 
 `ElevationProbe.live` reads two **world-readable** files — `/etc/pam.d/sudo_local`
-and `/etc/pam.d/sudo` — and asks `sudo -n -v` (bounded, 3 s) whether the
-timestamp is already warm. From those two facts it picks one of three
-strategies:
+and `/etc/pam.d/sudo` — and asks `sudo` nothing at all (the reason is §1a). From
+what the PAM stack says it picks one of three strategies:
 
 | Strategy | When | Refresh step | Who supplies the password |
 |---|---|---|---|
-| `.warmTimestamp` | timestamp already valid | `sudo -n -v`; a failure writes a marker and exits | nobody — `-n` cannot prompt |
-| `.systemPrompt` | `pam_tid` answers `auth` | `sudo -v </dev/null` | the **system's own dialog**, which the user sees and answers |
-| `.storedPassword` | nothing else can answer | `printf '%s\n' "$oc_admin" \| sudo -S -v` | the stored password, down the pipe |
+| `.systemPrompt` | `pam_tid` answers `auth` | `sudo -n -v`; if that is refused, `sudo -v </dev/null` | the **system's own dialog**, which the user sees and answers |
+| `.storedPassword` | nothing else can answer | `sudo -n -v`; if that is refused, `printf '%s\n' "$oc_admin" \| sudo -S -v` | the stored password, down the pipe |
+| `.neverPrompt` | never chosen by a connect | `sudo -n -v`; a failure writes a marker and exits | nobody — `-n` cannot prompt |
 
 Only `.storedPassword` writes the administrator password anywhere. The app also
 only *requires* a stored password in that mode — with Touch ID answering, the
 connect no longer asks for a credential it would not use.
 
+`.neverPrompt` is not a connect strategy and `resolve(mode:)` cannot return it.
+It is the **silent first attempt** of the elevated-kill path (§6), where the
+whole point is that nothing may be asked, and it is why the case still exists
+after the fix below removed its last use in a connect.
+
 `.systemPrompt` is announced up front, in the log, before the launch:
 
-    Elevation: Touch ID for sudo is enabled (pam_tid) and sudo's timestamp is cold.
-    Elevation: macOS will ask for Touch ID or your administrator password; the connect waits up to 90s for that dialog.
+    Elevation: Touch ID for sudo is enabled (pam_tid).
+    Elevation: the refresh checks sudo non-interactively first; if that is refused, macOS asks for Touch ID or your administrator password, and the connect waits up to 90s for that dialog.
 
 The launch itself never gets `-S`, in any mode. Its stdin carries openconnect's
 PIN and account password, and an `-S` that decided it needed a password would
 consume the PIN as its own and hand openconnect half a credential.
+
+### 1a. The timestamp the app cannot measure
+
+The first version of this decision had a third input: the app ran `sudo -n -v`
+itself, bounded at 3 s, and on a warm answer chose `.neverPrompt` — skipping the
+refresh entirely, since the timestamp was, by that measurement, already valid.
+
+It was wrong, and it failed in the worst way: silently, on a connect the app had
+just measured as warm.
+
+`sudo` keys its credential timestamp to the **parent process** when there is no
+terminal. From `man sudoers` on this machine (sudo 1.9.17p2):
+
+> `timestamp_type` … If no terminal is present, the behavior is the same as
+> `ppid`. … Commands run via sudo with a different parent process ID … will be
+> authenticated separately.
+
+The app's probe is a child of the app. The connect's `sudo` is a child of the
+wrapper shell the plan runs in. Those are different parents, so they are
+different timestamp records, and the app's answer never applied to the plan's
+`sudo`. On a Mac with `pam_tid` the plan then found a cold timestamp, exited with
+its marker, and the connect ended as `Failed - Elevation Expired` — a message
+about a timestamp the app had *just* verified as warm.
+
+Measured live, same machine, same tunnel, minutes apart, with only the strategy
+differing:
+
+| Connect | Plan | Outcome |
+|---|---|---|
+| 04:38:49Z | `.warmTimestamp` (the probe said warm) | `Failed - Elevation Expired` |
+| 04:55:32Z | `.systemPrompt` | connected |
+
+The fix is to delete the capability rather than the case: `SudoProbe`,
+`ElevationSnapshot.timestampWarm` and the `timestampWarm:` parameter of
+`resolve` are gone, and warmth is only ever probed **inside the plan**, where the
+answer is used.
+
+Two consequences worth knowing:
+
+- The stale `/etc/hosts` cleanup used to run from the app, before the plan, with
+the same probe-derived strategy — so on a `pam_tid` machine it always failed,
+and the connection log carried `Failed to clean /etc/hosts: sudo: a password is
+required` on *successful* connects. It is now a step of the plan itself, which
+inherits the refresh above it and therefore runs `sudo` in the context that just
+authenticated. There is one cleanup path, and it is that one; the app-side
+`cleanupVpnSliceHosts()` and the standalone `hostsCleanupPlan` are gone.
+- The `/etc/hosts` bound in §5's table went with it. The plan's own `sudo -n -v`
+is bounded by the connect's 90 s, like every other step of the plan.
 
 ### 2. Fail loud, and name the cause
 
@@ -129,14 +181,13 @@ reported rather than pretended away.
 | Wait | Bound | On expiry |
 |---|---|---|
 | connect stays `.connecting` | 90 s | terminate, classify, report |
-| `sudo -n -v` probe | 3 s | treat the timestamp as cold |
+| every step of the plan (`sudo -n -v`, the cleanup, the launch) | the 90 s connect bound | terminate, classify, report |
 | the recorded group after teardown | 0.5 s | escalate to SIGKILL |
 | `ps -o comm= -g` in the sweep | 3 s | treat the group as unknown |
 | `ps -o etime=` reading an adopted tunnel's start time | 3 s | no duration: it counts from the adoption |
 | `networksetup` (system proxy) | 60 s + 2 s grace | terminate, then SIGKILL, then `authorizationTimedOut` |
 | `ps -o user=` reading a pid's owner | 3 s | the owner is unknown, so the user-level path is tried |
 | elevated `sudo … kill` | 20 s | terminate the `sudo`, then SIGKILL it, and report the failure |
-| `/etc/hosts` cleanup on quit | 5 s | report and let the next connect retry |
 
 That last `ps` read is not an elevation wait; it is here because this table is
 where the bounds live. It runs on the main thread while a tunnel is being
@@ -186,11 +237,12 @@ through the *verifying* terminator, so every call site is fixed at once:
   the owning user; a different name means `EPERM` is certain, so the app goes
   straight to the elevated form instead of waiting three seconds to learn
   nothing.
-- **`sudo -n` is always tried first.** It never prompts, fails in milliseconds
-  when the timestamp is cold, and a just-connected tunnel has a warm one. The
-  stronger forms are only *sent* while the process is still there: `send` stops
-  at the first plan that works, so a password or a dialog is never spent on a
-  process that is already gone.
+- **`sudo -n` is always tried first.** It never prompts and fails in
+  milliseconds when the timestamp is cold — which, on a `pam_tid` machine, is the
+  normal case for a `sudo` whose parent is the app (see §1a). The stronger forms
+  are only *sent* while the process is still there: `send` stops at the first
+  plan that works, so a password or a dialog is never spent on a process that is
+  already gone.
 - **A group is only signalled as root while `ps -o pid= -g <pgid>` still lists
   the verified `openconnect`.** Pids and groups are recycled, and
   `run/elevation.pgid` may hold a group from a previous run.
@@ -273,6 +325,23 @@ The live proof is in the history row rather than in the code: with
 `openconnect (PID: …) ended with elevation`, `network restored`, then
 `reaping stale process group …` for the now-empty group.
 
+### 9. A failed connect is not a dead end
+
+The state a failure leaves behind has to be a state a retry can start from.
+
+`MainView` labels its action button **Reconnect** in the `.error` state, and
+`AppDelegate`'s menu bar item offered the same — but `connect()` opened with
+`guard case .disconnected = status else { return }`. From `.error` that guard
+returned **silently**: no log line, no history row, nothing on screen. One failed
+connect therefore wedged the app until it was quit and relaunched, and the button
+that promised otherwise did nothing at all.
+
+The fix is a single derived rule — `VPNStatus.isConnectable`, true for
+`.disconnected` and `.error` — used by `connect()`'s guard and by the menu bar
+item, with the window's tappable branch asserting the same set. `.error` is not a
+terminal state; a UI affordance backed by a guard mismatch is a defect, not a UX
+quirk.
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:
@@ -348,7 +417,9 @@ expire:
     # is Touch ID answering sudo? (read-only)
     grep -n pam_tid /etc/pam.d/sudo_local
 
-    # is sudo's timestamp warm? (exit 0 = yes, 1 = no)
+    # is sudo's timestamp warm *for this shell*? (exit 0 = yes, 1 = no)
+    # Keyed to the parent process, so this answer does not transfer to another
+    # process's sudo — see §1a. The app does not use this as a decision input.
     sudo -n -v; echo $?
 
     # what the last launch recorded

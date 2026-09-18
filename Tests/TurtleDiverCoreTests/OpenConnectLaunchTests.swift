@@ -92,14 +92,13 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(script.contains("|| exit 1"))
     }
 
-    func testTheCleanupPlanCarriesOnlyTheAdminPassword() {
-        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: admin)
-
-        XCTAssertEqual(String(decoding: plan.standardInput, as: UTF8.self), admin + "\n")
-        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 1)
-        XCTAssertFalse(plan.script.contains(admin))
-        XCTAssertFalse(plan.script.contains("openconnect"))
-        XCTAssertTrue(plan.script.contains("vpn-slice-"))
+    func testTheCleanupStepIsPartOfTheLaunchPlan() {
+        // Stale `/etc/hosts` entries are cleaned by the plan's own step, in the
+        // `sudo` context that just authenticated. There is no standalone cleanup
+        // plan any more: the only thing that ever called one ran `sudo` as a
+        // child of the app, whose timestamp is keyed to a different parent — so
+        // it could only ever report "a password is required".
+        XCTAssertTrue(makePlan().script.contains("sed -i '' '/# vpn-slice-/d' /etc/hosts"))
     }
 
     func testTheVariablesAreNotExported() {
@@ -227,7 +226,7 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(stored.contains("| sudo -S -v"))
         XCTAssertTrue(stored.contains("| sudo -S sed"))
 
-        for elevation in [ElevationStrategy.systemPrompt, .warmTimestamp] {
+        for elevation in [ElevationStrategy.systemPrompt, .neverPrompt] {
             let script = makePlan(elevation: elevation).script
             XCTAssertFalse(script.contains("sudo -S"), "\(elevation) can still block on a dialog")
             XCTAssertFalse(script.contains(OpenConnectCommand.adminVariable),
@@ -251,10 +250,10 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertFalse(lines.contains(admin))
     }
 
-    /// The no-dialog case for a quit or a headless moment: never ask, and say so
-    /// when the timestamp is cold.
-    func testTheWarmTimestampModeRefusesToAskAndReportsWhy() {
-        let plan = makePlan(elevation: .warmTimestamp)
+    /// The no-dialog case for a headless moment: never ask, and say so when the
+    /// timestamp is cold.
+    func testTheNeverPromptModeRefusesToAskAndReportsWhy() {
+        let plan = makePlan(elevation: .neverPrompt)
 
         XCTAssertTrue(plan.script.contains("sudo -n '/opt/homebrew/bin/openconnect'"))
         XCTAssertFalse(plan.script.contains("sudo -S"))
@@ -266,27 +265,12 @@ final class OpenConnectLaunchTests: XCTestCase {
 
     /// The invariant the plain `sudo` launch relies on: by the time openconnect
     /// runs, a cold timestamp has already ended the script.
-    func testTheWarmTimestampIsCheckedAgainImmediatelyBeforeTheLaunch() throws {
-        let script = makePlan(elevation: .warmTimestamp).script
+    func testTheTimestampIsCheckedAgainImmediatelyBeforeANoPromptLaunch() throws {
+        let script = makePlan(elevation: .neverPrompt).script
         let stillWarm = try XCTUnwrap(script.range(of: "sudo -n -v >/dev/null 2>&1 || {"))
         let launch = try XCTUnwrap(script.range(of: "sudo -n '/opt/homebrew/bin/openconnect'"))
 
         XCTAssertTrue(stillWarm.lowerBound < launch.lowerBound)
-    }
-
-    /// Quitting must never raise a dialog: nobody can answer one, and the app is
-    /// on its way out.
-    func testTheCleanupPlanOnQuitNeverAsksForAnything() {
-        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: admin, elevation: .warmTimestamp)
-
-        XCTAssertTrue(plan.script.contains("sudo -n sed -i '' '/# vpn-slice-/d' /etc/hosts"))
-        XCTAssertFalse(plan.script.contains("sudo -S"))
-        XCTAssertFalse(plan.script.contains("sudo -v"))
-        XCTAssertFalse(plan.script.contains(OpenConnectCommand.adminVariable))
-        XCTAssertTrue(plan.script.contains(ElevationBlockReason.timestampExpired.markerLine))
-        XCTAssertTrue(plan.standardInput.isEmpty)
-        // It reports its own failure; the caller does not silence it.
-        XCTAssertFalse(plan.script.contains("2>/dev/null"))
     }
 
     // MARK: - The process group
@@ -304,21 +288,16 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(script.hasSuffix("exit $status"), "the body's status must be the script's status")
     }
 
-    func testTheCleanupPlanRunsInTheForeground() {
-        // Quitting has no timer to fall back on, so that plan waits inline.
-        let plan = OpenConnectCommand.hostsCleanupPlan(adminPassword: admin)
-
-        XCTAssertFalse(plan.script.contains("set -m"))
-        XCTAssertFalse(plan.script.contains("job=$!"))
-    }
-
     func testTheConnectPlanKeepsTheCleanupStepQuiet() {
         // The old pipeline sent the /etc/hosts cleanup's stderr to /dev/null:
         // a stale entry it cannot remove is not a connection failure, and the
         // app parses stderr for error bursts.
         XCTAssertTrue(makePlan().script.contains("| sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts 2>/dev/null"))
-        // The standalone cleanup wants that stderr, because it reports it.
-        XCTAssertFalse(OpenConnectCommand.hostsCleanupPlan(adminPassword: admin).script.contains("2>/dev/null"))
+        // The Touch ID mode cleans through the same `sudo` it has just warmed,
+        // and asks nothing of its own.
+        let touchID = makePlan(elevation: .systemPrompt).script
+        XCTAssertTrue(touchID.contains("sudo sed -i '' '/# vpn-slice-/d' /etc/hosts 2>/dev/null"))
+        XCTAssertFalse(touchID.contains("sudo -S sed"))
     }
 
     // MARK: - PID file
@@ -538,19 +517,6 @@ final class OpenConnectLaunchTests: XCTestCase {
         }
     }
 
-    func testTheCleanupPlanReallyWritesTheAdminPasswordIntoSudostdin() throws {
-        let result = try run { path in
-            OpenConnectCommand.hostsCleanupPlan(adminPassword: admin, searchPath: path)
-        }
-
-        // The fake `sed` swallows stdin without recording it, so the observable
-        // fact is that the pipeline ran at all and stayed out of argv.
-        XCTAssertTrue(result.sudoCalls.contains { $0.contains("sed") })
-        for call in result.sudoCalls {
-            XCTAssertFalse(call.contains(admin))
-        }
-    }
-
     func testAReadThatCannotBeSatisfiedExitsInsteadOfRunningWithAnEmptySecret() throws {
         // Simulates the failure mode the `|| exit 1` guards: stdin is closed
         // with nothing in it (e.g. the app died between run() and the write).
@@ -588,5 +554,111 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertNotEqual(process.terminationStatus, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path),
                        "nothing may run with an empty credential")
+    }
+
+    // MARK: - A cold sudo timestamp
+
+    private struct ColdTimestampRun {
+        let status: Int32
+        let stderr: String
+        let sudoCalls: [String]
+        let launched: Bool
+    }
+
+    /// The regression that produced `Failed - Elevation Expired`, driven through
+    /// the plan itself.
+    ///
+    /// Both plans run against the same fake tools, whose `sudo -n -v` **fails** —
+    /// a cold timestamp, which is the normal state of the connect wrapper's own
+    /// process context. Only the strategy differs, and that is the whole point:
+    /// the one a connect resolves to (`.systemPrompt` on a Mac with `pam_tid`)
+    /// recovers by letting the system ask for Touch ID or a password, while
+    /// `.neverPrompt` — the strategy the app used to choose from a warmth probe
+    /// taken in a *different* process — ends the connect with a classified marker.
+    func testAColdTimestampIsRecoveredByAskingAndRefusedByNeverPrompt() throws {
+        let asking = try runWithColdTimestamp { path in
+            makePlan(openconnectPath: path + "/openconnect", searchPath: path,
+                     elevation: .systemPrompt, pgidFile: path + "/elevation.pgid")
+        }
+        XCTAssertEqual(asking.status, 0, "a connect that may ask must survive a cold timestamp: \(asking.stderr)")
+        XCTAssertTrue(asking.launched, "openconnect must have been reached")
+        XCTAssertFalse(asking.stderr.contains(ElevationBlockReason.timestampExpired.markerLine))
+        XCTAssertTrue(asking.sudoCalls.contains { $0.contains("sed") },
+                      "the plan's own /etc/hosts cleanup must run in the context that just authenticated")
+
+        let refusing = try runWithColdTimestamp { path in
+            makePlan(openconnectPath: path + "/openconnect", searchPath: path,
+                     elevation: .neverPrompt, pgidFile: path + "/elevation.pgid")
+        }
+        XCTAssertNotEqual(refusing.status, 0, "a no-prompt launch must not proceed on a cold timestamp")
+        XCTAssertFalse(refusing.launched, "nothing privileged may run without a warm timestamp")
+        XCTAssertTrue(refusing.stderr.contains(ElevationBlockReason.timestampExpired.markerLine),
+                      "the refusal must be classified, not left as a bare exit status")
+    }
+
+    /// Runs a plan against fake `sudo`/`sed`/`openconnect` tools on a private PATH
+    /// where the timestamp is cold: `sudo -n` always fails, while the forms that
+    /// may ask (`-v`, `-S`) succeed. No password is read and no real tool runs —
+    /// in particular `sed` is a stub, so `/etc/hosts` is never touched.
+    private func runWithColdTimestamp(
+        makePlan: (String) -> OpenConnectLaunchPlan
+    ) throws -> ColdTimestampRun {
+        let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("occold-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        let plan = makePlan(sandbox.path)
+
+        let sudoLog = sandbox.appendingPathComponent("sudo-calls.txt")
+        let launched = sandbox.appendingPathComponent("openconnect-ran")
+
+        func write(_ name: String, _ body: String) throws {
+            let url = sandbox.appendingPathComponent(name)
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        }
+
+        _ = try write("sudo", """
+        #!/bin/bash
+        # A cold timestamp, modelled: the non-interactive form fails outright,
+        # the forms that are allowed to ask succeed. Nothing authenticates for
+        # real, and the password pipe is swallowed rather than read.
+        printf '%s\\n' "$*" >> '\(sudoLog.path)'
+        args=()
+        for arg in "$@"; do
+          if [ "$arg" = "-n" ]; then exit 1; fi
+          case "$arg" in
+            -S) cat > /dev/null ;;
+            -v) ;;
+            *) args+=("$arg") ;;
+          esac
+        done
+        if [ "${#args[@]}" -eq 0 ]; then exit 0; fi
+        exec "${args[@]}"
+        """)
+        _ = try write("sed", "#!/bin/bash\nexit 0\n")
+        _ = try write("openconnect", "#!/bin/bash\ntouch '\(launched.path)'\ncat > /dev/null\n")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = ["-c", plan.script]
+        let stdinPipe = Pipe()
+        process.standardInput = stdinPipe
+        let errorPipe = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errorPipe
+        try process.run()
+        try stdinPipe.fileHandleForWriting.write(contentsOf: plan.standardInput)
+        try? stdinPipe.fileHandleForWriting.close()
+        let stderr = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+
+        return ColdTimestampRun(
+            status: process.terminationStatus,
+            stderr: stderr,
+            sudoCalls: ((try? String(contentsOf: sudoLog, encoding: .utf8)) ?? "")
+                .split(separator: "\n").map(String.init),
+            launched: FileManager.default.fileExists(atPath: launched.path)
+        )
     }
 }

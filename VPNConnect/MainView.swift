@@ -862,6 +862,9 @@ struct MainView: View {
         case .connected, .connecting:
             vpn.disconnect()
         case .disconnected, .error:
+            // This set must stay equal to `VPNStatus.isConnectable`. `.error` is
+            // here because the button says "Reconnect" — and it used to be a
+            // lie: `connect()` refused anything but `.disconnected`, silently.
             var missingFields: [String] = []
             if settings.vpnHost.isEmpty { missingFields.append("Organization Domain") }
             if settings.vpnID.isEmpty { missingFields.append("Username") }

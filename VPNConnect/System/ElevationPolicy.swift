@@ -25,12 +25,21 @@ public enum SudoAuthenticationMode: Equatable, Sendable {
 /// "the system will ask" to "pipe the stored password" is what re-creates the
 /// blocked-dialog hang this type exists to avoid.
 public enum ElevationStrategy: Equatable, Sendable, CaseIterable {
-    /// `sudo -n` throughout: the timestamp is already valid, so nothing is
-    /// asked and no password is needed. If it goes cold mid-run the script
-    /// fails fast instead of raising a dialog.
-    case warmTimestamp
-    /// `pam_tid` is enabled and the timestamp is cold: run `sudo` normally and
-    /// let the system show its Touch ID / password dialog, bounded by the
+    /// `sudo -n` throughout: nothing is asked, and a cold timestamp fails fast
+    /// with a marker instead of raising a dialog.
+    ///
+    /// The name is a statement about the *plan*, not about the machine, which is
+    /// why nothing resolves a connect to it. `sudo` keys its timestamp to the
+    /// parent process when there is no terminal (`man sudoers`, `timestamp_type`
+    /// defaults to `tty`), so a "is it warm?" probe taken by the app says nothing
+    /// about a `sudo` that runs under the connect's wrapper shell — the two have
+    /// different parents. A connect that trusted the probe died with
+    /// `Failed - Elevation Expired` while the timestamp it had measured was
+    /// still perfectly warm, in the other process's context. Both strategies a
+    /// connect may choose probe warmth *inside* the plan, where it is used.
+    case neverPrompt
+    /// `pam_tid` is enabled: run `sudo` normally and let the system show its
+    /// Touch ID / password dialog if the refresh needs one, bounded by the
     /// connect timeout.
     case systemPrompt
     /// No `pam_tid`: pipe the stored administrator password to `sudo -S`, which
@@ -38,8 +47,11 @@ public enum ElevationStrategy: Equatable, Sendable, CaseIterable {
     case storedPassword
 
     /// The decision, as a pure function of what was detected.
-    public static func resolve(mode: SudoAuthenticationMode, timestampWarm: Bool) -> ElevationStrategy {
-        if timestampWarm { return .warmTimestamp }
+    ///
+    /// There is deliberately no "and is the timestamp already warm?" input. The
+    /// only strategy that would answer yes to it is `.neverPrompt`, and choosing
+    /// that for a connect from the app's own probe is the defect described above.
+    public static func resolve(mode: SudoAuthenticationMode) -> ElevationStrategy {
         switch mode {
         case .systemPrompt: return .systemPrompt
         case .storedPassword: return .storedPassword
@@ -59,7 +71,7 @@ public enum ElevationStrategy: Equatable, Sendable, CaseIterable {
     public var credentialLineCount: Int {
         switch self {
         case .storedPassword: return OpenConnectCommand.credentialLineCount
-        case .warmTimestamp, .systemPrompt: return OpenConnectCommand.credentialLineCount - 1
+        case .neverPrompt, .systemPrompt: return OpenConnectCommand.credentialLineCount - 1
         }
     }
 
@@ -75,7 +87,7 @@ public enum ElevationStrategy: Equatable, Sendable, CaseIterable {
             return "macOS asked for Touch ID or your administrator password before openconnect could run,"
                 + " and nothing answered within \(timeoutSeconds)s. Connect again with the app in front"
                 + " (and the lid open) so the dialog can be answered."
-        case .warmTimestamp, .storedPassword:
+        case .neverPrompt, .storedPassword:
             return "Connection timeout"
         }
     }
@@ -85,13 +97,14 @@ public enum ElevationStrategy: Equatable, Sendable, CaseIterable {
     /// user is told to expect one while there is still time to answer it.
     public func debugLines(timeoutSeconds: Int) -> [String] {
         switch self {
-        case .warmTimestamp:
-            return ["Elevation: sudo's timestamp is already valid — no dialog will be shown."]
+        case .neverPrompt:
+            return ["Elevation: no dialog will be shown; sudo -n fails fast if the timestamp has gone cold."]
         case .systemPrompt:
             return [
-                "Elevation: Touch ID for sudo is enabled (pam_tid) and sudo's timestamp is cold.",
-                "Elevation: macOS will ask for Touch ID or your administrator password;"
-                    + " the connect waits up to \(timeoutSeconds)s for that dialog.",
+                "Elevation: Touch ID for sudo is enabled (pam_tid).",
+                "Elevation: the refresh checks sudo non-interactively first; if that is refused, macOS"
+                    + " asks for Touch ID or your administrator password, and the connect waits up to"
+                    + " \(timeoutSeconds)s for that dialog.",
             ]
         case .storedPassword:
             return ["Elevation: using the stored administrator password (sudo -S); no system dialog is expected."]
@@ -102,23 +115,20 @@ public enum ElevationStrategy: Equatable, Sendable, CaseIterable {
 /// What was detected about elevation, and the strategy it implies.
 public struct ElevationSnapshot: Equatable, Sendable {
     public let mode: SudoAuthenticationMode
-    public let timestampWarm: Bool
     /// The PAM files that were read, in order, for the log.
     public let pamFilesInspected: [String]
 
-    public init(mode: SudoAuthenticationMode, timestampWarm: Bool, pamFilesInspected: [String] = []) {
+    public init(mode: SudoAuthenticationMode, pamFilesInspected: [String] = []) {
         self.mode = mode
-        self.timestampWarm = timestampWarm
         self.pamFilesInspected = pamFilesInspected
     }
 
     public var strategy: ElevationStrategy {
-        ElevationStrategy.resolve(mode: mode, timestampWarm: timestampWarm)
+        ElevationStrategy.resolve(mode: mode)
     }
 }
 
-/// Reads the two facts the strategy needs: what the sudo PAM stack does, and
-/// whether the current timestamp is already valid.
+/// Reads the one fact the strategy needs: what the sudo PAM stack does.
 public enum ElevationProbe {
     /// `sudo_local` is the file the Touch ID recipe edits; `sudo` itself is
     /// checked too because the older recipe edited it directly, and because a
@@ -132,16 +142,15 @@ public enum ElevationProbe {
     /// as `/usr/lib/pam/pam_tid.so.2`).
     public static let touchIDModuleName = "pam_tid"
 
-    /// The snapshot, with both inputs injected so the decision is testable
-    /// without a live `sudo` and without reading `/etc`.
-    public static func live(
-        readFile: (String) -> String?,
-        sudoTimestampIsWarm: () -> Bool
-    ) -> ElevationSnapshot {
+    /// The snapshot, with the read injected so the decision is testable without
+    /// reading `/etc`.
+    ///
+    /// Nothing here asks `sudo` anything: whether its timestamp is warm is a
+    /// question only the plan's own process can answer for itself.
+    public static func live(readFile: (String) -> String?) -> ElevationSnapshot {
         let contents = pamFilePaths.map(readFile)
         return ElevationSnapshot(
             mode: mode(pamFileContents: contents),
-            timestampWarm: sudoTimestampIsWarm(),
             pamFilesInspected: pamFilePaths
         )
     }

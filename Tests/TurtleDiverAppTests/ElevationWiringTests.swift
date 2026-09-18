@@ -14,10 +14,10 @@ final class ElevationWiringTests: XCTestCase {
 
     // MARK: - Choosing the strategy
 
-    /// The strategy has to be resolved *from the machine* and handed to the plan.
+    /// The strategy has to be detected *from the machine* and handed to the plan.
     /// A hard-coded `.storedPassword` is exactly the bug: on a Mac with
     /// `pam_tid` enabled, `sudo -S` never reads the pipe.
-    func testTheConnectPathProbesAndPassesTheChosenStrategy() throws {
+    func testTheConnectPathDetectsAndPassesTheChosenStrategy() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
 
         XCTAssertTrue(code.contains("ElevationProbe.live("),
@@ -31,17 +31,19 @@ final class ElevationWiringTests: XCTestCase {
                       "the launch plan must receive the probed strategy, not a default")
     }
 
-    /// The probe shells out to `sudo -n -v` and reads two files. A 3 s block on
-    /// the main thread is not acceptable, whatever it answers.
-    func testTheProbeRunsSomewhereOtherThanTheMainThread() throws {
+    /// The snapshot reads two files and, so, has to stay off the main thread. It
+    /// deliberately asks `sudo` nothing, so it has no business spawning one.
+    func testTheElevationProbeRunsOffTheMainThreadAndAsksSudoNothing() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
         let start = try XCTUnwrap(code.range(of: "private static func elevationSnapshot"))
         let body = code[start.lowerBound...].prefix(700)
 
         XCTAssertTrue(body.contains("DispatchQueue.global"),
                       "the elevation probe must not run on the main thread")
-        XCTAssertTrue(body.contains("SudoProbe.isTimestampWarm()"),
-                      "warmth comes from the bounded probe, never from a blocking sudo")
+        XCTAssertTrue(body.contains("ElevationProbe.live("),
+                      "it must still detect what the PAM stack does")
+        XCTAssertFalse(body.lowercased().contains("sudo"),
+                       "it must not shell out to sudo — by any spelling — to decide this")
     }
 
     /// With Touch ID answering, the stored password is unused. Demanding it first
@@ -137,20 +139,42 @@ final class ElevationWiringTests: XCTestCase {
                       "the sweep must report what it did rather than work silently")
     }
 
-    /// Quitting must never raise a dialog: `sudo -n` either answers at once or
-    /// fails, and the app no longer needs the administrator password to clean up.
-    func testTheQuitCleanupIsWarmAndNeverPipesTheStoredPassword() throws {
+    /// The connect must never resolve to the strategy that cannot ask.
+    ///
+    /// That is the whole `Failed - Elevation Expired` defect in one line: the app
+    /// probed `sudo -n -v` in its own process and, on a warm answer, told the plan
+    /// not to prompt. `sudo` keys its timestamp to the parent process when there
+    /// is no terminal, and the plan's `sudo` runs under the wrapper shell — a
+    /// different parent. It found a cold timestamp, exited with its marker, and
+    /// the connect died on a timestamp the app had just measured as warm.
+    func testTheConnectStrategyIsNeverTheOneThatCannotAsk() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
-        let start = try XCTUnwrap(code.range(of: "private func cleanupVpnSliceHosts()"))
-        let end = try XCTUnwrap(code.range(of: "private func checkForExistingConnection()"))
-        let body = code[start.lowerBound..<end.lowerBound]
 
-        XCTAssertTrue(body.contains("elevation: .warmTimestamp"),
-                      "the quit-time /etc/hosts cleanup must use warm sudo, never a prompt")
-        XCTAssertFalse(body.contains(".storedPassword"),
-                       "the quit-time cleanup must not pipe the stored password")
-        XCTAssertFalse(body.contains("waitUntilExit()"),
-                       "an unbounded wait on the quit path is how quitting hangs")
+        XCTAssertFalse(code.contains(".neverPrompt"),
+                       "connect must never refuse to ask for elevation")
+        XCTAssertFalse(code.contains("SudoProbe"),
+                       "no probe outside the plan may decide the strategy")
+        XCTAssertFalse(code.contains("timestampWarm"),
+                       "warmth is not an input to the decision any more")
+    }
+
+    /// Stale `/etc/hosts` entries belong to the launch plan, whose `sudo` runs in
+    /// the context that just authenticated. The app used to clean them before the
+    /// plan started, from a `sudo` that is a child of the app — a different
+    /// timestamp record — so the attempt could only fail, and said so, loudly, in
+    /// the connection log the user reads.
+    func testTheHostsCleanupBelongsToTheLaunchPlan() throws {
+        let manager = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        XCTAssertFalse(manager.contains("cleanupVpnSliceHosts"),
+                       "the app must not run its own pre-connect cleanup")
+        XCTAssertFalse(manager.contains("hostsCleanupPlan"),
+                       "…nor build a standalone cleanup plan")
+
+        let launch = try strippedCode(at: "VPNConnect/System/OpenConnectLaunch.swift")
+        XCTAssertTrue(launch.contains("hostsCleanupStep(elevation)"),
+                      "the plan must still remove stale entries")
+        XCTAssertFalse(launch.contains("func hostsCleanupPlan"),
+                       "no caller, no plan builder")
     }
 
     // MARK: - Helpers

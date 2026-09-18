@@ -194,6 +194,22 @@ enum VPNStatus: Equatable {
     case connected
     case disconnecting
     case error(String)
+
+    /// Whether a connect may start from here.
+    ///
+    /// `.error` is deliberately included. The main window labels its action
+    /// button "Reconnect" in that state and the menu bar item calls `connect()`
+    /// too, so both affordances promise a retry — and the guard this replaces
+    /// (`case .disconnected` only) accepted neither, returning silently and
+    /// adding no log line and no history row. One failed connect therefore
+    /// wedged the app until it was quit and relaunched: the state a failure
+    /// leaves behind has to be a state a retry can start from.
+    var isConnectable: Bool {
+        switch self {
+        case .disconnected, .error: return true
+        case .connecting, .connected, .disconnecting: return false
+        }
+    }
 }
 
 class VPNManager: ObservableObject {
@@ -288,7 +304,7 @@ class VPNManager: ObservableObject {
     }
     
     func connect() {
-        guard case .disconnected = status else { return }
+        guard status.isConnectable else { return }
         
         connectionGeneration += 1
         status = .connecting
@@ -956,9 +972,11 @@ class VPNManager: ObservableObject {
         }
 
         guard let pid = detection.pid else {
-            // Nothing verified to stop. Still clean up any stale vpn-slice
-            // entries: a previous session that was killed uncleanly leaves them,
-            // and they stop the new connection from working.
+            // Nothing verified to stop. No hosts cleanup here either: stale
+            // vpn-slice entries are removed by the launch plan's own step, whose
+            // `sudo` runs in the context that just authenticated. An attempt from
+            // this process would be a child of the app — a different parent, so a
+            // different timestamp record — and could only fail.
             await MainActor.run {
                 for rejection in detection.rejections {
                     self.debugOutput += rejection.explanation + "\n"
@@ -967,7 +985,6 @@ class VPNManager: ObservableObject {
                     OpenConnectPidFile.discard()
                     self.debugOutput += "Discarded a PID file that named no openconnect\n"
                 }
-                self.cleanupVpnSliceHosts()
             }
             return
         }
@@ -999,10 +1016,6 @@ class VPNManager: ObservableObject {
             if outcome != .notPermitted {
                 OpenConnectPidFile.discard()
             }
-            // Clean up any stale vpn-slice entries from /etc/hosts (entries from
-            // a partially-killed previous session prevent the new connection
-            // from working).
-            self.cleanupVpnSliceHosts()
         }
 
         // Wait for cleanup to complete before the plan starts.
@@ -1181,15 +1194,20 @@ class VPNManager: ObservableObject {
         logFailedAttempt(status: "Failed - Token Error")
     }
     
-    /// The elevation snapshot, taken off the main thread: it shells out to
-    /// `sudo -n -v` (bounded, but up to 3 s) and reads two files. Neither the
-    /// window nor the cooperative pool should be waiting on that.
+    /// The elevation snapshot, taken off the main thread: it reads two files.
+    /// Neither the window nor the cooperative pool should be waiting on that.
+    ///
+    /// It deliberately does not ask `sudo` anything. Whether sudo's timestamp is
+    /// warm is keyed to the process that warmed it (`timestamp_type` defaults to
+    /// `tty`, which means `ppid` when there is no terminal), so the app's own
+    /// answer would not apply to the plan's wrapper shell — measuring it here is
+    /// what produced `Failed - Elevation Expired` on a connect whose timestamp
+    /// was, in that other context, perfectly warm.
     private static func elevationSnapshot() async -> ElevationSnapshot {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(returning: ElevationProbe.live(
-                    readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
-                    sudoTimestampIsWarm: { SudoProbe.isTimestampWarm() }
+                    readFile: { try? String(contentsOfFile: $0, encoding: .utf8) }
                 ))
             }
         }
@@ -1672,54 +1690,6 @@ class VPNManager: ObservableObject {
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
                 continuation.resume(throwing: error)
             }
-        }
-    }
-    
-    // MARK: - /etc/hosts Cleanup
-    
-    /// Removes any stale vpn-slice entries from /etc/hosts.
-    /// vpn-slice marks its entries with "# vpn-slice-<IFACE> AUTOCREATED".
-    /// When openconnect is terminated, vpn-slice's atexit handlers should
-    /// clean these up, but they often fail because:
-    ///   - sudo's credential cache expires (default 5 min), causing the
-    ///     cleanup to hang waiting for a password that never arrives
-    ///   - SIGKILL (after the 3-second grace window) kills vpn-slice
-    ///     before its atexit handlers can run
-    /// Stale entries cause the next connection to fail because DNS
-    /// resolution still points to old tunnel IPs that no longer exist.
-    ///
-    /// `.warmTimestamp`, never `.storedPassword`: this can run while the app is
-    /// quitting, and a dialog raised on the way out is one nobody can answer.
-    /// `sudo -n` either works or fails immediately, and the app does not need the
-    /// administrator password at all in this mode — so the cleanup now happens
-    /// even when no password is stored.
-    private func cleanupVpnSliceHosts() {
-        let plan = OpenConnectCommand.hostsCleanupPlan(
-            adminPassword: SettingsManager.shared.adminPassword,
-            elevation: .warmTimestamp
-        )
-
-        // Bounded, because this runs on the quit path: a wedged `sudo` must not be
-        // able to hold the app open. The runner gives the script /dev/null on
-        // stdin, which is not a compromise here — `.warmTimestamp` writes no
-        // credential to the pipe, so there is nothing to withhold.
-        do {
-            let result = try SystemBoundedProcessRunner().run(
-                executable: URL(fileURLWithPath: "/bin/bash"),
-                arguments: ["-c", plan.script],
-                timeout: 5
-            )
-            if result.timedOut {
-                debugOutput += "Warning: /etc/hosts cleanup timed out; the next connect will retry it\n"
-            } else if result.terminationStatus == 0 {
-                debugOutput += "Cleaned up stale vpn-slice entries from /etc/hosts\n"
-            } else {
-                let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                let reason = stderr.isEmpty ? "exit status \(result.terminationStatus)" : stderr
-                debugOutput += "Warning: Failed to clean /etc/hosts: \(reason)\n"
-            }
-        } catch {
-            debugOutput += "Warning: Failed to clean /etc/hosts: \(error.localizedDescription)\n"
         }
     }
     

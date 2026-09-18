@@ -86,35 +86,40 @@ final class ElevationPolicyTests: XCTestCase {
         XCTAssertEqual(ElevationProbe.mode(pamFileContents: [sudoLocal, sudo]), .systemPrompt)
     }
 
-    func testTheProbeReadsBothFilesInOrderAndPassesTheTimestampThrough() {
+    func testTheProbeReadsBothFilesInOrder() {
         var read: [String] = []
         let snapshot = ElevationProbe.live(
             readFile: { path in
                 read.append(path)
                 return path.hasSuffix("sudo_local") ? self.pamTidLine : nil
-            },
-            sudoTimestampIsWarm: { false }
+            }
         )
 
         XCTAssertEqual(read, ElevationProbe.pamFilePaths)
         XCTAssertEqual(snapshot.pamFilesInspected, ElevationProbe.pamFilePaths)
         XCTAssertEqual(snapshot.mode, .systemPrompt)
-        XCTAssertFalse(snapshot.timestampWarm)
         XCTAssertEqual(snapshot.strategy, .systemPrompt)
     }
 
     // MARK: - Choosing a strategy
 
-    func testAWarmTimestampIsUsedAsIsWhateverPamSays() {
-        // Nothing needs asking either way, so the safest plan is the one that
-        // sends no password at all.
-        XCTAssertEqual(ElevationStrategy.resolve(mode: .systemPrompt, timestampWarm: true), .warmTimestamp)
-        XCTAssertEqual(ElevationStrategy.resolve(mode: .storedPassword, timestampWarm: true), .warmTimestamp)
-    }
+    /// The decision is a function of PAM configuration and nothing else.
+    ///
+    /// The removed input is the point: the connect used to ask `sudo -n -v` in
+    /// its own process and, on a "warm" answer, choose `.neverPrompt`. `sudo`
+    /// keys its timestamp to the parent process when there is no terminal, so the
+    /// plan — whose `sudo` runs under the wrapper shell — was a different context,
+    /// found it cold, and the connect died with `Failed - Elevation Expired` while
+    /// the timestamp the app had just measured was still perfectly good. A
+    /// connect must never refuse to ask for that reason.
+    func testTheConnectStrategyIsDecidedByPamAlone() {
+        XCTAssertEqual(ElevationStrategy.resolve(mode: .systemPrompt), .systemPrompt)
+        XCTAssertEqual(ElevationStrategy.resolve(mode: .storedPassword), .storedPassword)
 
-    func testAColdTimestampPicksByPamConfiguration() {
-        XCTAssertEqual(ElevationStrategy.resolve(mode: .systemPrompt, timestampWarm: false), .systemPrompt)
-        XCTAssertEqual(ElevationStrategy.resolve(mode: .storedPassword, timestampWarm: false), .storedPassword)
+        for mode in [SudoAuthenticationMode.systemPrompt, .storedPassword] {
+            XCTAssertNotEqual(ElevationStrategy.resolve(mode: mode), .neverPrompt,
+                              "\(mode) resolved to a strategy that cannot ask for elevation")
+        }
     }
 
     /// The whole point: the password is piped only into a stack that cannot
@@ -122,17 +127,17 @@ final class ElevationPolicyTests: XCTestCase {
     func testOnlyTheNonTouchIDModePipesTheStoredPassword() {
         XCTAssertTrue(ElevationStrategy.storedPassword.pipesTheStoredPassword)
         XCTAssertFalse(ElevationStrategy.systemPrompt.pipesTheStoredPassword)
-        XCTAssertFalse(ElevationStrategy.warmTimestamp.pipesTheStoredPassword)
+        XCTAssertFalse(ElevationStrategy.neverPrompt.pipesTheStoredPassword)
 
         XCTAssertEqual(ElevationStrategy.storedPassword.credentialLineCount, OpenConnectCommand.credentialLineCount)
         XCTAssertEqual(ElevationStrategy.systemPrompt.credentialLineCount, OpenConnectCommand.credentialLineCount - 1)
-        XCTAssertEqual(ElevationStrategy.warmTimestamp.credentialLineCount, OpenConnectCommand.credentialLineCount - 1)
+        XCTAssertEqual(ElevationStrategy.neverPrompt.credentialLineCount, OpenConnectCommand.credentialLineCount - 1)
     }
 
     func testTheTimeoutStatusNamesTouchIDOnlyForTheTouchIDMode() {
         XCTAssertEqual(ElevationStrategy.systemPrompt.timeoutHistoryStatus, ElevationFailure.touchIDStatus)
         XCTAssertEqual(ElevationStrategy.systemPrompt.timeoutHistoryStatus, "Failed - Elevation Blocked (Touch ID)")
-        XCTAssertEqual(ElevationStrategy.warmTimestamp.timeoutHistoryStatus, "Connection timeout")
+        XCTAssertEqual(ElevationStrategy.neverPrompt.timeoutHistoryStatus, "Connection timeout")
         XCTAssertEqual(ElevationStrategy.storedPassword.timeoutHistoryStatus, "Connection timeout")
     }
 
@@ -154,8 +159,8 @@ final class ElevationPolicyTests: XCTestCase {
         XCTAssertTrue(touchID.contains("Touch ID"))
         XCTAssertTrue(touchID.contains("90s"))
 
-        let warm = ElevationStrategy.warmTimestamp.debugLines(timeoutSeconds: 90).joined(separator: "\n")
-        XCTAssertTrue(warm.lowercased().contains("no dialog"))
+        let neverAsks = ElevationStrategy.neverPrompt.debugLines(timeoutSeconds: 90).joined(separator: "\n")
+        XCTAssertTrue(neverAsks.lowercased().contains("no dialog"))
 
         let stored = ElevationStrategy.storedPassword.debugLines(timeoutSeconds: 90).joined(separator: "\n")
         XCTAssertTrue(stored.contains("administrator password"))

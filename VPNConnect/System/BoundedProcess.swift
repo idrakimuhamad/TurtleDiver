@@ -91,26 +91,3 @@ public struct SystemBoundedProcessRunner: BoundedProcessRunning {
         )
     }
 }
-
-/// Asks `sudo` whether its timestamp is already valid, without ever prompting.
-///
-/// `sudo -n -v` succeeds exactly when a previous authentication is still within
-/// its timeout, and fails immediately (no dialog, no read) when it is not. That
-/// makes it the one safe way to find out whether the connect will need to ask
-/// for anything — which decides `ElevationStrategy`.
-public enum SudoProbe {
-    public static let executable = URL(fileURLWithPath: "/usr/bin/sudo")
-    public static let arguments = ["-n", "-v"]
-    /// A warm timestamp answers in milliseconds; a cold one fails immediately.
-    /// The bound only exists so a wedged `sudo` cannot hold up the connect.
-    public static let timeout: TimeInterval = 3
-
-    public static func isTimestampWarm(
-        using runner: any BoundedProcessRunning = SystemBoundedProcessRunner()
-    ) -> Bool {
-        guard let result = try? runner.run(executable: executable, arguments: arguments, timeout: timeout) else {
-            return false
-        }
-        return !result.timedOut && result.terminationStatus == 0
-    }
-}

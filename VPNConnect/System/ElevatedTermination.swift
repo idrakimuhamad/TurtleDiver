@@ -89,9 +89,10 @@ public enum ElevatedTermination {
         let password = adminPassword ?? ""
 
         switch strategy {
-        case .warmTimestamp:
-            // Nothing is asked: a valid timestamp is the whole point of this
-            // strategy, and `-n` fails in milliseconds when it has gone cold.
+        case .neverPrompt:
+            // Nothing is asked: never prompting is the whole point of this
+            // strategy, and `-n` fails in milliseconds when the timestamp has
+            // gone cold. The caller adds a prompting attempt after it.
             return ElevatedKillPlan(
                 executable: sudo,
                 arguments: ["-n", kill.path, signal.rawValue, target]
@@ -424,7 +425,7 @@ public struct ElevatedTerminator: Sendable {
             pid: target.number,
             isProcessGroup: target.isProcessGroup,
             signal: signal,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             ownProcessGroup: ownProcessGroup
         ) {

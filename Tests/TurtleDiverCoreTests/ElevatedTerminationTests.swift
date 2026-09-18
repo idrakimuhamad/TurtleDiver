@@ -33,7 +33,7 @@ final class ElevatedTerminationTests: XCTestCase {
             pid: tunnelGroup,
             isProcessGroup: true,
             signal: .terminate,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             ownProcessGroup: ownGroup
         ))
@@ -102,7 +102,7 @@ final class ElevatedTerminationTests: XCTestCase {
         for pid: Int32 in [-1, 0, 1] {
             XCTAssertNil(ElevatedTermination.plan(
                 pid: pid, isProcessGroup: true, signal: .terminate,
-                strategy: .warmTimestamp, adminPassword: nil, ownProcessGroup: ownGroup
+                strategy: .neverPrompt, adminPassword: nil, ownProcessGroup: ownGroup
             ), "pid \(pid) must never reach a kill")
             XCTAssertNil(ElevatedTermination.plan(
                 pid: pid, isProcessGroup: false, signal: .kill,
@@ -117,11 +117,11 @@ final class ElevatedTerminationTests: XCTestCase {
     func testThePlanRefusesThisAppsOwnProcessGroupButNotAMatchingPid() {
         XCTAssertNil(ElevatedTermination.plan(
             pid: ownGroup, isProcessGroup: true, signal: .terminate,
-            strategy: .warmTimestamp, adminPassword: nil, ownProcessGroup: ownGroup
+            strategy: .neverPrompt, adminPassword: nil, ownProcessGroup: ownGroup
         ))
         XCTAssertNotNil(ElevatedTermination.plan(
             pid: ownGroup, isProcessGroup: false, signal: .terminate,
-            strategy: .warmTimestamp, adminPassword: nil, ownProcessGroup: ownGroup
+            strategy: .neverPrompt, adminPassword: nil, ownProcessGroup: ownGroup
         ))
     }
 
@@ -138,7 +138,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .group(tunnelGroup),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -160,7 +160,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -183,7 +183,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -210,7 +210,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -230,7 +230,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -383,7 +383,7 @@ final class ElevatedTerminationTests: XCTestCase {
         _ = makeTerminator(tunnel: tunnel, runner: runner).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -408,7 +408,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .group(tunnelGroup),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -428,7 +428,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -449,7 +449,7 @@ final class ElevatedTerminationTests: XCTestCase {
         let outcome = makeTerminator(tunnel: tunnel, runner: runner).end(
             .group(tunnelGroup),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -465,14 +465,14 @@ final class ElevatedTerminationTests: XCTestCase {
 
         for pid: Int32 in [-1, 0, 1] {
             guard case .refused = terminator.end(
-                .pid(pid), openConnectPid: pid, strategy: .warmTimestamp, adminPassword: nil, mayPrompt: true
+                .pid(pid), openConnectPid: pid, strategy: .neverPrompt, adminPassword: nil, mayPrompt: true
             ) else {
                 return XCTFail("pid \(pid) must be refused")
             }
         }
         for pid: Int32 in [-1, 0, 1] {
             guard case .refused = terminator.end(
-                .pid(pid), openConnectPid: tunnelPid, strategy: .warmTimestamp, adminPassword: nil, mayPrompt: true
+                .pid(pid), openConnectPid: tunnelPid, strategy: .neverPrompt, adminPassword: nil, mayPrompt: true
             ) else {
                 return XCTFail("openconnect pid \(pid) must be refused")
             }
@@ -497,7 +497,7 @@ final class ElevatedTerminationTests: XCTestCase {
         ).end(
             .group(tunnelGroup),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )
@@ -526,7 +526,7 @@ final class ElevatedTerminationTests: XCTestCase {
         ).end(
             .pid(tunnelPid),
             openConnectPid: tunnelPid,
-            strategy: .warmTimestamp,
+            strategy: .neverPrompt,
             adminPassword: nil,
             mayPrompt: true
         )

@@ -76,7 +76,7 @@ public enum OpenConnectCommand {
         let escapedArguments = arguments.map(shellEscape).joined(separator: " ")
         let body = [
             timestampRefreshStep(elevation),
-            elevation == .warmTimestamp ? timestampStillWarmStep : nil,
+            elevation == .neverPrompt ? timestampStillWarmStep : nil,
             // `2>/dev/null` is kept from the old pipeline on purpose: a stale
             // entry that cannot be cleaned is not a connection failure, and its
             // stderr would otherwise be parsed as an error burst. The still-warm
@@ -95,35 +95,15 @@ public enum OpenConnectCommand {
         )
     }
 
-    /// The stale-`/etc/hosts` cleanup on its own — run on quit, when
-    /// openconnect is already gone. Needs no openconnect stdin. Stderr is left
-    /// connected on purpose: the caller reports it.
-    ///
-    /// The caller passes `.warmTimestamp` on quit: a `pam_tid` dialog raised
-    /// while the app is quitting cannot be answered, so that path uses `sudo -n`
-    /// and fails loudly instead of asking.
-    public static func hostsCleanupPlan(
-        adminPassword: String,
-        searchPath: String = defaultSearchPath,
-        elevation: ElevationStrategy = .storedPassword
-    ) -> OpenConnectLaunchPlan {
-        let variables = cleanupVariables(elevation)
-        return OpenConnectLaunchPlan(
-            script: script(searchPath: searchPath, variables: variables,
-                          body: hostsCleanupStep(elevation)),
-            standardInput: credentialLines(variables.isEmpty ? [] : [adminPassword])
-        )
-    }
-
     /// The `sudo` prefix for the launch itself. Deliberately never `-S`: stdin
     /// carries openconnect's PIN and account password, so a `-S` that decided it
     /// needed a password would consume the PIN as its own and hand openconnect
     /// half a credential. It does not need one — the refresh step above exits
     /// the script with a marker if it cannot warm the timestamp, so a plain
-    /// `sudo` here cannot prompt. In `.warmTimestamp` mode `-n` states that
+    /// `sudo` here cannot prompt. In `.neverPrompt` mode `-n` states that
     /// outright.
     public static func launchInvocation(_ elevation: ElevationStrategy) -> String {
-        elevation == .warmTimestamp ? "sudo -n" : "sudo"
+        elevation == .neverPrompt ? "sudo -n" : "sudo"
     }
 
     /// The credential lines the connect script reads, in the order the pipe
@@ -132,11 +112,6 @@ public enum OpenConnectCommand {
         elevation.pipesTheStoredPassword
             ? [adminVariable, pinVariable, passwordVariable]
             : [pinVariable, passwordVariable]
-    }
-
-    /// The cleanup script's variables: the admin line, or nothing at all.
-    private static func cleanupVariables(_ elevation: ElevationStrategy) -> [String] {
-        elevation.pipesTheStoredPassword ? [adminVariable] : []
     }
 
     private static func credentialValues(
@@ -166,9 +141,10 @@ public enum OpenConnectCommand {
     ///   `pam_tid` as a `sufficient` module, `sudo -v` raises the system's own
     ///   Touch ID / password dialog and reads no pipe at all; feeding it one
     ///   means the dialog is never answered and the `sudo` blocks forever.
-    /// * `.warmTimestamp` refuses to ask anyone: if the timestamp is not warm it
+    /// * `.neverPrompt` refuses to ask anyone: if the timestamp is not warm it
     ///   fails immediately, with a marker, so the connect reports a cause
-    ///   instead of timing out.
+    ///   instead of timing out. No connect resolves to it — see
+    ///   `ElevationStrategy.resolve(mode:)`.
     private static func timestampRefreshStep(_ elevation: ElevationStrategy) -> String {
         switch elevation {
         case .storedPassword:
@@ -179,7 +155,7 @@ public enum OpenConnectCommand {
             return "if ! sudo -n -v >/dev/null 2>&1; then"
                 + " sudo -v </dev/null"
                 + " || { \(marker(.systemPromptUnanswered)); exit 1; }; fi"
-        case .warmTimestamp:
+        case .neverPrompt:
             return "if ! sudo -n -v >/dev/null 2>&1; then"
                 + " \(marker(.timestampExpired)); exit 1; fi"
         }
@@ -191,9 +167,16 @@ public enum OpenConnectCommand {
     private static let timestampStillWarmStep =
         "sudo -n -v >/dev/null 2>&1 || { \(marker(.timestampExpired)); exit 1; }"
 
-    /// `sed -i` through sudo. The password is fed by `printf` rather than `echo`
-    /// so a password containing a backslash or a leading `-n` is not mangled,
-    /// and it is only fed where a password is available to feed.
+    /// `sed -i` through sudo, as a step of the connect plan. The password is fed
+    /// by `printf` rather than `echo` so a password containing a backslash or a
+    /// leading `-n` is not mangled, and it is only fed where a password is
+    /// available to feed.
+    ///
+    /// This is the *only* place stale entries are cleaned, and it is deliberately
+    /// inside the plan: the step inherits the refresh above, so it runs `sudo` in
+    /// the same process context that just authenticated. Cleaning from the app
+    /// instead would run `sudo` as a child of the app — a different parent, hence
+    /// a different timestamp record — and fail with "a password is required".
     private static func hostsCleanupStep(_ elevation: ElevationStrategy) -> String {
         switch elevation {
         case .storedPassword:
@@ -201,9 +184,9 @@ public enum OpenConnectCommand {
                 + " | sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts"
         case .systemPrompt:
             return "sudo sed -i '' '/# vpn-slice-/d' /etc/hosts"
-        case .warmTimestamp:
-            // Used on quit, and at launch as `… 2>/dev/null`. Failing here is
-            // reported rather than papered over with a dialog.
+        case .neverPrompt:
+            // A no-prompt launch cleans too, and keeps the same no-prompt rule: a
+            // stale entry it cannot remove is reported, not asked about.
             return "sudo -n sed -i '' '/# vpn-slice-/d' /etc/hosts"
                 + " || { \(marker(.timestampExpired)); exit 1; }"
         }

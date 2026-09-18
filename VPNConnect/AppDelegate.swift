@@ -800,13 +800,14 @@ final class MenuBarManager: NSObject {
     }
 
     @objc private func toggleVPN() {
-        switch VPNManager.shared.status {
-        case .connected:
+        // Derived from the status itself rather than from a case list repeated
+        // here: a menu item that offers "Connect VPN" for a status the model
+        // refuses to connect from is a dead control (that is what `.error` was).
+        let status = VPNManager.shared.status
+        if status == .connected {
             VPNManager.shared.disconnect()
-        case .disconnected, .error:
+        } else if status.isConnectable {
             VPNManager.shared.connect()
-        default:
-            break
         }
     }
 }
