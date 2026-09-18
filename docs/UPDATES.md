@@ -140,8 +140,11 @@ connection the user may have started for a reason.
 
 `docs/MANUAL_TEST_CHECKLIST.md` § 0e walks the check and § 0f the install. The
 short version: a build older than the newest release is the only way to see an
-offer at all, and `MARKETING_VERSION` is what the app compares — so a 2.0.0
-build can only ever read `UP TO DATE` while the newest release is `v2.0.0`.
+offer at all, and `MARKETING_VERSION` is what the app compares — so a `2.1.0`
+build can only ever read `UP TO DATE` while the newest release is `v2.1.0`. To
+see the offer itself, build a copy that claims an older version (the
+scratch-build recipe in § 0f); the feed, the gates and the install have also
+been exercised against the real published release.
 
 ## The tests
 

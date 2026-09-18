@@ -217,8 +217,8 @@ checks; the install half is § 0f.
       with the installed version, one line under it, and a status pill; then
       **When to check**, then **Newer release** only when there is one.
 - [ ] On a build that is the newest release, the pill reads `UP TO DATE` and
-      the line under **Installed** reads `TurtleDiver 2.0.0 is the newest
-      release`; there is no **Newer release** card.
+      the line under **Installed** reads `TurtleDiver <this build's version> is
+      the newest release`; there is no **Newer release** card.
 - [ ] **Check Now** replaces the pill with `CHECKING` while it runs, and the
       window keeps painting: the check must not freeze the interface (the
       request waits on a socket, so it runs off the main actor).

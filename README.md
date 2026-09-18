@@ -42,6 +42,15 @@ Since 1.3.0, TurtleDiver also ships a **Surge-style local proxy engine**: rule-b
   `com.xvii.kurakura.vpn` (it was `com.idraki.turtle.vpn`). Preferences and
   Keychain items are carried over on first launch — see
   [Renaming the app](#renaming-the-app-200)
+- **Updates** (2.1.0): TurtleDiver asks GitHub once at launch whether a newer
+  release exists (opt-out, plus **Check Now** in Settings ▸ Updates) and shows
+  the version, size, date and notes link. Nothing downloads until you click,
+  nothing installs while the tunnel is up, and nothing is installed unless four
+  gates pass — https provenance, the published SHA-256, a signature from the
+  same team, and the same bundle identifier at a newer version. It replaces
+  itself when the bundle is writable and points the Finder at the verified
+  image when it is not. It never elevates — see
+  [docs/UPDATES.md](docs/UPDATES.md)
 - **Settings** (1.4.0): a native sidebar-and-detail window — **Connection**
   (VPN, Profiles), **Proxy Engine** (Dashboard, Policies, Rules, Routing,
   Rule Sets),
@@ -244,6 +253,32 @@ existing installs (capture defaults on, reveal defaults off).
 Details are bounded — at most 32 headers per message, values truncated at 512
 bytes, and only the newest 200 rows keep a detail — and they live in memory
 only. They never reach `vpn.log`, which a source-scan test enforces.
+
+### Updates (2.1.0)
+
+Settings → **Updates** answers two questions, and they are deliberately
+separate. *Is there a newer release?* — asked once at launch (opt-out, in this
+pane) and on **Check Now**. It is one unauthenticated GET to
+`https://api.github.com/repos/idrakimuhamad/TurtleDiver/releases/latest`, and it
+sends nothing about you or this machine. *Get it* — only after a click, and only
+ever from that repo.
+
+The offer shows the version, the size, the release date and a link to the
+release notes. **Download and Install** is the only thing that fetches
+anything, and what it fetches has to pass four gates before it is allowed
+anywhere near `/Applications`: https provenance with exact asset naming, the
+published SHA-256 (and GitHub's own digest for the same asset — both must
+agree), a signature from the same team, and the same bundle identifier at a
+newer version. It replaces itself when the bundle is writable, and points the
+Finder at the verified image when it is not. It never asks for a password — a
+self-updater that elevates to replace itself can be talked into replacing
+anything.
+
+Installing means quitting, and quitting ends the tunnel, so a connected app
+refuses to install until you disconnect: the button becomes **Disconnect and
+Update…**, and the second click is the one that acts. `docs/UPDATES.md` is the
+long version — the feed contract, every gate, where the files go, and the
+bounded `/bin/sh` waiter that reopens the app afterwards.
 
 ### Routing (1.3.0)
 
