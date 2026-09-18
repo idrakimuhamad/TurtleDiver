@@ -457,10 +457,13 @@ app would then delete or openconnect (running as root) would write through.
 It is now
 `~/Library/Application Support/TurtleDiver/run/openconnect.pid`, in a directory
 created `0700`. The old `/tmp` path is never read or written; a stale one is
-deleted before each connection starts. A surviving openconnect is adopted through
-the existing `pgrep` tier instead — which is the tier that does the work anyway,
-because these files are written by a root process, so the `kill(pid, 0)` liveness
-probe answers `EPERM` and no PID tier can be trusted to adopt it.
+deleted before each connection starts. The app writes the record itself — when it
+adopts a surviving openconnect, and the moment a tunnel it started is
+established — so it names a pid whose liveness can be probed as this user. When
+there is no record at all the tunnel is still found: the app asks its own
+recorded elevation group first, and the `pgrep` scan is the last tier. That tier
+is a scan by process *name*, never by command line, and it is what covers a
+root-owned orphan nobody recorded.
 
 ## Troubleshooting
 

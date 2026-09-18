@@ -142,6 +142,44 @@ Update…**, and the second click, **Disconnect and Install**, is the one that
 disconnects and then installs. Two clicks, because the second one ends a
 connection the user may have started for a reason.
 
+What the model is handed is the *state* of the tunnel, not the click's intent.
+The bare **Download and Install** is only drawn when the app is not connected, so
+that is what it reports; the two-click path reports the *outcome* of the
+disconnect it awaited, so a teardown that could not end the tunnel refuses the
+install instead of racing it. Those two have to agree, and a first version of the
+awaited form did not: it started from "still up" and only replaced that on the
+two-click path, so the bare button — the one the disconnected case exists for —
+refused itself. Pressing it, live, with no `openconnect` running at all, is how
+that was found: the pane answered "Disconnect the VPN first".
+`UpdateWiringTests.testTheBareInstallReportsThePanesOwnKnowledgeOfTheTunnel`
+fails if the reported state goes back to a constant.
+
+## The first install, end to end
+
+Verified 2026-09-18 against the real published `v2.1.0` release, not a fixture. A
+scratch build claiming `1.1.0` (the recipe in
+`docs/MANUAL_TEST_CHECKLIST.md` § 0f) was installed as
+`~/Applications/TurtleDiver.app`, so the running app could replace itself:
+
+| Step | What happened |
+|---|---|
+| the pane | `Installed 1.1.0`, `Version 2.1.0 is available`, `AVAILABLE`, and the bare **Download and Install** — correctly, with no tunnel up |
+| the click | `TurtleDiver-2.1.0.dmg` (5 939 626 bytes) in `…/TurtleDiver/Updates/` within five seconds; no volume left mounted, and no leftover mount point |
+| the install | the bundle on disk became `2.1.0 (10)` while the *process* stayed `1.1.0` — and the pane said exactly that: `READY TO RESTART`, "TurtleDiver 2.1.0 is installed. It takes effect when the app restarts." |
+| the restart | `will-terminate-began pid=99322` → `will-terminate-ended pid=99322` → `launch pid=10239`, two seconds apart; the new process is `2.1.0` and its parent is `launchd`, which is the detached waiter's `open -a` |
+| afterwards | `Installed 2.1.0`, `TurtleDiver 2.1.0 is the newest release`, `UP TO DATE`; the offer card and the main-window banner are gone; the system proxy still points at `127.0.0.1:6152`, which the new process is listening on |
+
+Three things it also showed. The **quit is not automatic** — the install ends at
+`READY TO RESTART`, and the restart is a press, so the app never replaces itself
+mid-session without one. The downloaded image is **kept** in
+that `0700` directory after a successful install — it is the file **Show in
+Finder** reveals when an install is refused — and nothing prunes it yet. And an
+**absorbed click looks exactly like a no-op**: one press of **Restart Now**
+produced no lifecycle line, no waiter and no log entry, while an identical press
+two minutes later completed the flow. Nothing was left inconsistent — the button
+stayed and the second press worked — but a click that reaches nothing is the one
+failure this pane cannot report, and it is worth knowing what it looks like.
+
 ## What it will not do
 
 - **It will not download on its own.** The check runs at launch; the download

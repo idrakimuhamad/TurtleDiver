@@ -366,6 +366,16 @@ class VPNManager: ObservableObject {
         // openconnect. The file is plain text in Application Support: a stale or
         // recycled pid in it used to be signalled here, and a missing file used
         // to fall back to a name-wide `pkill openconnect`.
+        //
+        // What this path deliberately does NOT do is resolve a missing record the
+        // way `disconnect()` does (own process group, then a scan). It runs on the
+        // main thread inside `applicationWillTerminate`, with a budget of seconds,
+        // and it may not raise a dialog; a scan there could cost three seconds per
+        // candidate and still end in a prompt. It does not have to: the launch and
+        // adoption paths both record the pid, so a tunnel this app raised in this
+        // run *has* a record by the time a quit can happen. A tunnel with no
+        // record at all was launched by another build — the launch sweep of the
+        // next run reaps its own group, and `disconnect()` can still be asked.
         if let pid = OpenConnectPidFile.recordedPid() {
             // Blocking call — this is called from applicationWillTerminate on the main thread,
             // but it's essential to give openconnect time to restore network settings before exit.
@@ -402,21 +412,103 @@ class VPNManager: ObservableObject {
         reapLaunchProcessGroupInBackground()
     }
     
+    /// Ends the tunnel, at the user's request.
+    ///
+    /// The status flips to `.disconnecting` here so the window responds at once;
+    /// the teardown itself is asynchronous because finding the tunnel can need a
+    /// look at the process table, which does not belong on the main thread. Use
+    /// `disconnectAndWait()` where the *completion* matters — the update flow
+    /// installs and quits, and must not begin before the tunnel is down.
     func disconnect() {
-        if case .disconnected = status { return }
-        
+        let settings = SettingsManager.shared
+        guard beginDisconnect() else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let detection = await self.detectTunnelForTeardown()
+            await MainActor.run {
+                _ = self.performTunnelShutdown(detection: detection, settings: settings)
+            }
+        }
+    }
+
+    /// The same teardown, awaited. Answers whether the tunnel is *gone*.
+    ///
+    /// `false` also covers "there was nothing left to do", which is the honest
+    /// answer for a caller that is about to install over this app.
+    @discardableResult
+    func disconnectAndWait() async -> Bool {
+        let settings = SettingsManager.shared
+        let started = await MainActor.run { self.beginDisconnect() }
+        guard started else { return await MainActor.run { self.status == .disconnected } }
+        let detection = await detectTunnelForTeardown()
+        return await MainActor.run {
+            self.performTunnelShutdown(detection: detection, settings: settings)
+        }
+    }
+
+    /// The entry state both callers share: the status flip, the log line, and the
+    /// guard against two teardowns at once.
+    ///
+    /// That guard is needed *because* the teardown became asynchronous: while
+    /// this whole path blocked the main thread, a second press could not be
+    /// delivered until the first had finished, so re-entry was impossible by
+    /// accident. It is not any more.
+    private func beginDisconnect() -> Bool {
+        if case .disconnected = status { return false }
+        if case .disconnecting = status { return false }
+
         // Use appropriate log message depending on current state
         let wasConnecting = if case .connecting = status { true } else { false }
-        
+
         status = .disconnecting
         if wasConnecting {
             debugOutput += "Cancelling connection...\n"
         } else {
             debugOutput += "Disconnecting VPN...\n"
         }
-        
-        let settings = SettingsManager.shared
-        
+        return true
+    }
+
+    /// Resolves the tunnel to stop: the record, then this app's own process
+    /// group, then a verified scan of the machine.
+    ///
+    /// `pid == nil` in the result means *no verified openconnect is running*,
+    /// which is not the same as "no record on disk". Reading a missing record as
+    /// a missing tunnel is what produced a "Disconnected" over the live
+    /// root-owned tunnel this app had launched moments earlier: openconnect
+    /// writes no `--pid-file` of its own (it only does that when it backgrounds,
+    /// and the launch plan does not pass `--background`) and the record's other
+    /// writer is the *adoption* path, which by definition does not run for a
+    /// tunnel started by this run.
+    ///
+    /// `ps`/`pgrep` get up to 3 s each; the UI must not wait on them.
+    private func detectTunnelForTeardown() async -> ExistingConnectionDetection {
+        let pidFilePid = OpenConnectPidFile.recordedPid()
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: ExistingConnectionScanner.detect(pidFilePid: pidFilePid))
+            }
+        }
+    }
+
+    /// Ends what the resolution found, and reports what is true. Returns whether
+    /// the tunnel is gone.
+    private func performTunnelShutdown(
+        detection: ExistingConnectionDetection,
+        settings: SettingsManager
+    ) -> Bool {
+        // A record that named something else is reported and dropped, exactly as
+        // the adoption and connect paths do: that file is the one thing on disk
+        // claiming a tunnel is out there, so a wrong entry in it has to be
+        // visible rather than quietly acted upon.
+        for rejection in detection.rejections {
+            debugOutput += rejection.explanation + "\n"
+        }
+        if detection.pid == nil, !detection.rejections.isEmpty {
+            OpenConnectPidFile.discard()
+            debugOutput += "Discarded a PID file that named no openconnect\n"
+        }
+
         // STEP 1: Gracefully terminate openconnect (allows clean network teardown)
         //
         // The elevation in this call is what makes a disconnect work at all. The
@@ -424,7 +516,7 @@ class VPNManager: ObservableObject {
         // this user sends reaches it; the app asks for the same elevation that
         // started it. `mayPrompt` is true because a person is here and asked.
         var tunnelEnded = true
-        if let pid = OpenConnectPidFile.recordedPid() {
+        if let pid = detection.pid {
             debugOutput += "Terminating openconnect (PID: \(pid)) gracefully...\n"
             switch terminateGracefully(pid: pid, mayPrompt: true) {
             case .exitedCleanly:
@@ -446,6 +538,11 @@ class VPNManager: ObservableObject {
                 debugOutput += "PID \(pid) is not an openconnect — left alone\n"
                 OpenConnectPidFile.discard()
             }
+        } else {
+            // Nothing verified is tunnelling. Saying so is not decoration: the
+            // silent version of this branch is what made "Disconnected" and a
+            // live root openconnect indistinguishable in this log.
+            debugOutput += "No openconnect to stop\n"
         }
         
         // No pkill -9 backup — it races with graceful SIGTERM and prevents
@@ -460,7 +557,7 @@ class VPNManager: ObservableObject {
         // gone. The record is how a later disconnect, or the next connect, finds
         // a surviving process again.
         if tunnelEnded {
-            try? FileManager.default.removeItem(atPath: pidFilePath)
+            OpenConnectPidFile.discard()
         }
         
         // STEP 3: Gracefully terminate the bash/sudo wrapper process
@@ -514,6 +611,7 @@ class VPNManager: ObservableObject {
             debugOutput += "VPN NOT disconnected — openconnect is still running\n"
         }
         reapLaunchProcessGroupInBackground()
+        return tunnelEnded
     }
     
     private func executeVPNConnection() async {
@@ -696,6 +794,12 @@ class VPNManager: ObservableObject {
                             self.status = .connected
                             self.startDurationTimer(startingAt: Date())
                             self.cancelConnectionTimer()
+                            // Cancelling the connect timer cancels the *poller*
+                            // too, so this is the last chance to write down what
+                            // was just launched. Without the record, the next
+                            // disconnect has no pid to signal — see
+                            // `recordOwnTunnelPid`.
+                            self.recordOwnTunnelPid()
                             if let id = self.currentAttemptId {
                                 let attempt = ConnectionAttempt(
                                     id: id,
@@ -1246,7 +1350,14 @@ class VPNManager: ObservableObject {
             }
             
             guard let pid = detectedPid else { return }
-            
+
+            // Record it before the status flips, and off the main thread: the
+            // write is what a later disconnect, connect timeout, or quit reads to
+            // *name* this tunnel, and this poller stops the moment the status
+            // changes. The pid is already verified — the detector only returns
+            // candidates it has checked.
+            recordOwnTunnelPid(pid)
+
             // Connection detected! Update status.
             log.flush()
             pollTimer.cancel()
@@ -1404,6 +1515,14 @@ class VPNManager: ObservableObject {
         
         // Gracefully terminate openconnect (allows clean network teardown) — but
         // only a pid that is verified to be an openconnect.
+        //
+        // This is the connect *timeout* path, so it cannot resolve a missing
+        // record the way `disconnect()` does (`mayPrompt: false`, and the timeout
+        // may itself be the sign that something is stuck). It does not need to:
+        // this runs 90 s after the launch and only while the status is still
+        // `.connecting`, and the connect poller has by then read the pid off the
+        // process table and recorded it — or nothing verifiable is running and
+        // this is the honest no-op it looks like.
         if let pid = OpenConnectPidFile.recordedPid() {
             // `mayPrompt: false`: the connect just timed out — very possibly
             // because a dialog went unanswered — so this path must not put up
@@ -1604,6 +1723,40 @@ class VPNManager: ObservableObject {
         }
     }
     
+    /// Records the pid of the tunnel *this run* launched, so a later disconnect,
+    /// connect timeout, or quit can name it again.
+    ///
+    /// `knownPid` is a pid the caller has already seen verified (the connect
+    /// poller). `nil` means "find it", which costs a bounded scan of the process
+    /// table and therefore never runs on the main thread.
+    ///
+    /// Either way the value is checked before it is written. This record is what
+    /// three teardown paths will later *signal*, and the rest of this file is
+    /// full of comments about what a record naming the wrong process once did.
+    private func recordOwnTunnelPid(_ knownPid: Int32? = nil) {
+        let store: (Int32) -> Void = { [weak self] pid in
+            guard OpenConnectPidFile.record(pid) else { return }
+            DispatchQueue.main.async {
+                self?.debugOutput += "Recorded the tunnel's PID (\(pid)) so it can be ended later\n"
+            }
+        }
+
+        if let knownPid {
+            guard OpenConnectProcess.isOpenConnect(pid: knownPid) else { return }
+            store(knownPid)
+            return
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            // No pid file: the question is only "which of these is mine", and the
+            // detector answers it from this app's own recorded process group
+            // first, so the name-wide scan is the last resort it always was.
+            let detection = ExistingConnectionScanner.detect(pidFilePid: nil)
+            guard let pid = detection.pid else { return }
+            store(pid)
+        }
+    }
+
     // MARK: - Existing Connection Detection
     
     /// Checks if openconnect is already running (from a previous session)
@@ -1652,7 +1805,10 @@ class VPNManager: ObservableObject {
         
         // Write the PID to the PID file so disconnect(), forceTerminate(),
         // and cleanupOnTermination() can find and gracefully kill openconnect.
-        try? "\(pid)\n".write(toFile: pidFilePath, atomically: false, encoding: .utf8)
+        // The same call the launch path uses: one writer, one shape.
+        if !OpenConnectPidFile.record(pid) {
+            debugOutput += "Warning: could not record the tunnel's PID — the next disconnect will have to find it again\n"
+        }
         
         debugOutput += "Found existing VPN connection (PID: \(pid), verified openconnect)\n"
         status = .connected

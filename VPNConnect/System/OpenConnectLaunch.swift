@@ -340,6 +340,35 @@ public enum OpenConnectPidFile {
         return pid
     }
 
+    /// Records a pid, so a later disconnect, connect timeout, or quit can *name*
+    /// the tunnel again.
+    ///
+    /// This is the only writer of the file, and it has two callers: the launch
+    /// path records the tunnel it started, and the adoption path records the one
+    /// it found. Neither is optional. `openconnect` writes no `--pid-file` of its
+    /// own — it only does that when it backgrounds, and the launch never passes
+    /// `--background` — so a tunnel this app started in this run had *no* record
+    /// at all, and every teardown path reads that record to decide whether a
+    /// tunnel is still out there. A missing record was read as a missing tunnel:
+    /// the app said "Disconnected" over a live root process it had just launched
+    /// and never signalled it.
+    ///
+    /// `pid > 1` for the same reason `recordedPid` refuses anything less: a
+    /// record of `0` or `1` must never reach `kill`. The write is atomic, and it
+    /// lands in this app's own `0700` directory, so the name cannot be a symlink
+    /// planted by anyone else.
+    @discardableResult
+    public static func record(_ pid: Int32, at pidFile: URL = OpenConnectPidFile.path) -> Bool {
+        guard pid > 1 else { return false }
+        prepareDirectory(for: pidFile)
+        do {
+            try "\(pid)\n".write(to: pidFile, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Throws the record away — for a file that names something that is not an
     /// openconnect, or a process that is gone.
     public static func discard(at pidFile: URL = OpenConnectPidFile.path) {

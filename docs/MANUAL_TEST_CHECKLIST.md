@@ -487,11 +487,20 @@ vpn-slice went on to resolve its host list.
 - [ ] `ps -p <pid> -o command=` still shows `--force-dpd=10 … <host>`
       → the connection is genuinely openconnect with the usual options.
 - [ ] `stat -f %Lp ~/Library/Application\ Support/TurtleDiver/run` → `700`, and
-      `/tmp/turtlediver.pid` is gone once a new connection starts. (The pid file
-      itself is normally *absent*: openconnect only writes `--pid-file` when it
-      daemonises, and this app does not pass `--background`. The app writes the
-      file itself when it adopts a surviving openconnect, so it is usually the
-      safe *path* that matters here, not a file.)
+      `/tmp/turtlediver.pid` is gone once a new connection starts. (openconnect
+      only writes `--pid-file` when it daemonises, and this app does not pass
+      `--background` — so openconnect never creates the file. The app writes it
+      itself: when it adopts a surviving tunnel, and now the moment a tunnel it
+      started is established, so after a connect it should name the running
+      process. A missing record is still never read as "no tunnel" — see the
+      next item.)
+- [ ] With a tunnel up, delete the record — `rm
+      ~/Library/Application\ Support/TurtleDiver/run/openconnect.pid` — then press
+      **Disconnect**. The tunnel still ends: the app resolves it through its own
+      recorded elevation group and then the machine-wide scan, the row reads
+      `Disconnected`, and `pgrep -x openconnect` finds nothing. **This is the case
+      the previous build got wrong in the other direction** — it reported
+      `Disconnected` while the root `openconnect` kept running.
 - [ ] Disconnect → openconnect exits, and the app still adopts/kills a
       surviving tunnel (the PID tier only matches a same-user process, so a
       root openconnect is found by the `pgrep` tier as before).

@@ -202,15 +202,28 @@ struct UpdatesView: View {
 
     /// `disconnecting` is true only when the user asked for both, in two clicks.
     ///
-    /// The tunnel state the model is given is the user's *intent*, not a status
-    /// read: `VPNManager.disconnect()` returns before the process is gone, so
-    /// reading the status here would race the disconnect this very click asked
-    /// for. A connected app that was *not* told to disconnect passes `true`, and
-    /// the model refuses — which is the promise the tests pin.
+    /// The disconnect is *awaited* before the install starts, and what the model
+    /// is told is the outcome of that disconnect rather than the user's intent.
+    /// Three things need that. The install quits this app and relaunches the new
+    /// one, so it must not start while the teardown is still running. The teardown
+    /// is asynchronous now — finding the tunnel can need a look at the process
+    /// table — so the ordering has to be explicit rather than a side effect of a
+    /// blocked main thread. And a disconnect that could *not* end the tunnel has
+    /// to refuse the install instead of racing it: `false` from
+    /// `disconnectAndWait()` means the tunnel is still there, and the model's
+    /// refusal is then the honest answer. When the user was *not* asked to
+    /// disconnect, what the model is told is the pane's own knowledge of the
+    /// tunnel, read here at the press: a connected app then passes `true` and the
+    /// model refuses — the promise the tests pin.
     private func startInstall(disconnecting: Bool) {
-        if disconnecting { vpn.disconnect() }
         confirmingDisconnect = false
-        Task { await model.install(isTunnelUp: !disconnecting) }
+        Task {
+            var tunnelStillUp = isConnected
+            if disconnecting {
+                tunnelStillUp = !(await vpn.disconnectAndWait())
+            }
+            await model.install(isTunnelUp: tunnelStillUp)
+        }
     }
 
     /// Quits into the build that was just installed. The waiter is started before

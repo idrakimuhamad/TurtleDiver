@@ -107,6 +107,9 @@ public struct ExistingConnectionDetection: Equatable, Sendable {
     public enum Source: String, Equatable, Sendable {
         /// The pid recorded in `…/run/openconnect.pid`.
         case pidFile
+        /// A live member of the process group this app's own elevation wrapper
+        /// recorded in `…/run/elevation.pgid`.
+        case ownProcessGroup
         /// A process whose name is openconnect, found by `pgrep -x`.
         case scanned
     }
@@ -159,17 +162,22 @@ public enum ExistingConnectionDetector {
     /// So the decision table below reads plainly.
     private typealias Rejection = ExistingConnectionDetection.Rejection
     /// Pure. Tier 1 is the pid file — how a tunnel this app started is found
-    /// again; Tier 2 is a name-exact scan — how a tunnel started by an earlier
-    /// build (openconnect only writes `--pid-file` with `--background`, which
-    /// the launch plan does not use) or by hand is found.
+    /// again; Tier 2 is the process group this app's own elevation wrapper
+    /// recorded — how a tunnel that was launched in *this* run is found when the
+    /// record is missing, without looking at anybody else's processes; Tier 3 is
+    /// a name-exact scan — how a tunnel started by an earlier build (openconnect
+    /// only writes `--pid-file` with `--background`, which the launch plan does
+    /// not use) or by hand is found.
     ///
     /// A candidate is adopted only when it is alive, is not this app, **and** is
     /// an openconnect. Every refusal of the pid file's pid is reported, because
-    /// that file is the one thing on disk claiming a tunnel exists; a refused
-    /// scanned pid is reported only when it is alive and simply not an
-    /// openconnect (dead ones are ordinary races).
+    /// that file is the one thing on disk claiming a tunnel exists. A refused
+    /// *scanned* candidate is reported only when it is alive and simply not an
+    /// openconnect (dead ones are ordinary races). A refused member of the app's
+    /// own group is not reported at all — see the loop.
     public static func decide(
         pidFilePid: Int32?,
+        ownGroupPids: [Int32] = [],
         scannedPids: [Int32],
         ownPid: Int32,
         isRunning: (Int32) -> Bool,
@@ -189,6 +197,22 @@ public enum ExistingConnectionDetector {
             }
         }
 
+        // The app's own group is checked before the whole machine is scanned:
+        // only this app's wrapper put processes in it, so a pid found here needs
+        // no argument about who it belongs to.
+        for candidate in ownGroupPids {
+            guard candidate != ownPid else { continue }
+            guard isRunning(candidate) else { continue }
+            if isOpenConnect(candidate) {
+                return ExistingConnectionDetection(pid: candidate, source: .ownProcessGroup, rejections: rejections)
+            }
+            // Deliberately no rejection. This list is the app's *own* process
+            // group, so it always holds the wrapper's `bash`, its `sudo`, and
+            // possibly `vpn-slice`; refusing those says nothing about a tunnel,
+            // and reporting them would bury the one refusal that means
+            // something — a pid file naming a process that is not an openconnect.
+        }
+
         for candidate in scannedPids where candidate != ownPid {
             guard isRunning(candidate) else { continue }
             if isOpenConnect(candidate) {
@@ -201,20 +225,36 @@ public enum ExistingConnectionDetector {
     }
 }
 
-/// The I/O half: runs the scan and hands the result to `ExistingConnectionDetector`.
+/// The I/O half: reads the group this app's own wrapper recorded, runs the
+/// scan, and hands both to `ExistingConnectionDetector`.
 public enum ExistingConnectionScanner {
     public static func detect(
         pidFilePid: Int32?,
         ownPid: Int32 = Int32(ProcessInfo.processInfo.processIdentifier),
+        elevationRecord: URL = ElevationRecord.path,
         using runner: any BoundedProcessRunning = SystemBoundedProcessRunner()
     ) -> ExistingConnectionDetection {
         ExistingConnectionDetector.decide(
             pidFilePid: pidFilePid,
+            ownGroupPids: ownProcessGroupPids(elevationRecord: elevationRecord),
             scannedPids: OpenConnectProcess.pids(using: runner),
             ownPid: ownPid,
             isRunning: { OpenConnectProcess.isRunning(pid: $0) },
             isOpenConnect: { OpenConnectProcess.isOpenConnect(pid: $0, using: runner) }
         )
+    }
+
+    /// The live members of the process group the wrapper for *this app's* last
+    /// launch recorded.
+    ///
+    /// This is the handle on a tunnel this app launched itself: openconnect
+    /// writes no `--pid-file` without `--background`, so for a tunnel started in
+    /// this run the recorded group is the only thing on disk that names it. The
+    /// record is written by the wrapper shell itself (`ps -o pgid= -p "$!"`),
+    /// which is why it survives the wrapper being reparented.
+    private static func ownProcessGroupPids(elevationRecord: URL) -> [Int32] {
+        guard let pgid = ElevationRecord.read(from: elevationRecord) else { return [] }
+        return ElevatedTerminator.processGroupPids(pgid)
     }
 }
 

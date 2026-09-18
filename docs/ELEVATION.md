@@ -235,6 +235,44 @@ of its members is used — so taking the default is not the same as creating the
 manager. Test call sites pass `StubTunnelStatus`, and
 `TunnelAdoptionHygieneTests` fails if one of them goes back to the default.
 
+### 8. A tunnel is resolved before it is signalled
+
+The pid record is a convenience, not the truth. For a while the teardown read it
+as one: `tunnelEnded` started `true` and only a *record* could make it false — so
+a tunnel this app had started, with no record on disk because it wrote none until
+it adopted something, was reported `Disconnected` while a root-owned
+`openconnect` was still running. That is the mirror image of the fabricated
+`Connected` state, and just as bad: the app had no handle it trusted, so it said
+the work was done.
+
+Three things changed:
+
+- **The record is written when a tunnel starts**, not only when one is adopted.
+  The process-list poller and the output sniffer both call the same single writer,
+  and only after the pid has been verified to be an `openconnect` (`record`
+  itself refuses a pid of 1 or less).
+- **The teardown resolves the tunnel instead of trusting the record.** It asks,
+  in order: the pid file; **the process group this app recorded when it elevated**
+  (`run/elevation.pgid`); and the machine-wide name scan. The order is asserted
+  rather than incidental —
+  `ExistingConnectionTests.testThisAppsOwnGroupWinsOverTheMachineWideScan` fails
+  if the scan is consulted first. The group tier reports no rejections: a group of
+  wrapper processes is not evidence of a bad record, and saying so would fill the
+  log with noise at every teardown.
+- **"No record" is never "no tunnel".** It means "a tunnel this run cannot
+  name", and the resolution continues from there.
+
+A group that still holds an `openconnect` is left alone by the launch sweep for
+the same reason — the group is a *handle*, and ending what is inside it is the
+live teardown's job, not the sweep's. The sweep reaps the group only once nothing
+in it is an openconnect.
+
+The live proof is in the history row rather than in the code: with
+`run/openconnect.pid` deleted while a root-owned tunnel was up, pressing
+**Disconnect** ended the tunnel and the row read
+`openconnect (PID: …) ended with elevation`, `network restored`, then
+`reaping stale process group …` for the now-empty group.
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:

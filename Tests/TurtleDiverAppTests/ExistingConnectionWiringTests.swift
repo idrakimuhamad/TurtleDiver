@@ -145,6 +145,141 @@ final class ExistingConnectionWiringTests: XCTestCase {
                       "the pre-connect scan must be awaited off the main thread")
     }
 
+    // MARK: - Naming a tunnel this run started
+
+    /// A tunnel this app launched itself had *no* record on disk, and every
+    /// teardown path reads that record to decide whether a tunnel is still out
+    /// there — so the app reported "Disconnected" over a live root process it had
+    /// launched seconds earlier and never signalled it.
+    ///
+    /// The launch cannot leave the record to openconnect: `--pid-file` is written
+    /// only when it backgrounds, and the launch plan does not pass
+    /// `--background`. So the app writes it, at both places that learn the pid.
+    func testTheTunnelThisRunStartedIsRecordedAtEstablishment() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+
+        // The stdout sniffer: the tunnel is up, and the connect timer — which owns
+        // the poller — is cancelled in that same branch, so this is the last
+        // chance either of them gets.
+        let connect = try body(of: "private func executeVPNConnection() async", in: code)
+        let snifferCancel = try XCTUnwrap(connect.range(of: "self.cancelConnectionTimer()"),
+                                          "the establishment branch must be the one that cancels the timer")
+        let snifferRecord = try XCTUnwrap(connect.range(of: "self.recordOwnTunnelPid()"),
+                                          "the establishment branch must record the pid it just made")
+        XCTAssertLessThan(snifferCancel.lowerBound, snifferRecord.lowerBound,
+                          "the record has to be written where the poller is stopped")
+
+        // The connect poller: it has a pid the detector already verified, so it
+        // can record without a second look at the machine.
+        let poller = try body(of: "private func startConnectionPollingTimer", in: code)
+        let pollGuard = try XCTUnwrap(poller.range(of: "guard let pid = detectedPid else"))
+        let pollRecord = try XCTUnwrap(poller.range(of: "recordOwnTunnelPid(pid)"),
+                                       "the poller must record the pid it just verified")
+        XCTAssertLessThan(pollGuard.lowerBound, pollRecord.lowerBound)
+        XCTAssertTrue(poller.contains("DispatchQueue.global(qos: .background)"),
+                      "the poll runs on a background queue, so the write is not on the main thread")
+
+        // And the writer itself verifies what it is handed, and never scans on the
+        // main thread when it has to find the pid for itself.
+        let record = try body(of: "private func recordOwnTunnelPid(_ knownPid: Int32? = nil)", in: code)
+        XCTAssertLessThan(record.count, 2_000)
+        XCTAssertTrue(record.contains("OpenConnectProcess.isOpenConnect(pid: knownPid)"),
+                      "a pid a caller offers is still verified before it is written down")
+        XCTAssertTrue(record.contains("DispatchQueue.global"),
+                      "finding the pid costs a bounded scan, which is not a main-thread job")
+        XCTAssertTrue(record.contains("OpenConnectPidFile.record(pid)"),
+                      "and the write goes through the single writer")
+    }
+
+    /// One writer and one remover for the record. Two independent writers is how
+    /// "what is on disk" and "what was started" drifted apart in the first place.
+    func testThePidRecordHasASingleWriter() throws {
+        let manager = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        XCTAssertFalse(manager.contains("\"\\(pid)\\n\".write(toFile:"),
+                       "the app must write the record through OpenConnectPidFile.record")
+        XCTAssertFalse(manager.contains("removeItem(atPath: pidFilePath)"),
+                       "and remove it through OpenConnectPidFile.discard")
+
+        let launch = try strippedCode(at: "VPNConnect/System/OpenConnectLaunch.swift")
+        let writes = launch.components(separatedBy: "\"\\(pid)\\n\".write(to:").count - 1
+        XCTAssertEqual(writes, 1, "expected exactly one write, inside OpenConnectPidFile.record")
+        XCTAssertTrue(launch.contains("public static func record(_ pid: Int32"),
+                      "the writer has to refuse what the reader refuses")
+        XCTAssertTrue(launch.contains("guard pid > 1 else { return false }"))
+    }
+
+    // MARK: - "No record" is not "no tunnel"
+
+    /// The defect in one assertion. The teardown used to be reachable *only*
+    /// through `if let pid = OpenConnectPidFile.recordedPid()`, so a missing
+    /// record silently meant "nothing to do" and the status said Disconnected
+    /// over a live tunnel. It now resolves first — the record, then this app's own
+    /// process group, then a verified scan — exactly as the pre-connect path does.
+    func testDisconnectResolvesTheTunnelInsteadOfTrustingTheRecord() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+
+        let disconnect = try body(of: "func disconnect()", in: code)
+        XCTAssertLessThan(disconnect.count, 2_000)
+        XCTAssertTrue(disconnect.contains("detectTunnelForTeardown()"),
+                      "disconnect must resolve the tunnel, not read the record and hope")
+        XCTAssertTrue(disconnect.contains("performTunnelShutdown(detection:"),
+                      "and the teardown has to be given what was resolved")
+
+        let resolve = try body(of: "private func detectTunnelForTeardown() async", in: code)
+        XCTAssertTrue(resolve.contains("OpenConnectPidFile.recordedPid()"),
+                      "the record is still the first source")
+        XCTAssertTrue(resolve.contains("ExistingConnectionScanner.detect(pidFilePid: pidFilePid)"),
+                      "and the verified scanner is what answers when the record does not")
+        XCTAssertTrue(resolve.contains("withCheckedContinuation"),
+                      "resolving can spawn `ps`, so it is awaited off the main thread")
+
+        // The old gate, spelled out: the teardown itself must not sit inside a test
+        // of whether a record exists.
+        XCTAssertFalse(code.contains("if let pid = OpenConnectPidFile.recordedPid() {\n            debugOutput += \"Terminating openconnect"),
+                       "the teardown must not be reachable only when a record happens to exist")
+
+        // And the honest branch survives the refactor.
+        let teardown = try body(of: "private func performTunnelShutdown(", in: code)
+        XCTAssertTrue(teardown.contains("status = .connected"))
+        XCTAssertTrue(teardown.contains("Failed - Still Connected"))
+        XCTAssertTrue(teardown.contains("return tunnelEnded"))
+    }
+
+    /// The teardown became asynchronous, so it can no longer rely on a blocked
+    /// main thread to keep two of them from overlapping.
+    func testASecondDisconnectCannotStartASecondTeardown() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        let begin = try body(of: "private func beginDisconnect()", in: code)
+        XCTAssertLessThan(begin.count, 2_000)
+        XCTAssertTrue(begin.contains("if case .disconnecting = status { return false }"),
+                      "a teardown already running must not be started again")
+        XCTAssertTrue(begin.contains("status = .disconnecting"),
+                      "and the window has to be told at once, before any process work")
+
+        // Both entry points share that state, so neither can skip it.
+        let disconnect = try body(of: "func disconnect()", in: code)
+        let awaited = try body(of: "func disconnectAndWait() async", in: code)
+        for body_of_entry in [Substring(disconnect), Substring(awaited)] {
+            XCTAssertTrue(body_of_entry.contains("beginDisconnect()"))
+        }
+    }
+
+    /// The group record is read *before* the machine is scanned, and it comes from
+    /// this app's own elevation record rather than from a guess. The ordering is
+    /// what keeps a disconnect from touching a tunnel that is not ours.
+    func testTheAppOwnGroupIsPreferredOverTheMachineWideScan() throws {
+        let existing = try strippedCode(at: "VPNConnect/System/ExistingConnection.swift")
+        let group = try XCTUnwrap(existing.range(of: "ownProcessGroupPids(elevationRecord: elevationRecord)"))
+        let scan = try XCTUnwrap(existing.range(of: "OpenConnectProcess.pids(using: runner)"))
+        XCTAssertLessThan(group.lowerBound, scan.lowerBound,
+                          "the group is resolved before the machine-wide scan")
+        XCTAssertTrue(existing.contains("ElevationRecord.read(from: elevationRecord)"),
+                      "the group comes from this app's own recorded elevation")
+        XCTAssertTrue(existing.contains("ElevatedTerminator.processGroupPids(pgid)"))
+        XCTAssertTrue(existing.contains("case ownProcessGroup"),
+                      "a pid found this way has to say so in the log")
+    }
+
     // MARK: - No stale records
 
     /// A pid file that outlives the process it named is the same stale state one
@@ -153,7 +288,7 @@ final class ExistingConnectionWiringTests: XCTestCase {
     func testThePidRecordIsClearedOnceTheProcessIsGone() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
 
-        for function in ["func disconnect()", "func cleanupOnTermination()", "func forceTerminate()"] {
+        for function in ["private func performTunnelShutdown(", "func cleanupOnTermination()", "func forceTerminate()"] {
             let body = try body(of: function, in: code)
             // And the slice really is this one function: a helper that ran to the
             // end of the file would satisfy the assertions below for free.

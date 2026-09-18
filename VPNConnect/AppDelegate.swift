@@ -744,12 +744,13 @@ final class MenuBarManager: NSObject {
     }
     
     @objc private func quitApp() {
-        // Disconnect if connected
-        if case .connected = VPNManager.shared.status {
-            VPNManager.shared.disconnect()
-        }
-        
-        // Terminate the app. applicationWillTerminate in AppDelegate will handle cleanup.
+        // No disconnect call here. `applicationWillTerminate` owns the quit-time
+        // teardown (`cleanupOnTermination`), and it is the *only* teardown that
+        // runs for every way this app can be quit. Calling `disconnect()` first
+        // duplicated it — and now that `disconnect()` resolves the tunnel's pid
+        // asynchronously it would also start a teardown that `NSApp.terminate`
+        // immediately races. `cleanupOnTermination` is synchronous, bounded, and
+        // may not prompt, which is what a quit needs.
         NSApp.terminate(nil)
     }
 

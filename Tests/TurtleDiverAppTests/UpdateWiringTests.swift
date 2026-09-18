@@ -162,7 +162,8 @@ final class UpdateWiringTests: XCTestCase {
 
         let start = try body(of: "private func startInstall", in: code)
         XCTAssertLessThan(start.count, 2_000)
-        let disconnect = try XCTUnwrap(start.range(of: "vpn.disconnect()"))
+        let disconnect = try XCTUnwrap(start.range(of: "tunnelStillUp = !(await vpn.disconnectAndWait())"),
+                                       "the disconnect is awaited, and its answer decides what the model is told")
         let install = try XCTUnwrap(start.range(of: "model.install(isTunnelUp:"))
         XCTAssertLessThan(disconnect.lowerBound, install.lowerBound,
                           "the tunnel goes down before the install is asked for")
@@ -177,6 +178,27 @@ final class UpdateWiringTests: XCTestCase {
                         "and only the arming click reaches it")
         XCTAssertNotNil(code.range(of: "vpn.status == .connected"),
                         "and that is read from the connection, not remembered")
+    }
+
+    /// The bare "Download and Install" exists for an app that is *not* connected,
+    /// so that is the state the model has to be handed. The first version started
+    /// from `true` and only replaced it when the user had asked for the disconnect
+    /// first — so the one case the bare button is for was told "the tunnel is
+    /// still up" and refused itself. Found live: with no openconnect running at
+    /// all, the pane answered "Disconnect the VPN first".
+    func testTheBareInstallReportsThePanesOwnKnowledgeOfTheTunnel() throws {
+        let code = try strippedCode(at: pane)
+        let start = try body(of: "private func startInstall", in: code)
+
+        let reported = try XCTUnwrap(start.range(of: "var tunnelStillUp = isConnected"),
+                                     "what the model is told starts from the connection, read at the press")
+        XCTAssertFalse(start.contains("var tunnelStillUp = true"),
+                       "a default of `true` refuses the disconnected case the bare button is for")
+        let disconnect = try XCTUnwrap(start.range(of: "tunnelStillUp = !(await vpn.disconnectAndWait())"),
+                                       "and a requested teardown still decides it")
+        XCTAssertLessThan(reported.lowerBound, disconnect.lowerBound)
+        XCTAssertNotNil(start.range(of: "await model.install(isTunnelUp: tunnelStillUp)"),
+                        "the model is told the resolved state, never the request")
     }
 
     /// The refusal has to happen before anything is downloaded, and the work

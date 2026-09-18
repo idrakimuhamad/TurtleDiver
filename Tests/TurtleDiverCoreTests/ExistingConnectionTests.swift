@@ -297,12 +297,122 @@ final class ExistingConnectionTests: XCTestCase {
         runner.script(executable: OpenConnectProcess.pgrepExecutable, arguments: ["-x", "openconnect"], result: pgrepSays([1]))
         runner.script(executable: OpenConnectProcess.psExecutable, arguments: ["-o", "comm=", "-p", "1"], result: psSays("/opt/homebrew/bin/openconnect"))
 
-        let detection = ExistingConnectionScanner.detect(pidFilePid: nil, ownPid: 999, using: runner)
+        let detection = ExistingConnectionScanner.detect(
+            pidFilePid: nil,
+            ownPid: 999,
+            elevationRecord: noGroupRecord,
+            using: runner
+        )
         XCTAssertEqual(detection.pid, 1)
         XCTAssertEqual(detection.source, .scanned)
         XCTAssertEqual(runner.calls.first, "pgrep -x openconnect")
         XCTAssertTrue(runner.calls.contains("ps -o comm= -p 1"))
         XCTAssertFalse(runner.calls.contains { $0.contains("-f") })
+    }
+
+    // MARK: - The app's own process group
+
+    /// The reported defect's shape: a tunnel this app launched itself, with no pid
+    /// file to name it. The group the elevation wrapper recorded is the only
+    /// handle it left behind.
+    func testAnOpenConnectInThisAppsOwnRecordedGroupIsFound() {
+        let detection = ExistingConnectionDetector.decide(
+            pidFilePid: nil,
+            ownGroupPids: [500],
+            scannedPids: [8600],
+            ownPid: 999,
+            isRunning: { _ in true },
+            isOpenConnect: { $0 == 500 }
+        )
+        XCTAssertEqual(detection.pid, 500)
+        XCTAssertEqual(detection.source, .ownProcessGroup)
+        XCTAssertEqual(detection.rejections, [])
+    }
+
+    /// The pid file is a record of a tunnel the app started *or adopted*, which
+    /// makes it a narrower claim than "something in our group": the file is
+    /// still read first.
+    func testThePidFileStillWinsOverTheAppsOwnGroup() {
+        let detection = ExistingConnectionDetector.decide(
+            pidFilePid: 8510,
+            ownGroupPids: [500],
+            scannedPids: [],
+            ownPid: 999,
+            isRunning: { _ in true },
+            isOpenConnect: { _ in true }
+        )
+        XCTAssertEqual(detection.pid, 8510)
+        XCTAssertEqual(detection.source, .pidFile)
+    }
+
+    /// The group is searched before the whole machine, but a group that holds no
+    /// openconnect must not stop the search: only this app's wrapper puts
+    /// processes in that group, and it always holds the wrapper's own shell.
+    func testAGroupWithoutAnOpenConnectDoesNotStopTheSearch() {
+        let detection = ExistingConnectionDetector.decide(
+            pidFilePid: nil,
+            ownGroupPids: [500],
+            scannedPids: [8600],
+            ownPid: 999,
+            isRunning: { _ in true },
+            isOpenConnect: { $0 == 8600 }
+        )
+        XCTAssertEqual(detection.pid, 8600)
+        XCTAssertEqual(detection.source, .scanned)
+        XCTAssertEqual(detection.rejections, [],
+                       "the wrapper's own shell in our group is not a refusal about a tunnel")
+    }
+
+    /// A group hit is a narrower claim than a scan hit, and it is checked first:
+    /// when both tiers hold an openconnect, the one this app's own launch produced
+    /// is the one to stop.
+    func testThisAppsOwnGroupWinsOverTheMachineWideScan() {
+        let detection = ExistingConnectionDetector.decide(
+            pidFilePid: nil,
+            ownGroupPids: [500],
+            scannedPids: [8600],
+            ownPid: 999,
+            isRunning: { _ in true },
+            isOpenConnect: { _ in true }
+        )
+        XCTAssertEqual(detection.pid, 500)
+        XCTAssertEqual(detection.source, .ownProcessGroup)
+    }
+
+    /// The group tier exists to be *silent* about what it does not adopt. This is
+    /// the case that matters: our group holds exactly the launch machinery — the
+    /// wrapper's `bash`, its `sudo`, and `vpn-slice` — and none of that is evidence
+    /// about a tunnel. Reporting those would bury the refusal that does mean
+    /// something (a pid file naming a process that is not an openconnect) and
+    /// would make a stale-file cleanup look like a tunnel that had been found.
+    func testAGroupOfWrapperProcessesAloneIsNotATunnel() {
+        let detection = ExistingConnectionDetector.decide(
+            pidFilePid: nil,
+            ownGroupPids: [500, 501],
+            scannedPids: [],
+            ownPid: 999,
+            isRunning: { _ in true },
+            isOpenConnect: { _ in false }
+        )
+        XCTAssertNil(detection.pid)
+        XCTAssertEqual(detection.rejections, [])
+    }
+
+    /// A dead pid is an ordinary race, and this app is not a tunnel either — so
+    /// the group is filtered the way the scan is. The pid file is the only tier
+    /// that reports those, because it is the only tier that *claims* a tunnel.
+    func testADeadOrThisAppInOurGroupIsSkipped() {
+        let detection = ExistingConnectionDetector.decide(
+            pidFilePid: nil,
+            ownGroupPids: [999, 500],
+            scannedPids: [8600],
+            ownPid: 999,
+            isRunning: { $0 == 8600 },
+            isOpenConnect: { _ in true }
+        )
+        XCTAssertEqual(detection.pid, 8600)
+        XCTAssertEqual(detection.source, .scanned)
+        XCTAssertEqual(detection.rejections, [])
     }
 
     // MARK: - Real processes
@@ -335,10 +445,82 @@ final class ExistingConnectionTests: XCTestCase {
         // is not "nothing" merely because the file was rejected: on a machine that
         // is *actually* connected it returns that tunnel, and rightly so. What
         // must never happen is the decoy being adopted.
-        let detection = ExistingConnectionScanner.detect(pidFilePid: decoy.processIdentifier)
+        let detection = ExistingConnectionScanner.detect(
+            pidFilePid: decoy.processIdentifier,
+            elevationRecord: noGroupRecord
+        )
         XCTAssertNotEqual(detection.pid, decoy.processIdentifier,
                           "a process whose arguments merely mention openconnect must never be adopted")
         XCTAssertEqual(detection.rejections.map(\.reason), [.isNotOpenConnect])
+    }
+
+    /// F3's whole reason for existing: when the pid file is gone, the process
+    /// group the elevation wrapper recorded still names the tunnel.
+    ///
+    /// This is the reported defect's exact shape — a live root-owned openconnect
+    /// this app had launched itself, with no record on disk — and the group is the
+    /// only handle it left behind. The wrapper writes `ps -o pgid= -p "$!"` of the
+    /// job it backgrounded, so the group survives the wrapper being reparented to
+    /// launchd.
+    ///
+    /// `ps -o pid= -g <pgid>` is real here, because reading the group *is* the
+    /// subject; `pgrep` goes through the scripted runner and answers nothing, so
+    /// the machine-wide scan cannot be what found the tunnel. That makes the
+    /// positive half independent of whether this machine is connected — and makes
+    /// the test fail for the right reason when the group tier is removed.
+    func testTheRecordedGroupFindsTheTunnelWhenThePidFileIsGone() throws {
+        let directory = try makeTemporaryDirectory()
+        let binary = directory.appendingPathComponent(OpenConnectProcess.name)
+        try FileManager.default.createSymbolicLink(
+            at: binary,
+            withDestinationURL: URL(fileURLWithPath: "/bin/sh")
+        )
+
+        let pidFile = directory.appendingPathComponent("job.pid")
+        // `set -m` puts the backgrounded job in its own process group, exactly as
+        // `OpenConnectLaunch.groupedWrapper` does, and `exec` makes the job's pid
+        // the decoy's own — so the value the shell writes *is* the group id.
+        let wrapper = try spawn(executable: "/bin/bash", arguments: ["-c", """
+            set -m
+            { exec '\(binary.path)' -c 'sleep 30; true'; } &
+            echo $! > '\(pidFile.path)'
+            wait
+            """])
+        addTeardownBlock { kill(wrapper.processIdentifier, SIGKILL) }
+
+        let decoyPid = try XCTUnwrap(waitForPid(in: pidFile), "the wrapper never wrote its job's pid")
+        addTeardownBlock { kill(decoyPid, SIGKILL) }
+        try waitForCommandName(decoyPid)
+
+        let record = directory.appendingPathComponent("elevation.pgid")
+        try "\(decoyPid)\n".write(to: record, atomically: true, encoding: .utf8)
+
+        let runner = FakeBoundedProcessRunner()
+        runner.script(executable: OpenConnectProcess.pgrepExecutable,
+                      arguments: ["-x", OpenConnectProcess.name], result: pgrepSays([]))
+        runner.script(executable: OpenConnectProcess.psExecutable,
+                      arguments: ["-o", "comm=", "-p", "\(decoyPid)"], result: psSays(binary.path))
+
+        let detection = ExistingConnectionScanner.detect(
+            pidFilePid: nil,
+            elevationRecord: record,
+            using: runner
+        )
+        XCTAssertEqual(detection.pid, decoyPid, "the recorded group must name a tunnel with no pid file")
+        XCTAssertEqual(detection.source, .ownProcessGroup)
+        XCTAssertEqual(detection.rejections, [])
+        XCTAssertEqual(runner.calls.first, "pgrep -x openconnect",
+                       "the group is consulted first, and the scan is still asked")
+
+        // The record is the only reason it was found at all: with no record, the
+        // silenced scan has nothing else to offer.
+        let unrecorded = ExistingConnectionScanner.detect(
+            pidFilePid: nil,
+            elevationRecord: directory.appendingPathComponent("absent.pgid"),
+            using: runner
+        )
+        XCTAssertNil(unrecorded.pid, "without the group record there is nothing to find")
+        XCTAssertEqual(unrecorded.rejections, [])
     }
 
     /// The positive control for the test above: a process actually *named*
@@ -403,6 +585,24 @@ final class ExistingConnectionTests: XCTestCase {
         XCTAssertNil(OpenConnectPidFile.recordedPid(at: file))
     }
 
+    /// The writer both the launch path and the adoption path go through, so "what
+    /// is on disk" and "what was started" cannot drift apart.
+    func testRecordingAPidRoundTripsAndRefusesWhatMustNeverBeSignalled() throws {
+        let directory = try makeTemporaryDirectory()
+        let file = directory.appendingPathComponent("nested/openconnect.pid")
+
+        XCTAssertTrue(OpenConnectPidFile.record(15817, at: file), "recording must create the directory it needs")
+        XCTAssertEqual(OpenConnectPidFile.recordedPid(at: file), 15817)
+
+        // The same values the reader refuses, refused before they are written: a
+        // record of `0` or `1` must never reach `kill`, and a refused pid must not
+        // erase a good record on its way out.
+        for unsafe in [Int32(0), 1, -1] {
+            XCTAssertFalse(OpenConnectPidFile.record(unsafe, at: file), "accepted \(unsafe)")
+            XCTAssertEqual(OpenConnectPidFile.recordedPid(at: file), 15817)
+        }
+    }
+
     // MARK: - Helpers
 
     private func spawn(executable: String, arguments: [String]) throws -> Process {
@@ -426,6 +626,28 @@ final class ExistingConnectionTests: XCTestCase {
             usleep(20_000)
         }
         XCTFail("process \(pid) never reported a command name")
+    }
+
+    /// Reads the pid a wrapper wrote, waiting for it to appear: a bounded wait for
+    /// the real condition, not a sleep.
+    private func waitForPid(in file: URL, timeout: TimeInterval = 5) -> Int32? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: file, encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+               pid > 1 {
+                return pid
+            }
+            usleep(20_000)
+        }
+        return nil
+    }
+
+    /// A group record that cannot exist. A test about the pid-file or scan tier
+    /// passes this so this machine's own live tunnel — which *is* in the recorded
+    /// group of the last real launch — cannot answer for it.
+    private var noGroupRecord: URL {
+        URL(fileURLWithPath: "/nonexistent/turtlediver/elevation.pgid")
     }
 
     /// `pgrep -f openconnect` — the match this fix removes. Used here only to

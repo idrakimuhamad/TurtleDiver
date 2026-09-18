@@ -61,8 +61,9 @@ final class ElevatedTerminationWiringTests: XCTestCase {
         let explicit = code.components(separatedBy: "terminateGracefully(pid: pid,").count - 1
         XCTAssertEqual(calls, explicit, "every call must pass its own mayPrompt")
 
-        // The two paths a person is present for may raise a dialog.
-        for function in ["func disconnect()", "private func terminateExistingOpenConnect() async"] {
+        // The two paths a person is present for may raise a dialog. `disconnect()`
+        // delegates to `performTunnelShutdown`, which is where the switch lives.
+        for function in ["private func performTunnelShutdown(", "private func terminateExistingOpenConnect() async"] {
             let body = try body(of: function, in: code)
             XCTAssertTrue(body.contains("mayPrompt: true"), "\(function) is answered by a person, so it may ask")
             XCTAssertFalse(body.contains("mayPrompt: false"), "\(function) may ask: a refusal here is user-visible")
@@ -97,7 +98,9 @@ final class ElevatedTerminationWiringTests: XCTestCase {
     /// finished one, both on screen and in the history.
     func testDisconnectOnlyClaimsSuccessWhenTheTunnelIsGone() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
-        let body = try body(of: "func disconnect()", in: code)
+        // The teardown lives in the function both entry points share; `disconnect()`
+        // itself is only the status flip and the resolve-then-teardown hop.
+        let body = try body(of: "private func performTunnelShutdown(", in: code)
         XCTAssertLessThan(body.count, 8_000, "the body looks unbounded: \(body.count) characters")
 
         let refused = try branch(".notPermitted", in: body)
@@ -125,7 +128,7 @@ final class ElevatedTerminationWiringTests: XCTestCase {
         // And the record is only cleared on the branch that ended something.
         let ended = try branch(".endedWithElevation", in: body)
         XCTAssertTrue(ended.contains("OpenConnectPidFile.discard()"))
-        let clearedFile = try XCTUnwrap(body.range(of: "if tunnelEnded {\n            try? FileManager.default.removeItem(atPath: pidFilePath)"))
+        let clearedFile = try XCTUnwrap(body.range(of: "if tunnelEnded {\n            OpenConnectPidFile.discard()"))
         XCTAssertLessThan(switchRange.lowerBound, clearedFile.lowerBound)
     }
 
@@ -163,6 +166,31 @@ final class ElevatedTerminationWiringTests: XCTestCase {
         let existingDoc = try rawText(at: "VPNConnect/System/ExistingConnection.swift")
         XCTAssertTrue(existingDoc.contains("not the thing that ends it"),
                       "say at the declaration that the group record is a handle, not the ender")
+    }
+
+    // MARK: - One owner for the quit
+
+    /// `applicationWillTerminate` owns the quit-time teardown, and `quitApp()` does
+    /// not get a second one. It used to call `disconnect()` first, which duplicated
+    /// the work when that call was synchronous and blocking; now that a disconnect
+    /// resolves asynchronously it would race the terminate instead. What the quit
+    /// needs — bounded, prompt-free, synchronous — is what
+    /// `cleanupOnTermination()` already is.
+    func testTheQuitDoesNotStartASecondTearDown() throws {
+        let code = try strippedCode(at: "VPNConnect/AppDelegate.swift")
+        let start = try XCTUnwrap(code.range(of: "@objc private func quitApp()"))
+        let end = try XCTUnwrap(code.range(of: "@objc private func toggleEngine",
+                                           range: start.upperBound..<code.endIndex))
+        let quit = code[start.lowerBound..<end.lowerBound]
+
+        XCTAssertTrue(quit.contains("NSApp.terminate(nil)"),
+                      "the quit is still the ordinary AppKit terminate")
+        XCTAssertFalse(quit.contains("disconnect()"),
+                       "and it must not start a teardown of its own")
+
+        let willTerminate = try body(of: "func applicationWillTerminate", in: code)
+        XCTAssertTrue(willTerminate.contains("cleanupOnTermination()"),
+                      "the documented owner is what has to do it")
     }
 
     // MARK: - Helpers
