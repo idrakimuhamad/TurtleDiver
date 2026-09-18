@@ -103,9 +103,31 @@ default for tests).
   Regression tests: `ConnectSchedulerTests` (a slow dial must not delay the
   dials behind it, and the cap is respected).
 - EOF from one side half-closes the other (`shutdown(SHUT_WR)`) so
-  FIN-signaled protocols relay cleanly; both sides EOF → teardown.
-- Teardown is idempotent: `finish(with:)` cancels sources (cancel handlers
-  close the fds), snapshots metrics, and fires `onFinished` once.
+  FIN-signaled protocols relay cleanly; the relay finishes when the *second*
+  side EOFs, or when a write fails.
+- A socket that has reached EOF is **permanently readable**, so leaving that
+  side's `DispatchSourceRead` armed re-fires it immediately and forever: one
+  `read` syscall per iteration, ~100% of one core, for as long as the *other*
+  direction stays open. Seen live: an origin answering `Connection: close`
+  while the client kept its proxy connection alive pinned the relay queue for
+  as long as the client sat there. So `sawEOF` cancels that side's source
+  (`stopReading(clientSide:)`) and leaves the fd **open** — an EOF ends one
+  direction, not the connection, and the peer that only stopped sending may
+  still be receiving. Regression tests: `RelayHalfCloseTests` (a relay sitting
+  at EOF must burn < 30% of a core over a 0.4 s idle window; the direction the
+  peer did *not* close must still carry bytes; 24 relay lifecycles must not
+  leak descriptors).
+- Teardown is idempotent: `finish(with:)` cancels both read sources, disarms
+  the write sources, closes **both** fds itself, snapshots metrics, and fires
+  `onFinished` once. The read sources deliberately have no cancel handler that
+  closes anything: a source cancelled at EOF must not take the fd with it.
+- `TD_FD_TRACE` is read once into a stored constant, never per event.
+  `ProcessInfo.environment` rebuilds the whole environment dictionary on every
+  access (~30 µs measured, against ~0 for the constant), and the EOF path used
+  to consult it per relay event — the `sample` that diagnosed the spin found
+  1940 of 1943 samples inside `_ProcessInfo.environment.getter`, i.e. the loop
+  was burning a core of *user* time on the environment rather than on the
+  socket. Pinned by a source-scan test in `RelayHalfCloseTests`.
 
 ## Request detail capture
 
@@ -156,7 +178,18 @@ in-process fake servers: CONNECT round-trips, absolute-form → origin-form
 rewriting, traffic through an upstream CONNECT proxy (and upstream 403 →
 502), SOCKS5 greeting/CONNECT/domain addressing/reject/command-and-method
 errors, 400 hardening, dead-destination 502, request-log accuracy (rule,
-policy, bytes) and ring-buffer trimming — 21 integration tests (incl. the relay backpressure regression and four end-to-end capture tests: plain-HTTP head + withheld cookie, CONNECT SNI, SOCKS5 SNI, capture-off) among the 424 core tests.
+policy, bytes) and ring-buffer trimming — 21 integration tests (incl. the relay backpressure regression and four end-to-end capture tests: plain-HTTP head + withheld cookie, CONNECT SNI, SOCKS5 SNI, capture-off) among the 720 core tests.
+
+`Tests/TurtleDiverCoreTests/RelayHalfCloseTests.swift` (4 tests) drives a real
+`RelayConnection` — a client leg on a `socketpair`, an origin leg on a real
+loopback listener — and half-closes exactly one direction. Two assertions carry
+the weight: this process's own CPU (`getrusage`) over a 0.4 s idle window must
+stay under 30% of a core (a relay left spinning burns ~100%; the failure
+message says so in percent), and the direction the peer did *not* close must
+still carry bytes, with the relay finishing only on the second EOF. A third
+counts descriptors (`proc_pidinfo(PROC_PIDLISTFDS)`) across 24 relay
+lifecycles. A fourth is a source scan: `RelayConnection.swift` must contain
+exactly one `processInfo.environment` lookup and it must be the stored flag.
 
 Those fake servers (`Tests/TurtleDiverCoreTests/TestServers.swift`) have to be
 *joined* on shutdown: a serve loop accepts by descriptor **number**, so closing

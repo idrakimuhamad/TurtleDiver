@@ -315,6 +315,24 @@ release than the installed build, which means a scratch build or a bumped
 - [ ] `no-resolve` on an IP-CIDR rule: request to a bare hostname skips the
       rule (visible via the matched-rule column).
 - [ ] Pause freezes the request table; Clear empties it.
+- [ ] CPU: with traffic flowing, `ps -p $(pgrep -x TurtleDiver) -o %cpu=`
+      should sit near 0, and `netstat -an -p tcp | grep '\.6152 ' | grep
+      -c FIN_WAIT_2` may be non-zero for a while without the app burning a
+      core. An origin that answers `Connection: close` (example.com does)
+      while the client keeps its proxy connection open is the shape that used
+      to pin the relay queue at ~100% of one core; it must now be idle. If CPU
+      does climb, `sample $(pgrep -x TurtleDiver) 3 1 -file /tmp/td.txt` and
+      look for a thread named `com.turtlediver.engine.relay`.
+
+## 2c. Half-closed relays (2.0.0)
+
+- [ ] `curl -x http://127.0.0.1:6152 http://example.com/ -I` succeeds, and the
+      app's CPU stays flat while the connection sits at EOF (see §2).
+- [ ] A request whose origin closes must still deliver its body: the response
+      above is a complete `301`/`200`, not an empty reply.
+- [ ] Long-lived traffic in the other direction is unaffected: keep a CONNECT
+      tunnel (`curl --proxytunnel -x http://127.0.0.1:6152 ...`) streaming
+      while a half-closed plain-HTTP relay is parked; both stay alive.
 
 ## 2b. Request details (2.0.0)
 
