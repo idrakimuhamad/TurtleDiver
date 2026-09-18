@@ -221,18 +221,33 @@ public struct RelayMetrics: Equatable, Sendable {
 /// - If a direction's buffer grows past the pause watermark, its read source
 ///   suspends until the write source drains it below the resume watermark.
 /// - EOF from one side half-closes the other (`shutdown(SHUT_WR)`) so
-///   protocols that signal completion via FIN relay cleanly.
+///   protocols that signal completion via FIN relay cleanly, and stops
+///   reading the side that hit EOF: a read source left armed on an EOF'd
+///   socket is ready forever and fires continuously.
+/// - The relay closes both fds in `finish` (not in a read source's cancel
+///   handler) because a source cancelled at EOF keeps its fd — the peer that
+///   stopped sending may still be receiving.
 ///
 /// All socket state mutates on the serial `queue`; only `metrics` is shared
 /// with other threads (guarded by `stateLock`).
 public final class RelayConnection: @unchecked Sendable {
+
+    /// Whether env-gated IO diagnostics (TD_FD_TRACE=1) are on.
+    ///
+    /// Read once and stored: `ProcessInfo.environment` rebuilds the whole
+    /// environment dictionary on every access, and the EOF path below used to
+    /// consult it per relay event. A sample of the relay busy-looping on a
+    /// half-closed connection showed 1940 of 1943 samples inside
+    /// `_ProcessInfo.environment.getter` — the loop was spinning on the
+    /// environment, not on the socket.
+    static let fdTraceEnabled = ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1"
 
     /// Env-gated IO diagnostics (TD_FD_TRACE=1): one line per relay read
     /// error with both endpoint fds, for correlating engine relays with their
     /// peers (e.g. a test echo server) in stress runs.
     static func traceIO(_ message: String) {
         #if DEBUG
-        if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+        if Self.fdTraceEnabled {
             FileHandle.standardError.write(Data("TD-RELAY [seq=\(Self.nextSeq())] \(message)\n".utf8))
         }
         #endif
@@ -325,8 +340,8 @@ public final class RelayConnection: @unchecked Sendable {
     private var outboundEOF = false
     private var started = false
     /// Whether read sources have been armed (queue-confined). When false at
-    /// teardown, no cancel handlers exist to close the fds, so the relay must
-    /// close the client fd itself.
+    /// teardown, the outbound fd (if any) belongs to the connect path's error
+    /// handler, so the relay closes only the client fd.
     private var sourcesArmed = false
 
     // MARK: Lifecycle state
@@ -447,22 +462,19 @@ public final class RelayConnection: @unchecked Sendable {
 
     private func armSources() {
         sourcesArmed = true
+        // The fds are closed by `finish`, not by a cancel handler: a read
+        // source cancelled at EOF keeps its fd open, because the peer that
+        // stopped sending may still be receiving (see `stopReading`).
+        // Cancelling happens on this queue, so no handler can be mid-flight
+        // when the close lands.
         let clientSource = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: queue)
         clientSource.setEventHandler { [weak self] in self?.readFromClient() }
-        clientSource.setCancelHandler { [weak self] in
-            guard let self else { return }
-            TCPClient.closeSocket(self.clientFD)
-        }
         clientSource.resume()
         clientReadSource = clientSource
 
         guard let outbound = outboundFD else { return }
         let outboundSource = DispatchSource.makeReadSource(fileDescriptor: outbound, queue: queue)
         outboundSource.setEventHandler { [weak self] in self?.readFromOutbound() }
-        outboundSource.setCancelHandler { [weak self] in
-            guard let self, let outbound = self.outboundFD else { return }
-            TCPClient.closeSocket(outbound)
-        }
         outboundSource.resume()
         outboundReadSource = outboundSource
 
@@ -541,24 +553,48 @@ public final class RelayConnection: @unchecked Sendable {
     /// EOF from one side: half-close the other direction and finish when both
     /// sides are done.
     private func sawEOF(clientSide: Bool, otherFD: Int32?) {
-        if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+        if Self.fdTraceEnabled {
             let from = clientSide ? "client" : "outbound"
             let to = clientSide ? "outbound" : "client"
             let fd = clientSide ? clientFD : (outboundFD ?? -1)
             let other = clientSide ? (outboundFD ?? -1) : clientFD
             FileHandle.standardError.write(Data("TD-RELAY [\(Int(Date().timeIntervalSince1970 * 1000))] EOF from=\(from) fd=\(fd) -> shut \(to) fd=\(other) toDest=\(metrics.bytesToDestination) toClient=\(metrics.bytesToClient)\n".utf8))
         }
-        if clientSide {
-            clientEOF = true
-        } else {
-            outboundEOF = true
-        }
+        stopReading(clientSide: clientSide)
         // Propagate FIN to the other side (ignore errors on dead sockets).
         if let otherFD, otherFD >= 0 {
             shutdown(otherFD, SHUT_WR)
         }
         if clientEOF && outboundEOF {
             finish(with: nil)
+        }
+    }
+
+    /// Stops reading one side at EOF, keeping its fd open.
+    ///
+    /// A read source on a socket that has reached EOF is ready **forever**:
+    /// the handler re-reads, gets 0 again, and is requeued immediately. Left
+    /// armed that is a busy loop in the kernel — measured live as ~94% of a
+    /// core inside `sawEOF` on `com.turtlediver.engine.relay`, one `read` per
+    /// iteration, for as long as the other side stayed open (a browser's
+    /// keep-alive connection to the proxy after an origin sent
+    /// `Connection: close`, for instance). Cancelling is what stops the source
+    /// firing, and dropping the reference with it means the relay cannot
+    /// accidentally re-arm it. The fd stays open: EOF ends one direction, not
+    /// the connection.
+    private func stopReading(clientSide: Bool) {
+        if clientSide {
+            guard !clientEOF else { return }
+            clientEOF = true
+            let source = clientReadSource
+            clientReadSource = nil
+            source?.cancel()
+        } else {
+            guard !outboundEOF else { return }
+            outboundEOF = true
+            let source = outboundReadSource
+            outboundReadSource = nil
+            source?.cancel()
         }
     }
 
@@ -666,9 +702,9 @@ public final class RelayConnection: @unchecked Sendable {
             guard let self else { return }
             // GCD orders a source's own events before its cancel handler, but
             // NOT across sources: this write event can already be dequeued on
-            // `queue` when a read source's cancel handler closes the fd. The
-            // lifecycle check makes such late handlers no-ops instead of
-            // writing into a recycled descriptor.
+            // `queue` when `finish` closes the fds. The lifecycle check makes
+            // such late handlers no-ops instead of writing into a recycled
+            // descriptor.
             self.lifecycleLock.lock()
             let running = self.lifecycle == .running
             self.lifecycleLock.unlock()
@@ -716,19 +752,23 @@ public final class RelayConnection: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             if self.sourcesArmed {
-                // Armed sources own the fds: their cancel handlers close them.
+                // Cancel the sources, then close the fds — all on this queue,
+                // so nothing can be reading or writing them in between. The
+                // close is here rather than in a cancel handler because a read
+                // source cancelled at EOF deliberately leaves its fd open.
                 self.clientReadSource?.cancel()
                 self.clientReadSource = nil
                 self.outboundReadSource?.cancel()
                 self.outboundReadSource = nil
                 self.disarmWriteSource(clientSide: true)
                 self.disarmWriteSource(clientSide: false)
+                TCPClient.closeSocket(self.clientFD)
+                if let outbound = self.outboundFD { TCPClient.closeSocket(outbound) }
             } else {
-                // Teardown before arming (e.g. upstream connect failed): no
-                // cancel handlers exist, so the relay closes the client fd
-                // here. (The outbound fd, if any, is closed by the connector's
-                // error path.) Without this the fd would leak on every failed
-                // connect.
+                // Teardown before arming (e.g. upstream connect failed): the
+                // relay closes the client fd here. (The outbound fd, if any, is
+                // closed by the connector's error path.) Without this the fd
+                // would leak on every failed connect.
                 TCPClient.closeSocket(self.clientFD)
             }
 
