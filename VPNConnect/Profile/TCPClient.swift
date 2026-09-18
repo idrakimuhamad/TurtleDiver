@@ -32,6 +32,18 @@ public enum TCPClientError: LocalizedError, Equatable {
 /// C pointers outlive `freeaddrinfo` and no raw-byte memcpy is needed.
 public final class TCPClient {
 
+    /// Whether env-gated fd diagnostics (`TD_FD_TRACE=1`) are on.
+    ///
+    /// Read once, deliberately. `ProcessInfo.environment` builds a fresh
+    /// dictionary out of the process environment on *every* access (~30 µs
+    /// measured, against ~0 for a stored constant), and this flag is consulted
+    /// on paths that run per relay event and per accepted connection — the
+    /// relay's EOF path burned a whole core of user time inside
+    /// `_ProcessInfo.environment.getter` doing exactly this
+    /// (`RelayHalfCloseTests.testTheFdTraceFlagIsReadOnceRatherThanPerEvent`
+    /// pins it).
+    public static let fdTraceEnabled = ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1"
+
     /// A resolved destination as a typed Swift value. Either IPv4 or IPv6.
     enum ResolvedAddress {
         case v4(sockaddr_in)
@@ -124,7 +136,7 @@ public final class TCPClient {
     /// Closes a socket descriptor, ignoring errors.
     public static func closeSocket(_ fd: Int32) {
         guard fd >= 0 else { return }
-        if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+        if fdTraceEnabled {
             FileHandle.standardError.write(Data("TD-FD-CLOSE [\(Int(Date().timeIntervalSince1970 * 1000))] fd=\(fd)\n".utf8))
         }
         close(fd)
@@ -203,7 +215,7 @@ public final class TCPClient {
         guard fd >= 0 else {
             throw TCPClientError.connectionFailed("socket() failed: \(String(cString: strerror(errno)))")
         }
-        if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+        if fdTraceEnabled {
             FileHandle.standardError.write(Data("TD-FD-OPEN [\(Int(Date().timeIntervalSince1970 * 1000))] fd=\(fd) kind=connect\n".utf8))
         }
         // Set non-blocking for the connect() phase only.

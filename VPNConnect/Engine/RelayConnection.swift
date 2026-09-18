@@ -232,22 +232,18 @@ public struct RelayMetrics: Equatable, Sendable {
 /// with other threads (guarded by `stateLock`).
 public final class RelayConnection: @unchecked Sendable {
 
-    /// Whether env-gated IO diagnostics (TD_FD_TRACE=1) are on.
-    ///
-    /// Read once and stored: `ProcessInfo.environment` rebuilds the whole
-    /// environment dictionary on every access, and the EOF path below used to
-    /// consult it per relay event. A sample of the relay busy-looping on a
-    /// half-closed connection showed 1940 of 1943 samples inside
-    /// `_ProcessInfo.environment.getter` — the loop was spinning on the
-    /// environment, not on the socket.
-    static let fdTraceEnabled = ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1"
-
     /// Env-gated IO diagnostics (TD_FD_TRACE=1): one line per relay read
     /// error with both endpoint fds, for correlating engine relays with their
     /// peers (e.g. a test echo server) in stress runs.
+    ///
+    /// The flag is the stored constant on `TCPClient` — this path used to
+    /// consult `ProcessInfo.environment` per relay event, and a sample of a
+    /// relay busy-looping on a half-closed connection found 1940 of 1943
+    /// samples inside `_ProcessInfo.environment.getter`: the loop was spinning
+    /// on the environment, not on the socket.
     static func traceIO(_ message: String) {
         #if DEBUG
-        if Self.fdTraceEnabled {
+        if TCPClient.fdTraceEnabled {
             FileHandle.standardError.write(Data("TD-RELAY [seq=\(Self.nextSeq())] \(message)\n".utf8))
         }
         #endif
@@ -553,7 +549,7 @@ public final class RelayConnection: @unchecked Sendable {
     /// EOF from one side: half-close the other direction and finish when both
     /// sides are done.
     private func sawEOF(clientSide: Bool, otherFD: Int32?) {
-        if Self.fdTraceEnabled {
+        if TCPClient.fdTraceEnabled {
             let from = clientSide ? "client" : "outbound"
             let to = clientSide ? "outbound" : "client"
             let fd = clientSide ? clientFD : (outboundFD ?? -1)

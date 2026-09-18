@@ -272,33 +272,49 @@ final class RelayHalfCloseTests: XCTestCase {
     /// environment on every access (the sample that diagnosed the spin found
     /// 1940 of 1943 samples inside `_ProcessInfo.environment.getter`), so the
     /// flag has to be read once into a stored constant rather than consulted
-    /// on a path that runs per relay event.
-    func testTheRelayReadsTheTraceFlagOnceRatherThanPerEvent() throws {
-        let text = try String(contentsOf: sourceURL, encoding: .utf8)
-        let lookups = text
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { $0.contains("processInfo.environment") }
+    /// on a path that runs per relay event, per read event, or per accepted
+    /// connection. Four files carry those paths; exactly one of them may name
+    /// the environment, and only to store it.
+    func testTheFdTraceFlagIsReadOnceRatherThanPerEvent() throws {
+        let hotPaths = [
+            "Profile/TCPClient.swift",
+            "Engine/RelayConnection.swift",
+            "Engine/HTTPProxyServer.swift",
+            "Engine/SOCKS5Server.swift",
+        ]
+        var lookups: [(file: String, line: String)] = []
+        for file in hotPaths {
+            let text = try String(contentsOf: sourceURL(file), encoding: .utf8)
+            for line in text.split(separator: "\n", omittingEmptySubsequences: false)
+            where line.contains("processInfo.environment") {
+                lookups.append((file, String(line)))
+            }
+        }
         XCTAssertEqual(
             lookups.count, 1,
-            "the trace flag is looked up \(lookups.count) times; it must be read once into a "
+            "the trace flag is looked up \(lookups.count) times on per-event paths "
+                + "(\(lookups.map(\.file).joined(separator: ", "))); it must be read once into a "
                 + "stored constant, because every lookup rebuilds the environment dictionary"
         )
         let only = try XCTUnwrap(lookups.first)
+        XCTAssertEqual(
+            only.file, "Profile/TCPClient.swift",
+            "the stored flag belongs on `TCPClient`, next to the fd helpers it guards"
+        )
         XCTAssertTrue(
-            only.contains("static let fdTraceEnabled"),
+            only.line.contains("static let fdTraceEnabled"),
             "the single environment lookup must be the stored flag, not an inline event-path check: "
-                + "\(only.trimmingCharacters(in: .whitespaces))"
+                + "\(only.line.trimmingCharacters(in: .whitespaces))"
         )
     }
 
-    private var sourceURL: URL {
-        // …/Tests/TurtleDiverCoreTests/RelayHalfCloseTests.swift -> repo root
+    private func sourceURL(_ relativePath: String) -> URL {
+        // …/Tests/TurtleDiverCoreTests/RelayHalfCloseTests.swift -> VPNConnect/<relativePath>
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("VPNConnect")
-            .appendingPathComponent("Engine")
-            .appendingPathComponent("RelayConnection.swift")
+            .appendingPathComponent(relativePath)
     }
 }

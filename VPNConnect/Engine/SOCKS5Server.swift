@@ -119,7 +119,7 @@ final class SOCKS5Server: @unchecked Sendable {
             }
             TCPClient.setNonBlocking(fd)
             TCPClient.setNoSigpipe(fd)
-            if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+            if TCPClient.fdTraceEnabled {
                 FileHandle.standardError.write(Data("TD-FD-OPEN [\(Int(Date().timeIntervalSince1970 * 1000))] fd=\(fd) kind=socks-accept\n".utf8))
             }
 
@@ -248,7 +248,7 @@ final class SOCKS5Server: @unchecked Sendable {
 
         // Bind address in the success reply: 0.0.0.0:0 (client ignores it).
         guard io.write(SOCKS5Server.reply(code: 0x00)) else { return Self.close(clientFD) }
-        if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+        if TCPClient.fdTraceEnabled {
             FileHandle.standardError.write(Data("TD-RELAY [\(Int(Date().timeIntervalSince1970 * 1000))] tunnel-established socks client=\(clientFD)\n".utf8))
         }
 

@@ -210,7 +210,7 @@ final class HTTPProxyServer: @unchecked Sendable {
             }
             TCPClient.setNonBlocking(fd)
             TCPClient.setNoSigpipe(fd)
-            if ProcessInfo.processInfo.environment["TD_FD_TRACE"] == "1" {
+            if TCPClient.fdTraceEnabled {
                 FileHandle.standardError.write(Data("TD-FD-OPEN [\(Int(Date().timeIntervalSince1970 * 1000))] fd=\(fd) kind=http-accept\n".utf8))
             }
 
