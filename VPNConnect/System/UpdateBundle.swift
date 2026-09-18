@@ -95,7 +95,7 @@ public struct BundleFacts: Equatable, Sendable {
 
 /// Asks `codesign` what it makes of a bundle.
 ///
-/// This is gate 3, and it is the update path's trust anchor: the project has no
+/// This is gate 4, and it is the update path's trust anchor: the project has no
 /// Developer ID certificate and notarizes nothing, so Gatekeeper's own verdict
 /// (`spctl`) refuses every build this app could publish. What can be insisted on
 /// is that the application inside a downloaded image was signed by the same team
@@ -264,7 +264,7 @@ public enum InstallOutcome: Equatable, Sendable {
 
 /// The two gates that need to look inside the image, and the install itself.
 ///
-/// Gate 3 — the application is signed, and by this app's own team. Gate 4 — it
+/// Gate 4 — the application is signed, and by this app's own team. Gate 5 — it
 /// is *this* app (`CFBundleIdentifier`), its own version agrees with the release
 /// that offered it, and it is newer than what is running. Only then is anything
 /// written: nothing here replaces a working app on the strength of a file name.

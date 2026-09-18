@@ -256,20 +256,24 @@ public struct URLSessionUpdateFileTransport: UpdateFileTransport {
 /// Fetches a release's disk image and proves it is the file the release
 /// published, before anything looks inside it.
 ///
-/// Two of the four gates live here, both decided offline and both decided from
+/// Three of the five gates live here, all decided offline and all decided from
 /// what the release itself says:
 ///
 /// 1. **Provenance.** The image is named `TurtleDiver-<version>.dmg`, and every
 ///    address involved is https. A release whose file is named something else is
 ///    not a release this app will run — the name is the only place where the
 ///    feed's tag and its file are made to agree.
-/// 2. **The bytes.** The SHA-256 of what arrived is compared against the digest
+/// 2. **Size.** The image is not the empty file a failed request leaves behind,
+///    it is inside `UpdateArtifactLimit.installerBytes`, and its byte count is
+///    the one the release published.
+/// 3. **The bytes.** The SHA-256 of what arrived is compared against the digest
 ///    published beside the file *and* against the digest GitHub computed for the
 ///    asset. Both must agree when both exist; a release that publishes neither is
 ///    not installed, however plausible its file looks.
 ///
 /// The other two — the signature and the bundle's own identity — need to look
-/// inside the image, and live in `UpdateBundle`.
+/// inside the image, and live in `UpdateBundle`. The five are numbered and
+/// explained together in `docs/UPDATES.md`.
 public struct UpdateDownloader: Sendable {
     public let files: any UpdateFileTransport
     /// Used for the small checksum file, which is text: the feed transport

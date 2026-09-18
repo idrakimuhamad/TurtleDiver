@@ -2,7 +2,7 @@ import XCTest
 import Foundation
 @testable import TurtleDiverSystem
 
-/// Gate 3 and gate 4, and the install decision.
+/// Gate 4 and gate 5, and the install decision.
 ///
 /// Nothing here reaches the machine's own `hdiutil` or `codesign`: both are
 /// injected, and the runner below answers from a script and performs the three
@@ -631,7 +631,7 @@ final class UpdateBundleTests: XCTestCase {
                                   running: try XCTUnwrap(ReleaseVersion("2.0.0")))
 
         // The verification is of the app *in the image*, and it happens before
-        // the copy: gate 3 has to be answered before anything is on disk.
+        // the copy: gate 4 has to be answered before anything is on disk.
         let verifies = runner.calls(to: "codesign").filter { $0.arguments.contains("--verify") }
         XCTAssertGreaterThanOrEqual(verifies.count, 2, "the image's app and the copy are both checked")
         XCTAssertTrue(verifies[0].last.hasSuffix("TurtleDiver.app"),
@@ -641,7 +641,7 @@ final class UpdateBundleTests: XCTestCase {
         let order = runner.calls.map(\.tool)
         let firstVerify = try XCTUnwrap(order.firstIndex(of: "codesign"))
         let firstCopy = try XCTUnwrap(order.firstIndex(of: "ditto"))
-        XCTAssertLessThan(firstVerify, firstCopy, "gate 3 comes before gate anything-else")
+        XCTAssertLessThan(firstVerify, firstCopy, "gate 4 comes before gate anything-else")
     }
 
     func testAnAppTheUserCannotReplaceIsRevealedInstead() throws {
