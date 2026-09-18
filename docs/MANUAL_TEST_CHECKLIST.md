@@ -267,14 +267,19 @@ release than the installed build, which means a scratch build or a bumped
       (`ls -ld` shows `drwx------`) and, on this app's development machine, no
       disk image is left mounted afterwards (`mount | grep -c turtle` is `0` and
       the 0700 mount point is gone).
-- [ ] A successful install replaces this app when it sits in a directory the
-      user can write, and then reads `INSTALLED` with **Restart Now**, and the
+- [ ] A successful install replaces this app when the user can write **both**
+      the directory it sits in and the bundle itself — a build tree, or a copy in
+      `~/Applications` — and then reads `INSTALLED` with **Restart Now**, and the
       line `TurtleDiver X is installed. It takes effect when the app restarts.`
-      `codesign -dv /Applications/TurtleDiver.app` afterwards names the new
-      version's build.
-- [ ] Where the app cannot write itself in (an admin-owned `/Applications`),
-      it does not elevate: the pill reads `INSTALLER READY`, the line names the
-      `.dmg` in the Finder, and **Show in Finder** reveals the *verified* image.
+      `codesign -dv <that copy>` afterwards names the new version's build.
+- [ ] A `.pkg` install is the other case and does not try: the bundle in
+      `/Applications` is `root:wheel 0755`, so even though an administrator can
+      write the *directory*, `replaceItemAt` refuses a bundle that is not itself
+      writable. It does not elevate: the pill reads `INSTALLER READY`, the line
+      names the `.dmg` in the Finder, and **Show in Finder** reveals the
+      *verified* image. (Before the fix for this, the same install failed with
+      `You don't have permission to save the file “TurtleDiver” in the folder
+      “Applications”` — a failure where this line was the answer.)
 - [ ] **Restart Now** quits the app and reopens it on the new build, and the
       quit is the ordinary one: `~/Library/Logs/TurtleDiver/lifecycle.log` gains
       a `will-terminate-began`/`will-terminate-ended` pair for the old pid, and

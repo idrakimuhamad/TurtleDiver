@@ -73,26 +73,38 @@ and `/Applications`.
 
 ## Installing
 
-Where the directory the app sits in is writable by this user, it replaces
-itself: the disk image is mounted read-only at a private 0700 mount point, the
-app inside is copied out with `ditto` — `FileManager.copyItem` can drop extended
-attributes and resource forks, and a signature covers those, so the copy would
-fail its own verification — the **copy** is verified again where it now sits,
-and only then is it swapped in with `replaceItemAt`.
+Where the app can write both the directory it sits in **and the bundle
+itself**, it replaces itself: the disk image is mounted read-only at a private
+0700 mount point, the app inside is copied out with `ditto` —
+`FileManager.copyItem` can drop extended attributes and resource forks, and a
+signature covers those, so the copy would fail its own verification — the
+**copy** is verified again where it now sits, and only then is it swapped in
+with `replaceItemAt`.
 
-Where that directory is not writable, it does **not** elevate. It points the
-Finder at the verified image and the user finishes the job. A self-updater that
-quietly asks for an administrator password to replace itself is a self-updater
-that can be talked into replacing anything.
+Where either write is missing, it does **not** elevate. It points the Finder at
+the verified image and the user finishes the job. A self-updater that quietly
+asks for an administrator password to replace itself is a self-updater that can
+be talked into replacing anything.
 
-The test is the **parent directory**, not the bundle, and that distinction is
-worth being exact about because the two disagree in the common case: a bundle
-installed by the `.pkg` is owned by `root`, but it sits in `/Applications`,
-which on a normal Mac is `root:admin` `drwxrwxr-x` and therefore writable by an
-administrator — so that copy still replaces itself. What the check is really
-asking is "can this user rename an entry in this directory", which is also what
-makes the swap itself work. The reveal path is for a copy somewhere it cannot
-write at all (another user's Applications folder, a read-only volume).
+Both writes, because `replaceItemAt` needs both, and the bundle's write bit is
+the one that is easy to miss. It refuses a bundle that is not itself writable
+with "You don't have permission to save the file “TurtleDiver” in the folder
+“Applications”" even when the directory would have allowed the rename —
+measured on a fixture, where the same `0555` bundle fails under
+`replaceItemAt` and succeeds under `renamex_np(RENAME_SWAP)`. That distinction
+is exactly the common case: a `.pkg` install is `root:wheel 0755` inside a
+`/Applications` that is `root:admin` `drwxrwxr-x`, so the *directory* is
+writable by an administrator and the *bundle* is not. Asking only about the
+directory (which is what this check did until a fixture caught it) let that install past the
+gate, and the swap then failed with a permission error where the reveal path
+was the answer.
+
+The swap is deliberately not used even though it would work: exchanging the two
+entries leaves the old bundle at the staging path, and a bundle the user could
+not write is a bundle the user cannot delete either ("“Old” couldn't be removed
+because you don't have permission to access it"), so it would leave a hidden
+`root`-owned directory in `/Applications` that only an administrator could
+remove. Refusing up front is the honest trade.
 
 On either path the mount is detached (twice, `-force` on the second try) and the
 mount point removed, including when a gate refuses.

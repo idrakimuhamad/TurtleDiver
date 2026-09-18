@@ -445,6 +445,43 @@ final class UpdateBundleTests: XCTestCase {
         XCTAssertFalse(UpdateInstaller.canReplaceBundle(at: applications.appendingPathComponent("TurtleDiver.app")))
     }
 
+    /// A `.pkg` install is not replaced, and — this was the bug — it is not
+    /// *attempted* either.
+    ///
+    /// The gate asked only about the containing directory, which an
+    /// administrator can write in `/Applications`, so a `root`-owned bundle
+    /// sailed past it and `replaceItemAt` then threw "You don't have permission
+    /// to save the file “TurtleDiver” in the folder “Applications”". That is a
+    /// failed install where the reveal path was the answer — on the one install
+    /// shape most users have. The bundle's own write bit is what
+    /// `replaceItemAt` needs, and what a `root`-owned bundle does not give this
+    /// user. Measured here: `/Applications` `W_OK` true,
+    /// `/Applications/TurtleDiver.app` `W_OK` false.
+    func testABundleTheUserCannotWriteIsRevealedRatherThanFailedHalfway() throws {
+        try XCTSkipIf(geteuid() == 0, "a root runner can write anything; the assertion means nothing")
+        let running = try makeRunningBundle(version: "2.0.0")
+        // Read-only, the way a root-owned install is to the user running it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: running.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: running.path) }
+
+        XCTAssertFalse(FileManager.default.isWritableFile(atPath: running.path),
+                       "the fixture is not writable, which is the whole point")
+        XCTAssertTrue(FileManager.default.isWritableFile(atPath: running.deletingLastPathComponent().path),
+                      "and its directory is: the directory alone is not the test")
+        XCTAssertFalse(UpdateInstaller.canReplaceBundle(at: running),
+                       "a writable directory does not make an unwritable bundle replaceable")
+
+        let image = try makeImage()
+        let installer = UpdateInstaller(runner: makeRunner(appInImage: try makeImageContents()),
+                                        runningBundle: running)
+        let outcome = try installer.install(try downloaded(image: image),
+                                            running: try XCTUnwrap(ReleaseVersion("2.0.0")))
+
+        XCTAssertEqual(outcome, .revealed(version: try XCTUnwrap(ReleaseVersion("2.1.0")), imageURL: image),
+                       "the verified image is pointed out instead of a permission error")
+        XCTAssertEqual(try installedVersion(of: running), "2.0.0", "nothing was replaced")
+    }
+
     // MARK: - The gates, end to end through install()
 
     func testAVerifiedNewerReleaseReplacesTheRunningApp() throws {

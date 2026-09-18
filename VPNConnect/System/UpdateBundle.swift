@@ -300,12 +300,31 @@ public struct UpdateInstaller: Sendable, UpdateInstalling {
 
     /// Whether the running app can be replaced where it is.
     ///
-    /// The test is the containing directory: replacing a bundle is a rename into
-    /// the directory it already sits in, so a writable parent is exactly what
-    /// the operation needs. A build tree and `~/Applications` qualify; the
-    /// system `/Applications` is an administrator's and does not.
+    /// Two write permissions, and the second is the one that is easy to miss.
+    /// Replacing a bundle is a rename into the directory it already sits in, so
+    /// that directory has to be writable — but `replaceItemAt` additionally
+    /// refuses a bundle that is not itself writable, with "You don't have
+    /// permission to save the file …", even when the directory would allow the
+    /// rename. Measured both ways on a fixture: a `0555` bundle in a writable
+    /// directory fails at `replaceItemAt` and succeeds under
+    /// `renamex_np(RENAME_SWAP)`.
+    ///
+    /// The swap is deliberately *not* used. Exchanging the two entries leaves the
+    /// old bundle at the staging path, and a bundle the user could not write is
+    /// a bundle the user cannot delete either ("Old couldn't be removed because
+    /// you don't have permission to access it"), so a swapped install would
+    /// leave a hidden, `root`-owned directory in `/Applications` that only an
+    /// administrator could clean up. Refusing up front and revealing the
+    /// verified image is the honest trade.
+    ///
+    /// A build tree and `~/Applications` qualify. A `.pkg` install does not: it
+    /// is `root:wheel 0755` inside a `/Applications` that is `root:admin` —
+    /// writable by an administrator, which the directory check alone would have
+    /// accepted, and the bundle is not.
     public static func canReplaceBundle(at appURL: URL) -> Bool {
-        FileManager.default.isWritableFile(atPath: appURL.deletingLastPathComponent().path)
+        let manager = FileManager.default
+        let parent = appURL.deletingLastPathComponent().path
+        return manager.isWritableFile(atPath: parent) && manager.isWritableFile(atPath: appURL.path)
     }
 
     /// Verifies, then either replaces the running app or reveals the installer.
