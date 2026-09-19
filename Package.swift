@@ -119,6 +119,7 @@ let package = Package(
                 "System/ToolProcess.swift",
                 "System/ToolResolver.swift",
                 "System/TunnelAgentProtocol.swift",
+                "System/TunnelAgentChannel.swift",
                 "System/UpdateArtifact.swift",
                 "System/UpdateBundle.swift",
                 "System/UpdateFeed.swift",

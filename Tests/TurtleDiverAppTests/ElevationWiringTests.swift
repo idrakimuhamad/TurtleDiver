@@ -139,23 +139,31 @@ final class ElevationWiringTests: XCTestCase {
                       "the sweep must report what it did rather than work silently")
     }
 
-    /// The connect must never resolve to the strategy that cannot ask.
+    /// The connect must never *choose* the strategy that cannot ask.
     ///
     /// That is the whole `Failed - Elevation Expired` defect in one line: the app
     /// probed `sudo -n -v` in its own process and, on a warm answer, told the plan
     /// not to prompt. `sudo` keys its timestamp to the parent process when there
-    /// is no terminal, and the plan's `sudo` runs under the wrapper shell — a
-    /// different parent. It found a cold timestamp, exited with its marker, and
-    /// the connect died on a timestamp the app had just measured as warm.
+    /// is no terminal, so the answer said nothing about the record the `sudo`
+    /// would actually find. It found a cold one, exited with its marker, and the
+    /// connect died on a timestamp the app had just measured as warm.
+    ///
+    /// Handling the strategy is a different thing from selecting it: `ElevationStrategy`
+    /// still has the case, and the warm-up on the agent path has to answer for it.
+    /// What must not happen is a connect that resolves to it.
     func testTheConnectStrategyIsNeverTheOneThatCannotAsk() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
 
-        XCTAssertFalse(code.contains(".neverPrompt"),
-                       "connect must never refuse to ask for elevation")
+        XCTAssertFalse(code.contains("= .neverPrompt"),
+                       "connect must never choose the strategy that cannot ask")
+        XCTAssertFalse(code.contains("ElevationStrategy.neverPrompt"),
+                       "…nor name it outside the `case` that handles it")
         XCTAssertFalse(code.contains("SudoProbe"),
                        "no probe outside the plan may decide the strategy")
         XCTAssertFalse(code.contains("timestampWarm"),
                        "warmth is not an input to the decision any more")
+        XCTAssertTrue(code.contains("let strategy = elevation ?? .storedPassword"),
+                      "a connect with no strategy must use the one that can ask")
     }
 
     /// Stale `/etc/hosts` entries belong to the launch plan, whose `sudo` runs in

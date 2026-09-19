@@ -30,12 +30,14 @@ import TurtleDiverSystem
 final class AgentRuntime: TunnelAgentRuntime {
     private let command: String
     private let arguments: [String]
+    private let searchPath: String?
     private let reader = BoundedLineReader()
     private var childPid: Int32 = -1
 
-    init(command: String, arguments: [String]) {
+    init(command: String, arguments: [String], searchPath: String? = nil) {
         self.command = command
         self.arguments = arguments
+        self.searchPath = searchPath
     }
 
     // MARK: - Starting
@@ -70,7 +72,7 @@ final class AgentRuntime: TunnelAgentRuntime {
         var argv: [UnsafeMutablePointer<CChar>?] = ([command] + arguments).map { strdup($0) }
         argv.append(nil)
         defer { for pointer in argv where pointer != nil { free(pointer) } }
-        var environment: [UnsafeMutablePointer<CChar>?] = ProcessInfo.processInfo.environment
+        var environment: [UnsafeMutablePointer<CChar>?] = childEnvironment()
             .map { strdup("\($0.key)=\($0.value)") }
         environment.append(nil)
         defer { for pointer in environment where pointer != nil { free(pointer) } }
@@ -101,6 +103,20 @@ final class AgentRuntime: TunnelAgentRuntime {
 
         childPid = Int32(pid)
         return Int32(pid)
+    }
+
+    /// The environment the tunnel runs in: the agent's own, with `PATH`
+    /// replaced when the caller named one.
+    ///
+    /// The rest is inherited rather than rebuilt. The child is `openconnect`,
+    /// which wants a home directory and a locale like any other program, and
+    /// dropping everything to set one variable would be a larger change than the
+    /// problem it solves. `PATH` is the one variable that is *known* to be wrong
+    /// here — see `--path`.
+    private func childEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        if let searchPath { environment["PATH"] = searchPath }
+        return environment
     }
 
     // MARK: - Ending

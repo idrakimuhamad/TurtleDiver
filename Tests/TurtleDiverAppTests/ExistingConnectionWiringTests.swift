@@ -155,19 +155,27 @@ final class ExistingConnectionWiringTests: XCTestCase {
     /// The launch cannot leave the record to openconnect: `--pid-file` is written
     /// only when it backgrounds, and the launch plan does not pass
     /// `--background`. So the app writes it, at both places that learn the pid.
+    ///
+    /// The establishment branch now lives in `noteTunnelSignals`, which both
+    /// stream handlers call: the agent redirects its child's output to its own
+    /// stderr, so a check that read only stdout would never notice the agent
+    /// path's tunnel at all. `TunnelAgentWiringTests` pins *that*; this pins what
+    /// the branch must do.
     func testTheTunnelThisRunStartedIsRecordedAtEstablishment() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
 
-        // The stdout sniffer: the tunnel is up, and the connect timer — which owns
-        // the poller — is cancelled in that same branch, so this is the last
-        // chance either of them gets.
-        let connect = try body(of: "private func executeVPNConnection() async", in: code)
-        let snifferCancel = try XCTUnwrap(connect.range(of: "self.cancelConnectionTimer()"),
+        // The shared establishment branch: the tunnel is up, and the connect timer
+        // — which owns the poller — is cancelled in that same branch, so this is
+        // the last chance either of them gets.
+        let sniffer = try body(of: "private func noteTunnelSignals(_ text: String, log: VpnConnectionLogger, source: String)", in: code)
+        let snifferCancel = try XCTUnwrap(sniffer.range(of: "cancelConnectionTimer()"),
                                           "the establishment branch must be the one that cancels the timer")
-        let snifferRecord = try XCTUnwrap(connect.range(of: "self.recordOwnTunnelPid()"),
+        let snifferRecord = try XCTUnwrap(sniffer.range(of: "recordOwnTunnelPid()"),
                                           "the establishment branch must record the pid it just made")
         XCTAssertLessThan(snifferCancel.lowerBound, snifferRecord.lowerBound,
                           "the record has to be written where the poller is stopped")
+        XCTAssertTrue(sniffer.contains("guard case .connecting = status else { return }"),
+                      "it also has to be the branch that owns the `connecting` transition")
 
         // The connect poller: it has a pid the detector already verified, so it
         // can record without a second look at the machine.

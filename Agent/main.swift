@@ -7,13 +7,19 @@ import TurtleDiverSystem
 /// the real process handling.
 ///
 /// ```
-/// turtlediver-agent --credential-lines N /absolute/path/openconnect [args…]
+/// turtlediver-agent --credential-lines N [--path <search path>] /absolute/path/openconnect [args…]
 /// ```
 ///
-/// Everything after the option is the tunnel's own command line, passed through
+/// Everything after the options is the tunnel's own command line, passed through
 /// unchanged. Nothing secret is ever in argv — the credentials arrive on the
 /// channel and go straight to the child's standard input — because argv is
 /// readable by every other process running as the same user.
+///
+/// `--path` is how the tunnel gets a usable `PATH`. The agent is started through
+/// `sudo`, which resets the environment, so an inherited `PATH` is not the
+/// caller's. `openconnect` runs `vpn-slice` as its script and vpn-slice runs
+/// helpers by name, so the Homebrew directories have to be put back explicitly.
+/// Without the option the child inherits the agent's own environment.
 ///
 /// The exit code is `TunnelAgent.ExitCode`: `0` the tunnel is gone, `2` unusable
 /// arguments, `3` end of input inside the credential block, `4` the tunnel would
@@ -38,14 +44,39 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 // someone's home. Nothing it starts needs one.
 _ = FileManager.default.changeCurrentDirectoryPath("/")
 
-guard arguments.count >= 3, arguments[0] == "--credential-lines" else {
+// Options first, then the command. An option is only accepted when it has its
+// value, so a truncated line is a usage refusal rather than a command the agent
+// reads past the end of the array for.
+var index = 0
+var credentialLines: Int?
+var searchPath: String?
+while index < arguments.count, arguments[index].hasPrefix("--") {
+    let (option, value) = (arguments[index], index + 1 < arguments.count ? arguments[index + 1] : nil)
+    switch option {
+    case "--credential-lines":
+        guard let value, let lines = Int(value) else {
+            fail(TunnelAgentWord.refusedUsage, .usage)
+        }
+        credentialLines = lines
+    case "--path":
+        guard let value else {
+            fail(TunnelAgentWord.refusedUsage, .usage)
+        }
+        searchPath = value
+    default:
+        fail(TunnelAgentWord.refusedUsage, .usage)
+    }
+    index += 2
+}
+
+// Options and nothing else is a truncated line, not a tunnel the agent should
+// try to start: `refused-usage` says the caller's argv was malformed, which is
+// the opposite of `refused-command`.
+guard index < arguments.count else {
     fail(TunnelAgentWord.refusedUsage, .usage)
 }
-guard let credentialLines = Int(arguments[1]) else {
-    fail(TunnelAgentWord.refusedUsage, .usage)
-}
-let command = arguments[2]
-let tunnelArguments = Array(arguments.dropFirst(3))
+let command = arguments[index]
+let tunnelArguments = Array(arguments.dropFirst(index + 1))
 
 // The agent must never become a general way to run something as root. It starts
 // one program, and `mayStart` is the whole of that rule.
@@ -55,10 +86,10 @@ guard TunnelAgent.mayStart(command: command) else {
 
 let session: TunnelAgentSession
 do {
-    session = try TunnelAgentSession(credentialLines: credentialLines)
+    session = try TunnelAgentSession(credentialLines: credentialLines ?? 0)
 } catch {
     fail(TunnelAgentWord.refusedUsage, .usage)
 }
 
-let runtime = AgentRuntime(command: command, arguments: tunnelArguments)
+let runtime = AgentRuntime(command: command, arguments: tunnelArguments, searchPath: searchPath)
 exit(TunnelAgentLoop.run(session: session, runtime: runtime))

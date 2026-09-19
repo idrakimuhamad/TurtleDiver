@@ -67,7 +67,64 @@ final class TunnelAgentProcessTests: XCTestCase {
         return url
     }
 
+    /// A stand-in for openconnect that reports the environment it was given.
+    ///
+    /// A shell script rather than a symlink, because what is under test here is
+    /// what the *tunnel* can see. It is not a copy of a signed binary, so AMFI
+    /// has no opinion about it.
+    private func makeStandInScript(in directory: URL) throws -> URL {
+        let url = directory.appendingPathComponent("openconnect")
+        try "#!/bin/sh\necho \"<CHILD-PATH>$PATH</CHILD-PATH>\" >&2\n/usr/bin/sleep 180\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
     // MARK: - The tests
+
+    /// `--path` exists because the agent is started as root by an app, and the
+    /// search path a tunnel needs (`vpn-slice`, `sed`) is not the one an app has.
+    /// The agent replaces the child's `PATH` with the one it is given, and leaves
+    /// it alone when it is not given one — both asserted here, because a tunnel
+    /// that cannot find its helpers fails in a way that shows up as a broken
+    /// route table rather than as a missing program.
+    func testTheAgentGivesTheTunnelTheSearchPathItWasGiven() throws {
+        let standIn = try makeStandInScript(in: scratch)
+        let agent = try AgentDriver(agent: agentURL,
+                                    arguments: ["--credential-lines", "1",
+                                                "--path", "/nonexistent/bin",
+                                                standIn.path, "180"])
+        agent.send("PIN-placeholder")
+        startedChild = try XCTUnwrap(agent.supervisedPid(within: 5))
+
+        // The closing tag is what makes this deterministic: waiting for the
+        // opening one would read a line that is still arriving.
+        XCTAssertTrue(agent.awaitError(containing: "</CHILD-PATH>", within: 10),
+                      "the tunnel never reported its path")
+        XCTAssertTrue(agent.errors.contains("<CHILD-PATH>/nonexistent/bin</CHILD-PATH>"),
+                      "the tunnel got the wrong path: \(agent.errors)")
+
+        agent.closeInput()
+        _ = agent.awaitExit(within: 15)
+    }
+
+    func testTheAgentLeavesThePathAloneWhenItIsNotGivenOne() throws {
+        let standIn = try makeStandInScript(in: scratch)
+        let agent = try AgentDriver(agent: agentURL,
+                                    arguments: ["--credential-lines", "1", standIn.path, "180"])
+        agent.send("PIN-placeholder")
+        startedChild = try XCTUnwrap(agent.supervisedPid(within: 5))
+
+        XCTAssertTrue(agent.awaitError(containing: "</CHILD-PATH>", within: 10),
+                      "the tunnel never reported its path")
+        let inherited = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        XCTAssertFalse(inherited.isEmpty, "this test host has no PATH to inherit")
+        XCTAssertTrue(agent.errors.contains("<CHILD-PATH>\(inherited)</CHILD-PATH>"),
+                      "the tunnel did not inherit the path: \(agent.errors)")
+
+        agent.closeInput()
+        _ = agent.awaitExit(within: 15)
+    }
 
     func testTheAgentStartsTheTunnelAndSaysSo() throws {
         let standIn = try makeStandIn(in: scratch)
@@ -343,6 +400,30 @@ private final class AgentDriver {
         // Non-blocking reads: `read` then answers EAGAIN rather than waiting for
         // a word that may never come.
         _ = fcntl(outputPipe.fileHandleForReading.fileDescriptor, F_SETFL, O_NONBLOCK)
+        _ = fcntl(errorPipe.fileHandleForReading.fileDescriptor, F_SETFL, O_NONBLOCK)
+    }
+
+    /// Waits for the tunnel's own log to say something. Read while the agent is
+    /// still running, which `awaitExit` cannot do: it only drains the log stream
+    /// once the process is gone.
+    func awaitError(containing needle: String, within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while true {
+            _ = drainErrors()
+            if errors.contains(needle) { return true }
+            if !process.isRunning { _ = drainErrors(); return errors.contains(needle) }
+            if Date() >= deadline { return false }
+            usleep(2_000)
+        }
+    }
+
+    @discardableResult
+    private func drainErrors() -> Bool {
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        let count = read(errorPipe.fileHandleForReading.fileDescriptor, &chunk, chunk.count)
+        guard count > 0 else { return false }
+        errors += String(decoding: chunk[0..<count], as: UTF8.self)
+        return true
     }
 
     func send(_ line: String) {

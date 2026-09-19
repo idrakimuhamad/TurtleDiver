@@ -244,11 +244,30 @@ class VPNManager: ObservableObject {
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
     private var inputPipe: Pipe?
+    /// The agent's channel, held open for the life of the tunnel.
+    ///
+    /// The writing end of this pipe *is* the tunnel's lifetime. The agent ends
+    /// the tunnel when it reads end of input, which is the correct reading of
+    /// "the app is gone" — so nothing may close this while the app is connected.
+    /// Holding the `Pipe` here is what keeps it alive: a `Pipe` that goes out of
+    /// scope closes both of its descriptors, and that would be read as the app
+    /// having quit.
+    private var agentChannelInput: Pipe?
+    /// Decodes the agent's protocol words. One connection exists at a time and a
+    /// readability handler is invoked serially, so this needs no lock of its own.
+    private var agentDecoder = TunnelAgentChannel.Decoder()
+    /// Set when the agent refused the launch, so the termination handler can
+    /// report the refusal instead of the bare exit status that carried it.
+    private var agentDiagnosis: TunnelAgentChannel.Diagnosis?
     private var connectionTimer: DispatchSourceTimer?
 
     /// How long a connect may stay in `.connecting` before it is treated as
     /// stuck. Named because the preflight message quotes it back to the user.
     private static let connectionTimeoutSeconds = 90
+    /// How long one helper `sudo` step may take — the stale-route cleanup, which
+    /// is a `sed` over a small file. Named separately from the connect timeout
+    /// because a `sed` that has not returned in twenty seconds is not going to.
+    private static let helperStepTimeoutSeconds: TimeInterval = 20
 
     /// How this attempt asks for privilege. Decided *before* the launch, from
     /// what `/etc/pam.d` and a bounded `sudo -n -v` say — this is what stops a
@@ -729,18 +748,7 @@ class VPNManager: ObservableObject {
         // unexported shell variables — see `OpenConnectLaunchPlan`.
         OpenConnectPidFile.prepareDirectory()
         OpenConnectPidFile.discardLegacyFile()
-        let plan = OpenConnectCommand.launchPlan(
-            openconnectPath: openconnectPath,
-            arguments: arguments,
-            adminPassword: settings.adminPassword,
-            pin: pin,
-            vpnPassword: settings.vpnPassword,
-            elevation: elevation
-        )
-        // Shape, for the log and for debugging — it is the same script every
-        // time, and it contains nothing secret.
-        let shellCommand = plan.script
-        
+
         // Connection file logger
         let log = VpnConnectionLogger()
         log.write("Host: \(settings.vpnHost)")
@@ -748,33 +756,51 @@ class VPNManager: ObservableObject {
         log.write("Tunneling: \(withTunneling)")
         log.write("openconnect path: \(openconnectPath)")
         log.write("Arguments: \(arguments)")
-        // The pipeline's *shape* is logged, never its credential bytes: they
-        // are not in the command line at all any more, they are written to
-        // openconnect's stdin from `plan.standardInput`. Individual
-        // credentials are recorded below in redacted form by `logSend`.
-        log.write("Pipeline: \(shellCommand)")
-        log.write("Credential stdin: \(plan.standardInput.count) bytes, \(elevation.credentialLineCount) lines")
-        log.write("Elevation: \(elevation)")
-        log.logSend("Admin password (for sudo)", value: settings.adminPassword)
-        log.logSend("PIN (passcode+tokencode)", value: pin)
-        log.logSend("VPN password", value: settings.vpnPassword)
-        log.flush()
-        
+
+        // Which of the two launch shapes this connect uses, decided before
+        // anything runs and logged either way. Everything after this point —
+        // the pipes, the readability handlers, the timers — is identical for
+        // both, so the agent path is a value here rather than a second copy of
+        // the launch tail.
+        let launch: TunnelLaunch
+        switch await Self.agentAvailability() {
+        case .ready:
+            guard let agentLaunch = await prepareAgentLaunch(
+                openconnectPath: openconnectPath,
+                arguments: arguments,
+                pin: pin,
+                settings: settings,
+                log: log
+            ) else { return }
+            launch = agentLaunch
+        case .notInstalled:
+            launch = wrapperLaunch(openconnectPath: openconnectPath, arguments: arguments,
+                                   pin: pin, settings: settings, log: log)
+        case .refused(let why):
+            // Something is installed where the agent lives and the app will not
+            // run it as root. That is worth saying out loud: silently falling
+            // back would hide a file that should not be there.
+            log.write("Agent not used: \(why)")
+            await MainActor.run { self.debugOutput += "WARN: \(why)\n" }
+            launch = wrapperLaunch(openconnectPath: openconnectPath, arguments: arguments,
+                                   pin: pin, settings: settings, log: log)
+        }
+
         DispatchQueue.main.async {
             self.debugOutput += "Connection log: \(VpnConnectionLogger.logPath)\n"
-            self.debugOutput += "Launching openconnect via sudo...\n"
+            self.debugOutput += launch.announcement
         }
-        
-        // Run via bash -c (direct, unbuffered — no osascript intermediary)
+
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = ["-c", shellCommand]
+        proc.executableURL = launch.executable
+        proc.arguments = launch.arguments
         
         let outPipe = Pipe()
         let errPipe = Pipe()
-        // The credentials' route into the process. Three short lines fit in the
-        // pipe buffer, so the write below cannot block even if the script is
-        // slow to reach its first `read`.
+        // The credentials' route into the process. Two or three short lines fit
+        // in the pipe buffer, so the write below cannot block even if the child
+        // is slow to reach its first `read`. On the agent path this same pipe is
+        // the protocol channel and stays open — see `launch.keepsInputOpen`.
         let inPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
@@ -783,11 +809,22 @@ class VPNManager: ObservableObject {
         // Reset flags
         self.passcodePromptCount = 0
         self.pipeClosed = false
+        self.agentDecoder = TunnelAgentChannel.Decoder()
+        self.agentDiagnosis = nil
         
         // Handle output — now unbuffered since we run bash directly, not via osascript
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             log.logStream("STDOUT", data: data)
+            // The agent's standard output is the protocol, not the tunnel. Its
+            // child's output is redirected to its stderr — the rule that keeps a
+            // word from being corrupted by openconnect's banner — so this pipe
+            // carries words and nothing else, and they go to their own decoder
+            // rather than into the tunnel-output path below.
+            if launch.keepsInputOpen {
+                self.handleAgentChannel(data: data, log: log)
+                return
+            }
             if let output = String(data: data, encoding: .utf8) {
                 DispatchQueue.main.async {
                     self.debugOutput += output
@@ -798,36 +835,7 @@ class VPNManager: ObservableObject {
                         log.logHandler("STDOUT", action: "banner text, no input sent")
                     }
                     
-                    // Check connection success signals
-                    if output.contains("Established DTLS")
-                        || output.contains("ESP session established")
-                        || output.contains("Connected as")
-                        || output.contains("CSTP connected")
-                        || output.contains("Configured as")
-                        || output.contains("Got CONNECT response") {
-                        log.logHandler("STDOUT", action: "detected successful connection signal")
-                        if case .connecting = self.status {
-                            self.status = .connected
-                            self.startDurationTimer(startingAt: Date())
-                            self.cancelConnectionTimer()
-                            // Cancelling the connect timer cancels the *poller*
-                            // too, so this is the last chance to write down what
-                            // was just launched. Without the record, the next
-                            // disconnect has no pid to signal — see
-                            // `recordOwnTunnelPid`.
-                            self.recordOwnTunnelPid()
-                            if let id = self.currentAttemptId {
-                                let attempt = ConnectionAttempt(
-                                    id: id,
-                                    timestamp: self.connectionStartTime ?? Date(),
-                                    host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
-                                    status: "Connected",
-                                    logOutput: self.debugOutput
-                                )
-                                ConnectionHistoryManager.shared.updateAttempt(attempt)
-                            }
-                        }
-                    }
+                    self.noteTunnelSignals(output, log: log, source: "STDOUT")
                 }
             }
         }
@@ -843,6 +851,11 @@ class VPNManager: ObservableObject {
                 if cleanLine.isEmpty { continue }
                 DispatchQueue.main.async {
                     let lower = cleanLine.lowercased()
+
+                    // The child's output arrives here on the agent path, which is
+                    // the whole reason this check is a function both handlers
+                    // call instead of a block in the stdout handler.
+                    self.noteTunnelSignals(cleanLine, log: log, source: "STDERR")
 
                     // A named elevation failure, before the keyword checks below:
                     // the marker contains "sudo", and would otherwise be logged
@@ -886,6 +899,10 @@ class VPNManager: ObservableObject {
         self.outputPipe = outPipe
         self.errorPipe = errPipe
         self.inputPipe = nil
+        // The agent path is the one that must not let go of its input pipe.
+        // `inputPipe` keeps its old meaning — nothing else in this file writes
+        // to a running tunnel's stdin — and the agent's channel lives on its own.
+        if launch.keepsInputOpen { self.agentChannelInput = inPipe }
         
         let gen = connectionGeneration
         proc.terminationHandler = { [weak self] p in
@@ -904,6 +921,16 @@ class VPNManager: ObservableObject {
                     self.debugOutput += "\(reason.detail)\n"
                     self.status = .error(reason.historyStatus)
                     self.logFailedAttempt(status: reason.historyStatus)
+                    self.cancelConnectionTimer()
+                    return
+                }
+                // An agent refusal is a diagnosis an exit status cannot carry:
+                // exit 4 is "the agent would not start that", which is not
+                // something to show a user.
+                if let diagnosis = self.agentDiagnosis {
+                    self.debugOutput += "\(diagnosis.detail)\n"
+                    self.status = .error(diagnosis.historyStatus)
+                    self.logFailedAttempt(status: diagnosis.historyStatus)
                     self.cancelConnectionTimer()
                     return
                 }
@@ -929,14 +956,18 @@ class VPNManager: ObservableObject {
             self.startConnectionTimer(timeoutSeconds: Self.connectionTimeoutSeconds)
             
             // Feed the credentials. Written after `run()` so the child cannot
-            // miss them, and closed so a failed `read` fails fast instead of
-            // waiting on a pipe nobody will write to.
+            // miss them. The wrapper's pipe is then closed, so a failed `read`
+            // fails fast instead of waiting on a pipe nobody will write to. The
+            // agent's is not: end of input is how the agent is told to end the
+            // tunnel, so closing it here would end the tunnel that just started.
             do {
-                try inPipe.fileHandleForWriting.write(contentsOf: plan.standardInput)
+                try inPipe.fileHandleForWriting.write(contentsOf: launch.input)
             } catch {
                 log.write("[TERM] writing credentials to stdin failed: \(error.localizedDescription)")
             }
-            try? inPipe.fileHandleForWriting.close()
+            if !launch.keepsInputOpen {
+                try? inPipe.fileHandleForWriting.close()
+            }
             
             // Start polling for connection success via PID file.
             // Since we now run bash directly (not through osascript),
@@ -955,6 +986,321 @@ class VPNManager: ObservableObject {
         }
     }
     
+    // MARK: - Launch Shapes
+
+    /// Everything that differs between the two ways this app starts a tunnel.
+    ///
+    /// The tail of `executeVPNConnection()` — the pipes, the readability
+    /// handlers, the connect timer, the poller, the termination handler — is the
+    /// same for both, and it is where the core of the VPN lives. Making the
+    /// difference a value keeps one copy of it.
+    private struct TunnelLaunch {
+        let executable: URL
+        let arguments: [String]
+        /// The bytes to write to the child's standard input.
+        let input: Data
+        /// True when the input pipe must be closed once those bytes are written.
+        ///
+        /// The wrapper reads a fixed number of lines and then runs openconnect,
+        /// so closing its stdin makes a short read fail fast. The agent's channel
+        /// is the opposite: end of input means "the app is gone, end the tunnel",
+        /// so closing it is how the tunnel gets ended, not how it is kept.
+        let keepsInputOpen: Bool
+        /// The line the user sees while the launch happens.
+        let announcement: String
+
+        static func wrapper(_ plan: OpenConnectLaunchPlan) -> TunnelLaunch {
+            TunnelLaunch(
+                executable: URL(fileURLWithPath: "/bin/bash"),
+                arguments: ["-c", plan.script],
+                input: plan.standardInput,
+                keepsInputOpen: false,
+                announcement: "Launching openconnect via sudo...\n"
+            )
+        }
+
+        static func agent(_ agentArguments: [String], input: Data) -> TunnelLaunch {
+            TunnelLaunch(
+                executable: URL(fileURLWithPath: TunnelAgentChannel.SudoStepRunner.defaultExecutable),
+                arguments: TunnelAgentChannel.Launch.sudoArguments(agentArguments: agentArguments),
+                input: input,
+                keepsInputOpen: true,
+                announcement: "Launching the tunnel agent (root)...\n"
+            )
+        }
+    }
+
+    /// The fallback, and the thing that has always worked: `/bin/bash -c` around
+    /// the elevation script.
+    private func wrapperLaunch(
+        openconnectPath: String,
+        arguments: [String],
+        pin: String,
+        settings: SettingsManager,
+        log: VpnConnectionLogger
+    ) -> TunnelLaunch {
+        let plan = OpenConnectCommand.launchPlan(
+            openconnectPath: openconnectPath,
+            arguments: arguments,
+            adminPassword: settings.adminPassword,
+            pin: pin,
+            vpnPassword: settings.vpnPassword,
+            elevation: elevation
+        )
+        // Shape, for the log and for debugging — it is the same script every
+        // time, and it contains nothing secret. The pipeline's *shape* is logged,
+        // never its credential bytes: they are not in the command line at all any
+        // more, they are written to openconnect's stdin from `plan.standardInput`.
+        // Individual credentials are recorded in redacted form by `logSend`.
+        log.write("Pipeline: \(plan.script)")
+        log.write("Credential stdin: \(plan.standardInput.count) bytes, \(elevation.credentialLineCount) lines")
+        log.write("Elevation: \(elevation)")
+        log.logSend("Admin password (for sudo)", value: settings.adminPassword)
+        log.logSend("PIN (passcode+tokencode)", value: pin)
+        log.logSend("VPN password", value: settings.vpnPassword)
+        log.flush()
+        return .wrapper(plan)
+    }
+
+    /// The agent path, up to the point where a launch shape exists.
+    ///
+    /// `nil` means the connect must stop, and every way of returning nil here has
+    /// already reported itself: a status, a log line and a history row, exactly
+    /// as the wrapper path's own elevation markers do.
+    private func prepareAgentLaunch(
+        openconnectPath: String,
+        arguments: [String],
+        pin: String,
+        settings: SettingsManager,
+        log: VpnConnectionLogger
+    ) async -> TunnelLaunch? {
+        let strategy = elevation ?? .storedPassword
+        let searchPath = TunnelAgentChannel.Launch.searchPath(
+            inherited: ProcessInfo.processInfo.environment["PATH"]
+        )
+        // The agent forwards these to openconnect's standard input. The
+        // administrator password is not among them: on this path there is no
+        // `sudo -S` for openconnect to sit behind, so the tunnel stops carrying a
+        // credential the connect has no use for.
+        let credentials = TunnelAgentChannel.Launch.credentialBlock(
+            pin: pin,
+            vpnPassword: settings.vpnPassword
+        )
+
+        log.write("Agent: \(TunnelAgent.installedPath) (root-owned, signed for this team)")
+        log.write("Agent credential stdin: \(credentials.count) bytes, \(TunnelAgentChannel.Launch.credentialLineCount) lines")
+        log.write("Agent search path: \(searchPath)")
+        log.logSend("Admin password (for sudo)", value: settings.adminPassword)
+        log.logSend("PIN (passcode+tokencode)", value: pin)
+        log.logSend("VPN password", value: settings.vpnPassword)
+        log.flush()
+
+        await MainActor.run {
+            self.debugOutput += "Tunnel agent: \(TunnelAgent.installedPath)\n"
+        }
+
+        // One authentication, by the app itself, as a direct child. That is what
+        // makes the timestamp the app's own — and therefore what makes a later
+        // teardown silent, which is the defect this path exists to fix.
+        if let reason = await warmElevation(strategy: strategy, password: settings.adminPassword, log: log) {
+            await MainActor.run {
+                self.elevationBlock = reason
+                self.status = .error(reason.historyStatus)
+                self.debugOutput += "ERROR: \(reason.detail)\n"
+            }
+            log.write("[TERM] agent path: elevation failed: \(reason.historyStatus)")
+            log.flush()
+            self.logFailedAttempt(status: reason.historyStatus)
+            return nil
+        }
+
+        // Stale vpn-slice routes, with the `sudo -n` the timestamp just made
+        // possible. Not fatal: the wrapper sent this step's stderr to `/dev/null`
+        // for the same reason — a route that cannot be cleaned is not a reason to
+        // refuse to connect.
+        let cleanup = await Self.runSudoStep(
+            arguments: TunnelAgentChannel.Launch.hostsCleanupArguments,
+            stdin: nil,
+            timeout: Self.helperStepTimeoutSeconds
+        )
+        if !cleanup.succeeded {
+            log.write("[SUDO] stale route cleanup: "
+                + (cleanup.timedOut ? "timed out" : "exit \(cleanup.terminationStatus)"))
+        }
+
+        return .agent(
+            TunnelAgentChannel.Launch.agentArguments(
+                openconnectPath: openconnectPath,
+                tunnelArguments: arguments,
+                searchPath: searchPath
+            ),
+            input: credentials
+        )
+    }
+
+    /// The one authentication at connect, as a direct child of the app.
+    ///
+    /// The three strategies are the three shapes the launch script used to run
+    /// inside its own process group, moved out of the group precisely so the
+    /// timestamp that results belongs to the app rather than to a shell that will
+    /// be gone by the time anything needs it.
+    private func warmElevation(
+        strategy: ElevationStrategy,
+        password: String,
+        log: VpnConnectionLogger
+    ) async -> ElevationBlockReason? {
+        let arguments = TunnelAgentChannel.Launch.warmupArguments(strategy)
+        let input = TunnelAgentChannel.Launch.warmupInput(strategy, adminPassword: password)
+        log.write("[SUDO] warm-up: sudo \(arguments.joined(separator: " "))"
+            + " (\(input.isEmpty ? "no input" : "one line on stdin"))")
+        log.flush()
+
+        let result = await Self.runSudoStep(
+            arguments: arguments,
+            stdin: input.isEmpty ? nil : input,
+            timeout: TimeInterval(Self.connectionTimeoutSeconds)
+        )
+        if result.succeeded { return nil }
+        log.write("[SUDO] warm-up failed: \(result.timedOut ? "timed out" : "exit \(result.terminationStatus)")"
+            + (result.launchError.map { " — \($0)" } ?? ""))
+        log.flush()
+
+        switch strategy {
+        case .systemPrompt:
+            // The dialog this mode relies on is the one thing that would have
+            // answered, and it did not.
+            return .systemPromptUnanswered
+        case .storedPassword:
+            // A rejected password and a `sudo` that never came back are one fact
+            // to the user: it could not authenticate with nobody at the keyboard.
+            return .storedPasswordRejected
+        case .neverPrompt:
+            return .timestampExpired
+        }
+    }
+
+    /// One `sudo` step, off the main thread.
+    ///
+    /// `SudoStepRunner.run` blocks its caller for as long as the step takes, and
+    /// in `.systemPrompt` mode that is a dialog a person has to answer. The main
+    /// thread is never the place to wait for that.
+    private static func runSudoStep(
+        arguments: [String],
+        stdin: Data?,
+        timeout: TimeInterval
+    ) async -> TunnelAgentChannel.SudoStepRunner.Result {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: TunnelAgentChannel.SudoStepRunner().run(
+                    arguments: arguments,
+                    stdin: stdin,
+                    timeout: timeout
+                ))
+            }
+        }
+    }
+
+    /// Whether the agent is installed and this app is willing to run it as root.
+    /// Two `codesign` processes at most, so never on the main thread.
+    private static func agentAvailability() async -> TunnelAgentChannel.Availability {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: TunnelAgentChannel.Verifier.check())
+            }
+        }
+    }
+
+    /// The lines openconnect prints when the tunnel is up, on whichever stream
+    /// carries them.
+    private static let successSignals = [
+        "Established DTLS",
+        "ESP session established",
+        "Connected as",
+        "CSTP connected",
+        "Configured as",
+        "Got CONNECT response"
+    ]
+
+    /// Notices that the tunnel came up. Must be called on the main thread.
+    ///
+    /// These checks used to live in the standard-output handler alone, which was
+    /// correct while the app launched `bash` itself and openconnect's output
+    /// reached that handler. The agent redirects its child's output to its own
+    /// stderr — the rule that keeps the protocol channel clean — so on that path
+    /// the same lines arrive on the other pipe. One function, called by both
+    /// handlers, is the only way the tunnel is still detected as connected either
+    /// way.
+    ///
+    /// Idempotent by construction: it acts only while the status is
+    /// `.connecting`, so the first signal wins and the rest are silent.
+    private func noteTunnelSignals(_ text: String, log: VpnConnectionLogger, source: String) {
+        guard Self.successSignals.contains(where: { text.contains($0) }) else { return }
+        log.logHandler(source, action: "detected successful connection signal")
+        guard case .connecting = status else { return }
+        status = .connected
+        startDurationTimer(startingAt: Date())
+        cancelConnectionTimer()
+        // Cancelling the connect timer cancels the *poller* too, so this is the
+        // last chance to write down what was just launched. Without the record,
+        // the next disconnect has no pid to signal — see `recordOwnTunnelPid`.
+        recordOwnTunnelPid()
+        if let id = currentAttemptId {
+            let attempt = ConnectionAttempt(
+                id: id,
+                timestamp: connectionStartTime ?? Date(),
+                host: SettingsManager.shared.vpnHost.isEmpty ? "Unknown" : SettingsManager.shared.vpnHost,
+                status: "Connected",
+                logOutput: debugOutput
+            )
+            ConnectionHistoryManager.shared.updateAttempt(attempt)
+        }
+    }
+
+    /// Decodes the agent's side of the channel. Runs on the read queue; only the
+    /// state it changes hops to the main thread.
+    ///
+    /// Nothing here acts on the outcome of an *ending* yet — the teardown that
+    /// sends the one verb and reads `stopped`/`stubborn` back is the next step.
+    /// Until then these words are recorded, which is what makes the channel
+    /// observable rather than a mystery.
+    private func handleAgentChannel(data: Data, log: VpnConnectionLogger) {
+        for event in agentDecoder.consume(data) {
+            switch event {
+            case .supervising(let pid):
+                log.logHandler("AGENT", action: "supervising \(pid)")
+                // The agent says which pid it started, which is better than the
+                // app guessing: openconnect only writes `--pid-file` when it
+                // backgrounds, and it never does here. The record is verified
+                // before it is written, like every other one.
+                recordOwnTunnelPid(pid)
+                DispatchQueue.main.async {
+                    self.debugOutput += "Tunnel agent is supervising PID \(pid)\n"
+                }
+            case .stopped(let pid), .killed(let pid):
+                log.logHandler("AGENT", action: "the tunnel (\(pid)) ended")
+            case .stubborn(let pid):
+                log.logHandler("AGENT", action: "the tunnel (\(pid)) would not stop")
+                DispatchQueue.main.async {
+                    self.debugOutput += "The tunnel agent could not end PID \(pid)\n"
+                }
+            case .peerGone, .finished:
+                log.logHandler("AGENT", action: "the channel ended")
+            case .refused(let word):
+                log.logHandler("AGENT", action: "refused: \(word)")
+                let diagnosis = TunnelAgentChannel.diagnosis(forRefusal: word)
+                agentDiagnosis = diagnosis
+                DispatchQueue.main.async {
+                    self.debugOutput += "ERROR: \(diagnosis.detail)\n"
+                }
+            case .unrecognised(let bytes):
+                // Never the bytes themselves. This is the one thing on the
+                // channel the app cannot attribute to itself, so it is counted
+                // and dropped rather than echoed into a log the user reads.
+                log.logHandler("AGENT", action: "unrecognised \(bytes)-byte line")
+            }
+        }
+    }
+
     /// Stops a tunnel that is already running, before starting one.
     ///
     /// The pid is verified before anything is signalled. `openconnect.pid` has
