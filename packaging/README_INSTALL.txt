@@ -40,6 +40,29 @@ so they run as root. The app asks for your administrator password once and
 keeps it in the login Keychain; it is passed to sudo on stdin, never on a
 command line. Setting a system proxy also needs it.
 
+THE TUNNEL AGENT
+----------------
+If you installed TurtleDiver from the package, it also installed a small
+helper (a few hundred kilobytes) at:
+
+    /usr/local/libexec/turtlediver-agent
+
+It exists so that disconnecting does not have to ask for your password again.
+The app starts it once when you connect — that is the one moment macOS asks
+you to approve — and it ends the tunnel later on its own, because it is
+already running as root. It starts nothing but openconnect, it can be told to
+do exactly one thing (stop the tunnel it started), and it exits when the app
+exits.
+
+It is owned by root and cannot be replaced by your user account, and the app
+verifies its signature before using it. If it is not installed — for example
+if you dragged the app out of the disk image instead of using the package —
+everything still works, except that disconnecting may ask for your password.
+You can install or remove it yourself:
+
+    ./packaging/install-agent.sh
+    ./packaging/install-agent.sh --uninstall
+
 WHERE THINGS LIVE
 -----------------
     ~/Library/Application Support/TurtleDiver/Profiles/   your profiles

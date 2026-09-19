@@ -29,6 +29,12 @@ BUILD_DIR="$ROOT/build"
 DIST_DIR="$ROOT/dist"
 APP_PATH="$BUILD_DIR/Build/Products/Release/$APP_NAME.app"
 PACKAGING_DIR="$ROOT/packaging"
+# The privileged helper, installed alongside the app by the package. These two
+# must agree with TunnelAgent.installedPath / executableName, and
+# TunnelAgentInstallerTests reads both files to make sure they do.
+AGENT_PRODUCT="TurtleDiverAgent"
+AGENT_INSTALL_DIR="usr/local/libexec"
+AGENT_INSTALL_NAME="turtlediver-agent"
 
 MAKE_DMG=1
 MAKE_PKG=1
@@ -384,6 +390,27 @@ make_pkg() {
     # the app itself, which installs the bundle's contents into
     # /Applications/TurtleDiver.app rather than the bundle.
     ditto "$APP_PATH" "$pkgroot/Applications/$APP_NAME.app" || die "could not stage the app"
+
+    step "Building the tunnel agent"
+    (cd "$ROOT" && swift build -c release --product "$AGENT_PRODUCT") >/dev/null \
+        || die "swift build failed for $AGENT_PRODUCT"
+    agent_bin="$ROOT/.build/release/$AGENT_PRODUCT"
+    [ -x "$agent_bin" ] || die "$agent_bin was not produced"
+    # Signed with the same identity as the app so that the app's own check -- is
+    # this file signed by our team -- can tell it apart from anything else that
+    # ends up at that path. --timestamp only off local mode, so that a local
+    # build works with no network.
+    agent_sign=(--force --options runtime)
+    [ "$LOCAL_MODE" = 0 ] && agent_sign+=(--timestamp)
+    agent_sign+=(--sign "$SIGN_ID")
+    codesign "${agent_sign[@]}" "$agent_bin" || die "could not sign the agent"
+    codesign --verify --strict "$agent_bin" >/dev/null 2>&1 || die "the agent does not verify after signing"
+    agent_team="$(codesign -dv --verbose=2 "$agent_bin" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [ "$agent_team" = "$TEAM_ID" ] || die "the agent's team is '${agent_team:-none}', expected $TEAM_ID"
+    mkdir -p "$pkgroot/$AGENT_INSTALL_DIR" || die "could not create the agent's install directory"
+    ditto "$agent_bin" "$pkgroot/$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME" || die "could not stage the agent"
+    chmod 0755 "$pkgroot/$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME"
+    ok "the agent installs to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME, team $agent_team"
     sed "s/@VERSION@/$VERSION/g" "$PACKAGING_DIR/README_INSTALL.txt" > "$resources/README_INSTALL.txt"
 
     rm -f "$component"
@@ -493,6 +520,21 @@ verify_pkg() {
     fi
 
     rm -rf "$expand"
+    # The helper is what the package installs that the app does not carry. A
+    # package that shipped without it would install an app that silently keeps
+    # prompting on disconnect, so its absence is a failure, not a warning.
+    agent_installed="$(find "$expand" -maxdepth 7 -type f -name "$AGENT_INSTALL_NAME" 2>/dev/null | head -1)"
+    agent_dir="$(find "$expand" -maxdepth 6 -type d -name "$(basename "$AGENT_INSTALL_DIR")" 2>/dev/null | head -1)"
+    if [ -n "$agent_installed" ] && [ "$(dirname "$agent_installed")" = "$agent_dir" ]; then
+        if codesign --verify --strict "$agent_installed" >/dev/null 2>&1; then
+            ok "installs the agent to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME, and it verifies"
+        else
+            bad "the packaged agent does not verify after unpacking"; rc=1
+        fi
+    else
+        bad "the package would not install the agent to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME"
+        rc=1
+    fi
     [ "$rc" = 0 ] || die "the installer package did not pass verification"
 }
 

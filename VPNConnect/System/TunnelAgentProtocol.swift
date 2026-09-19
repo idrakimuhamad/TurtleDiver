@@ -44,6 +44,18 @@ public enum TunnelAgent {
     /// before exec'ing it.
     public static let executableName = "turtlediver-agent"
 
+    /// Where the installer puts it: a root-owned directory, outside every path a
+    /// user can write.
+    ///
+    /// The app decides whether to use the agent by looking here. If the agent is
+    /// not installed — the drag-to-Applications case, where the user never ran
+    /// the installer package — nothing is wrong and nothing is lost: the app
+    /// falls back to the elevation path it uses today. That is a deliberate
+    /// asymmetry, and the reason the agent is an upgrade rather than a
+    /// requirement.
+    public static let installDirectory = "/usr/local/libexec"
+    public static var installedPath: String { installDirectory + "/" + executableName }
+
     /// The only verb the channel accepts, matched exactly.
     ///
     /// Exact equality is the whole safety property of the channel. A prefix rule
