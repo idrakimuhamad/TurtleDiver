@@ -45,6 +45,18 @@ let package = Package(
             dependencies: ["TurtleDiverCore", "TurtleDiverRules"],
             path: "VPNConnect/System"
         ),
+        // The tunnel agent: the privileged process that owns a tunnel so the
+        // app can end it later without authenticating again. It is deliberately
+        // NOT part of the app bundle — a payload in a user-writable directory
+        // that the app execs as root is an escalation surface. It is built here
+        // and installed by the .pkg into a root-owned directory
+        // (`docs/ELEVATION.md` §10). It links the same `TurtleDiverSystem`
+        // sources the app does, so the protocol has one implementation.
+        .executableTarget(
+            name: "TurtleDiverAgent",
+            dependencies: ["TurtleDiverSystem"],
+            path: "Agent"
+        ),
         .target(
             name: "TurtleDiverAppGlue",
             dependencies: ["TurtleDiverCore", "TurtleDiverRules", "TurtleDiverEngine", "TurtleDiverSystem"],
@@ -106,6 +118,7 @@ let package = Package(
                 "System/SystemProxyManager.swift",
                 "System/ToolProcess.swift",
                 "System/ToolResolver.swift",
+                "System/TunnelAgentProtocol.swift",
                 "System/UpdateArtifact.swift",
                 "System/UpdateBundle.swift",
                 "System/UpdateFeed.swift",
@@ -131,7 +144,11 @@ let package = Package(
         ),
         .testTarget(
             name: "TurtleDiverCoreTests",
-            dependencies: ["TurtleDiverCore", "TurtleDiverRules", "TurtleDiverEngine", "TurtleDiverSystem"],
+            // `TurtleDiverAgent` is here for the build, not for the import: the
+            // suite drives the installed agent as a child process, and depending
+            // on the target is what guarantees `swift test` has built it. Nothing
+            // would fail loudly otherwise — the suite would simply find no binary.
+            dependencies: ["TurtleDiverCore", "TurtleDiverRules", "TurtleDiverEngine", "TurtleDiverSystem", "TurtleDiverAgent"],
             path: "Tests/TurtleDiverCoreTests"
         )
     ]
