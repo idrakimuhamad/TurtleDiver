@@ -1,4 +1,4 @@
-# Proxy Engine (Phase 3)
+# Proxy Engine
 
 The proxy engine turns TurtleDiver into a real local proxy: it listens on
 loopback, matches every request against the active profile's rules, resolves
@@ -32,7 +32,7 @@ client ──▶ listener (HTTP / SOCKS5)
      │     │              │ immediate close
      │     ├─ http  → upstream CONNECT tunnel
      │     ├─ socks5→ RFC 1928 handshake
-     │     └─ https → not supported yet (Phase 4+)
+     │     └─ https → refused: TLS upstream not implemented
      ▼
    RelayConnection: bidirectional event-driven pump,
    traffic counters per request
@@ -40,7 +40,7 @@ client ──▶ listener (HTTP / SOCKS5)
 
 Every request (including rejections and failures) lands in the `RequestLog`
 ring buffer (last 1000) with host, port, matched rule, policy, byte counts,
-duration, and error text — the Phase 5 dashboard renders it. The newest 200
+duration, and error text — the dashboard renders it. The newest 200
 entries also carry a **request detail** (see below), which the dashboard's row
 sheet renders.
 
@@ -70,7 +70,7 @@ sheet renders.
 
 ## Policies
 
-Policy resolution reuses the Phase 1 `PolicyStore`, including group behaviors
+Policy resolution reuses `PolicyStore`, including group behaviors
 (select / url-test / fallback / load-balance) and health bookkeeping. The
 engine runs group auto-testing only while started (`startAutoTesting` is the
 app's choice; the engine constructs its store with auto-testing off by
@@ -302,8 +302,7 @@ also captures `-getautoproxyurl` in its snapshot, emits
 the PAC on `disable()` — a corporate PAC must survive us.
 
 The legacy PAC *feature* itself (the `python3 -m http.server` on port 8765, the
-`Use Proxy` toggle and Settings → *Proxy (PAC)*) is gone; see §11 of
-`SURGE_CAPABILITIES_PLAN.md`. Two pieces of that retirement need explaining:
+`Use Proxy` toggle and Settings → *Proxy (PAC)*) is gone. Two pieces of that retirement need explaining:
 
 - `scrubLegacyPACFromSnapshot()` runs synchronously in
   `EngineController.init` (no subprocesses) so a persisted snapshot can never
@@ -369,8 +368,15 @@ Covered by `RuleSetTests` (44), `RuleSetStoreTests` (20) and
 `VPNConnect/Rules/PACRuleConverter.swift` converts a legacy PAC
 (`FindProxyForURL`) script into the same rule/policy model this engine
 consumes, so PACs can be migrated to the rule-based path. It is a pure,
-Foundation-only parser (no JavaScriptCore) in the `TurtleDiverRules` module;
-see §10 of `SURGE_CAPABILITIES_PLAN.md` for the mapping and limits. The
+Foundation-only parser (no JavaScriptCore) in the `TurtleDiverRules` module.
+The mapping is the table at the top of the converter: `shExpMatch`,
+`dnsDomainIs`, `localHostOrDomainIs` and exact-host tests become `DOMAIN` or
+`DOMAIN-SUFFIX`, `isInNet` becomes `IP-CIDR`/`IP-CIDR6`, and a multi-upstream
+return (`"PROXY a; DIRECT"`) becomes a generated `fallback` group. Its limits
+are stated there too: `||` alternatives expand, a wildcard in the middle of a
+host is approximated as `DOMAIN-KEYWORD`, and conditions it cannot translate
+(`&&`, negation, `isPlainHostName`, unknown functions) are reported as
+diagnostics and skipped rather than dropping the import. The
 Routing screen (`docs` → *Routing*) provides the import wizard and a
 friendly domain/IP → policy assignment UI. Covered by
 `Tests/TurtleDiverCoreTests/PACRuleConverterTests.swift` (34 tests).

@@ -1,8 +1,11 @@
-# System Proxy Integration (Phase 4)
+# System Proxy Integration
 
-Phase 4 points the **macOS system proxy** at the Phase 3 local engine, replacing
-the legacy PAC + python http.server path as the default way to route traffic
-through TurtleDiver. The legacy PAC mode stays available untouched.
+This points the **macOS system proxy** at the local engine, which is how traffic
+reaches TurtleDiver without a PAC file or a per-app setting. The legacy PAC
+feature (the `python3 -m http.server` on port 8765, the `Use Proxy` toggle and
+Settings → *Proxy (PAC)*) has been removed. A *corporate* PAC is still captured
+and handed back untouched, because CFNetwork prefers a PAC over explicit proxies
+and one must survive us.
 
 ## How it works
 
@@ -95,7 +98,7 @@ every VPN connect — no profile hand-editing required.
 
 `EngineController` is `@MainActor` and exposes `@Published` state
 (`engineRunning`, `httpPort`, `socks5Port`, `systemProxyOn`, `lastError`) that
-the Phase 5 dashboard will bind to.
+the dashboard binds to.
 
 ## Testing
 

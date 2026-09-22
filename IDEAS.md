@@ -4,10 +4,10 @@ An inbox, not a plan. Anything goes in here — half-formed, contradictory, one
 line or ten, measured or guessed. Nothing in this file is a promise, and an idea
 that never leaves it is a perfectly good outcome.
 
-When one graduates it moves into `docs/` as a plan or a section (the way
-`docs/SURGE_CAPABILITIES_PLAN.md` did), or straight into a commit. Then it moves
-to **Picked up** at the bottom, with a pointer, so this file does not fill with
-ghosts that nobody remembers the state of.
+When one graduates it moves into `docs/` as a section of an operator doc, or
+straight into a commit. Then it moves to **Picked up** at the bottom, with a
+pointer, so this file does not fill with ghosts that nobody remembers the state
+of.
 
 ## Adding one
 
@@ -281,7 +281,10 @@ the helper.
 
 ### 15. Outbound protocol breadth
 
-We speak HTTP, HTTPS and SOCKS5 upstream. Surge adds Shadowsocks, Snell, VMess,
+We speak HTTP and SOCKS5 upstream. `https` is accepted as a proxy type by the
+profile parser and then refuses at relay time (`tlsUpstreamUnsupported`), so it is
+declared but not spoken — a small fix of its own, worth folding in before any of
+the below. Surge adds Shadowsocks, Snell, VMess,
 Trojan, TUIC, Hysteria 2, AnyTLS, SSH, WireGuard and Tailscale. Each one is a
 project in itself (framing, crypto, replay protection, a test story that does not
 depend on a live server), and the app's own purpose — an `openconnect` VPN with a
@@ -293,16 +296,16 @@ that the answer to "why not X" is written down rather than rediscovered.
 ### 16. Enhanced Mode: capture at the packet layer
 
 Surge's virtual interface takes over traffic; ours is a system proxy, so only
-applications that honour the system proxy are routed at all. This is risk #1 in
-the plan and it is the reason the list above keeps pointing forward to it:
+applications that honour the system proxy are routed at all. This is the largest
+gap on this list and the reason the cards above keep pointing forward to it:
 fake-IP, DNS-stage rejection, per-process accuracy for apps that ignore proxies,
 and honest `SUBNET`/`DEVICE-NAME` behaviour all sit behind this.
 
 It is also a different product shape: a NetworkExtension or a privileged helper,
-signing and entitlements, and a much larger blast radius than a proxy port. The
-plan proposes it as a 1.4.0 investigation and does not decide it. Worth its own
-written decision either way, because a great deal of "why not parity" resolves to
-this one card.
+signing and entitlements, and a much larger blast radius than a proxy port. It
+has been proposed before and never decided, which is not a state worth staying
+in: worth its own written decision either way, because a great deal of "why not
+parity" resolves to this one card.
 
 ## Out of reach, and why
 

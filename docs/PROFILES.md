@@ -189,9 +189,9 @@ IP-CIDR,203.0.113.0/24,no-resolve
   that carry no HTTP metadata (e.g. SOCKS5 CONNECT). `PROCESS-NAME` is skipped
   when the peer process could not be determined.
 
-> The rule engine ships with Phase 2 and is exercised by the proxy listeners
-> landing in Phase 3; until then rules are validated and testable but not yet
-> consulted by live traffic.
+> Rules are validated when a profile is parsed, and consulted by live traffic
+> whenever the proxy engine is running — the engine's request log records which
+> rule matched each request. See `PROXY_ENGINE.md` for the matching order.
 
 ## Built-in policies
 
