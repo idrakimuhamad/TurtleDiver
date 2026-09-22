@@ -253,6 +253,19 @@ class VPNManager: ObservableObject {
     /// scope closes both of its descriptors, and that would be read as the app
     /// having quit.
     private var agentChannelInput: Pipe?
+    /// The last line the tunnel itself logged.
+    ///
+    /// Kept for the one moment it is worth anything: a tunnel that ended before it
+    /// was ready has no exit status worth showing — on the agent path the status
+    /// is 0, because the agent exited cleanly after its child had already gone —
+    /// so this line is the only thing that knows why the connect failed.
+    private var lastTunnelLine = ""
+    /// The tunnel pid this attempt *saw alive*, as opposed to the pid file, which
+    /// may hold anything at all. Set only by `recordOwnTunnelPid`, which has
+    /// already verified the name.
+    private var launchedTunnelPid: Int32?
+    /// Watches that pid while the attempt is still connecting.
+    private var tunnelWatchdogTimer: DispatchSourceTimer?
     /// Decodes the agent's protocol words. One connection exists at a time and a
     /// readability handler is invoked serially, so this needs no lock of its own.
     private var agentDecoder = TunnelAgentChannel.Decoder()
@@ -889,6 +902,8 @@ class VPNManager: ObservableObject {
         self.pipeClosed = false
         self.agentDecoder = TunnelAgentChannel.Decoder()
         self.agentDiagnosis = nil
+        self.lastTunnelLine = ""
+        self.launchedTunnelPid = nil
         // A new attempt owns its own channel: an answer recorded by a previous
         // one says nothing about this one, and holding the previous pipe here
         // kept its agent — and its tunnel — alive through a reconnect.
@@ -1027,7 +1042,20 @@ class VPNManager: ObservableObject {
                 if case .connected = self.status {
                     self.status = .disconnected
                 } else if case .connecting = self.status {
-                    self.status = .error("Connection failed (status: \(p.terminationStatus))")
+                    // A named cause beats a bare exit status, and on the agent
+                    // path the exit status names nothing at all: the agent exits
+                    // 0 because the tunnel it supervised has already gone. The
+                    // tunnel's own last line is what knows why.
+                    let diagnosis = ConnectSignals.diagnosisForTunnelEnding(
+                        lastLine: self.lastTunnelLine,
+                        terminationStatus: p.terminationStatus
+                    )
+                    if !diagnosis.detail.isEmpty { self.debugOutput += diagnosis.detail }
+                    self.status = .error(diagnosis.status)
+                    // The row is written either way. An attempt that failed and
+                    // was never recorded is how a history ends up full of
+                    // "Connecting" rows that explain nothing.
+                    self.logFailedAttempt(status: diagnosis.status)
                 }
                 self.cancelConnectionTimer()
             }
@@ -1043,6 +1071,7 @@ class VPNManager: ObservableObject {
             }
             
             self.startConnectionTimer(timeoutSeconds: Self.connectionTimeoutSeconds)
+            self.startTunnelWatchdog(log: log, gen: gen)
             
             // Feed the credentials. Written after `run()` so the child cannot
             // miss them. The wrapper's pipe is then closed, so a failed `read`
@@ -1070,7 +1099,7 @@ class VPNManager: ObservableObject {
             // Since we now run bash directly (not through osascript),
             // stdout/stderr arrive in real-time via the readability handlers.
             // The PID file polling is a secondary fallback.
-            self.startConnectionPollingTimer(log: log, gen: gen)
+            self.startConnectionPollingTimer(log: log, gen: gen, waitsForRoutingScript: withTunneling)
         } catch {
             log.write("[TERM] bash process failed to start: \(error.localizedDescription)")
             log.flush()
@@ -1331,18 +1360,12 @@ class VPNManager: ObservableObject {
         }
     }
 
-    /// The lines openconnect prints when the tunnel is up, on whichever stream
-    /// carries them.
-    private static let successSignals = [
-        "Established DTLS",
-        "ESP session established",
-        "Connected as",
-        "CSTP connected",
-        "Configured as",
-        "Got CONNECT response"
-    ]
-
     /// Notices that the tunnel came up. Must be called on the main thread.
+    ///
+    /// Which lines count is `ConnectSignals`' business, not this function's: the
+    /// list used to live here and accepted lines openconnect prints during
+    /// negotiation, so the app announced a connection while the tunnel was still
+    /// being set up (see `ConnectSignals`).
     ///
     /// These checks used to live in the standard-output handler alone, which was
     /// correct while the app launched `bash` itself and openconnect's output
@@ -1355,7 +1378,13 @@ class VPNManager: ObservableObject {
     /// Idempotent by construction: it acts only while the status is
     /// `.connecting`, so the first signal wins and the rest are silent.
     private func noteTunnelSignals(_ text: String, log: VpnConnectionLogger, source: String) {
-        guard Self.successSignals.contains(where: { text.contains($0) }) else { return }
+        // The tunnel's own log, not the agent's protocol words: `done` would name
+        // nothing, and the whole point of keeping a last line is that it names
+        // something.
+        if source == "STDERR" {
+            lastTunnelLine = text
+        }
+        guard ConnectSignals.isTunnelUp(in: text) else { return }
         log.logHandler(source, action: "detected successful connection signal")
         guard case .connecting = status else { return }
         status = .connected
@@ -1765,6 +1794,69 @@ class VPNManager: ObservableObject {
         connectionTimer = nil
         connectionPollTimer?.cancel()
         connectionPollTimer = nil
+        // The attempt is over, so the watch has nothing left to report. It is
+        // cancelled here rather than at each ending because every ending already
+        // comes through here.
+        tunnelWatchdogTimer?.cancel()
+        tunnelWatchdogTimer = nil
+    }
+
+    /// Watches the tunnel a connect launched, for as long as it is connecting.
+    ///
+    /// The agent notices its own child dying, and this is the same fact seen from
+    /// the only other place that can see it. It has to exist because the two can
+    /// disagree: the in-app updater ships a `.dmg` — the app, not the agent — so
+    /// the agent on this machine may be one an older package installed, with the
+    /// older behaviour. The app must not depend on an agent it did not install.
+    ///
+    /// Without it, an openconnect that fails at the HTTPS stage and exits is a
+    /// dead tunnel nobody reports: the app sits on "Connecting..." until the 90 s
+    /// timeout and then blames the clock.
+    ///
+    /// A died tunnel is not necessarily a gone one: an openconnect whose parent
+    /// has not reaped it is a zombie, and a zombie answers `kill(pid, 0)` as
+    /// alive — which is what `isRunning` checks, and why it is not what this
+    /// uses. A zombie does not look like an openconnect to `ps` (`<defunct>`,
+    /// measured on this machine), so `isOpenConnect` is the check that separates a
+    /// tunnel from the remains of one.
+    private func startTunnelWatchdog(log: VpnConnectionLogger, gen: UInt64) {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+        // Slow enough to be nothing, fast enough that a failed connect is named in
+        // seconds rather than at the timeout.
+        timer.schedule(deadline: .now() + 3.0, repeating: 3.0)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard self.connectionGeneration == gen, case .connecting = self.status else { return }
+                // Only a pid this attempt *saw alive* counts. An empty record is
+                // not evidence that anything died — the poller may not have found
+                // the tunnel yet, and a pid file left over from a previous
+                // connection names something that was never ours.
+                guard let pid = self.launchedTunnelPid else { return }
+                DispatchQueue.global(qos: .utility).async {
+                    // Off the main thread: this runs `ps`.
+                    guard !OpenConnectProcess.isOpenConnect(pid: pid) else { return }
+                    DispatchQueue.main.async {
+                        guard self.connectionGeneration == gen, case .connecting = self.status else { return }
+                        guard self.launchedTunnelPid == pid else { return }
+                        let diagnosis = ConnectSignals.diagnosisForTunnelEnding(
+                            lastLine: self.lastTunnelLine,
+                            terminationStatus: 0
+                        )
+                        self.debugOutput += "openconnect (PID: \(pid)) is no longer running — the connect cannot finish\n"
+                        if !diagnosis.detail.isEmpty { self.debugOutput += diagnosis.detail }
+                        self.status = .error(diagnosis.status)
+                        self.logFailedAttempt(status: diagnosis.status)
+                        // The agent and its `sudo` are still there, supervising a
+                        // tunnel that no longer exists — and they are the one
+                        // process this app is allowed to end.
+                        self.forceTerminate()
+                    }
+                }
+            }
+        }
+        timer.resume()
+        tunnelWatchdogTimer = timer
     }
     
     /// Polls every 2 seconds to detect when openconnect has successfully
@@ -1782,7 +1874,14 @@ class VPNManager: ObservableObject {
     /// command-line match: matching command lines is what once made this app
     /// adopt a process that merely mentioned openconnect, and it is why the
     /// previous version had to guess which pids to leave out.
-    private func startConnectionPollingTimer(log: VpnConnectionLogger, gen: UInt64) {
+    /// Whether the tunnel is configured by a script, and what that means here.
+    ///
+    /// The routing script (`vpn-slice`) runs *inside* openconnect, between the
+    /// process starting and the tunnel being usable. On the machine this was
+    /// measured on that gap was fourteen seconds, during which the pid file
+    /// already names a live openconnect. Naming a pid therefore proves the
+    /// process started, not that anything can use the tunnel yet.
+    private func startConnectionPollingTimer(log: VpnConnectionLogger, gen: UInt64, waitsForRoutingScript: Bool) {
         // Cancel any previous polling timer
         connectionPollTimer?.cancel()
         
@@ -1857,6 +1956,21 @@ class VPNManager: ObservableObject {
             
             DispatchQueue.main.async {
                 guard case .connecting = self.status, self.connectionGeneration == gen else { return }
+
+                // The pid is recorded above either way — it is what a later
+                // disconnect, timeout or quit reads to *name* this tunnel. What
+                // is decided here is only whether the app may call the tunnel
+                // connected, and with a routing script in play it may not:
+                // openconnect has not configured anything until that script has
+                // returned, and `ConnectSignals` reads the line it prints when it
+                // has. Returning here leaves the connect timeout armed, so a
+                // script that never returns ends as a diagnosed failure rather
+                // than as a tunnel that quietly never arrives.
+                guard !waitsForRoutingScript else {
+                    self.debugOutput += "openconnect is running (PID: \(pid)) — waiting for the routing script\n"
+                    return
+                }
+
                 self.debugOutput += "VPN connection established (PID: \(pid))\n"
                 self.status = .connected
                 self.startDurationTimer(startingAt: Date())
@@ -2181,6 +2295,7 @@ class VPNManager: ObservableObject {
         let store: (Int32) -> Void = { [weak self] pid in
             guard OpenConnectPidFile.record(pid) else { return }
             DispatchQueue.main.async {
+                self?.launchedTunnelPid = pid
                 self?.debugOutput += "Recorded the tunnel's PID (\(pid)) so it can be ended later\n"
             }
         }

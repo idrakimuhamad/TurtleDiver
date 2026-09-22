@@ -148,6 +148,9 @@ public enum TunnelAgentEnd: Equatable, Sendable {
     case stop
     /// End of input: the app is gone, so the tunnel ends with it.
     case peerGone
+    /// The tunnel's own process ended. Nobody asked, and the app has to be told
+    /// rather than left waiting for a session that no longer exists.
+    case tunnelGone
 }
 
 /// What actually happened to the tunnel, as observed rather than attempted.
@@ -303,6 +306,13 @@ public protocol TunnelAgentRuntime: AnyObject {
 /// * and the tunnel's real fate is what decides the exit code, not the fact that
 ///   a stop was requested.
 public enum TunnelAgentLoop {
+    /// Kept for the life of the process.
+    ///
+    /// A `DispatchSource` that nothing retains is cancelled, and a cancelled
+    /// watch never fires — which would put this back exactly where it was: an
+    /// agent waiting on a channel for a tunnel that had already gone.
+    static var liveWatch: DispatchSourceProcess?
+
     public static func run(session: TunnelAgentSession, runtime: TunnelAgentRuntime) -> Int32 {
         var session = session
         var tunnelPid: Int32?
@@ -328,6 +338,7 @@ public enum TunnelAgentLoop {
                     let pid = try runtime.startTunnel(credentials: credentials)
                     tunnelPid = pid
                     runtime.write(TunnelAgentWord.supervising(pid))
+                    liveWatch = watchForExit(of: pid, runtime: runtime)
                 } catch {
                     runtime.write(TunnelAgentWord.refusedStart)
                     return TunnelAgent.ExitCode.cannotStart.rawValue
@@ -340,28 +351,66 @@ public enum TunnelAgentLoop {
                     runtime.write(TunnelAgentWord.refused)
                     return TunnelAgent.ExitCode.usage.rawValue
                 }
-                if reason == .peerGone {
-                    // The app is gone, so nobody is reading the rest. The word
-                    // is written anyway; the app's log may already have it.
-                    runtime.write(TunnelAgentWord.peerGone)
-                }
-                let outcome = runtime.endTunnel(pid: pid)
-                switch outcome {
-                case .stopped:
-                    runtime.write(reason == .stop
-                                  ? TunnelAgentWord.stopped(pid)
-                                  : TunnelAgentWord.finished)
-                case .killed:
-                    runtime.write(reason == .stop
-                                  ? TunnelAgentWord.killed(pid)
-                                  : TunnelAgentWord.finished)
-                case .stubborn:
-                    runtime.write(TunnelAgentWord.stubborn(pid))
-                }
-                return outcome == .stubborn
-                    ? TunnelAgent.ExitCode.tunnelNotStopped.rawValue
-                    : TunnelAgent.ExitCode.ok.rawValue
+                // A stop that was asked for is reported by the loop below, not
+                // by the watch: end the watch first, so the signal this is about
+                // to send cannot start a second ending beside it.
+                liveWatch?.cancel()
+                liveWatch = nil
+                return finish(reason: reason, pid: pid, runtime: runtime)
             }
         }
+    }
+
+    /// Ends the tunnel and the channel for one reason, and returns the exit code.
+    ///
+    /// One function because all three ways in — the stop verb, end of input, and
+    /// the tunnel dying on its own — have to reach the same conclusion: what
+    /// actually happened to the tunnel decides the word and the exit code, and
+    /// only `.stop` may report a stop that was asked for.
+    static func finish(reason: TunnelAgentEnd, pid: Int32, runtime: TunnelAgentRuntime) -> Int32 {
+        if reason == .peerGone {
+            // The app is gone, so nobody is reading the rest. The word is written
+            // anyway; the app's log may already have it.
+            runtime.write(TunnelAgentWord.peerGone)
+        }
+        let outcome = runtime.endTunnel(pid: pid)
+        switch outcome {
+        case .stopped:
+            runtime.write(reason == .stop
+                          ? TunnelAgentWord.stopped(pid)
+                          : TunnelAgentWord.finished)
+        case .killed:
+            runtime.write(reason == .stop
+                          ? TunnelAgentWord.killed(pid)
+                          : TunnelAgentWord.finished)
+        case .stubborn:
+            runtime.write(TunnelAgentWord.stubborn(pid))
+        }
+        return outcome == .stubborn
+            ? TunnelAgent.ExitCode.tunnelNotStopped.rawValue
+            : TunnelAgent.ExitCode.ok.rawValue
+    }
+
+    /// Ends the channel when the tunnel's own process goes away.
+    ///
+    /// The agent is the tunnel's supervisor, and supervising means noticing: the
+    /// thread that reads commands is blocked in `read`, so there is nothing on it
+    /// to observe an openconnect that failed to authenticate and exited. Without
+    /// this watch the agent sat on a channel for a process that no longer existed
+    /// — the app learned nothing until its own connect timeout, and the leftover
+    /// root agent held the machine until then. What it reports is `done`, because
+    /// no stop was asked for, and any surviving group is finished off by
+    /// `endTunnel` exactly as it is on the other paths.
+    static func watchForExit(of pid: Int32, runtime: TunnelAgentRuntime) -> DispatchSourceProcess {
+        let source = DispatchSource.makeProcessSource(
+            identifier: pid,
+            eventMask: .exit,
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        source.setEventHandler {
+            exit(finish(reason: .tunnelGone, pid: pid, runtime: runtime))
+        }
+        source.resume()
+        return source
     }
 }

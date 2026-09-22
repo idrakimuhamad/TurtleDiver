@@ -109,6 +109,7 @@ let package = Package(
                 "Rules/RuleMatcher.swift",
                 "System/AppIdentity.swift",
                 "System/BoundedProcess.swift",
+                "System/ConnectSignals.swift",
                 "System/ElevationPolicy.swift",
                 "System/ElevatedTermination.swift",
                 "System/ExistingConnection.swift",

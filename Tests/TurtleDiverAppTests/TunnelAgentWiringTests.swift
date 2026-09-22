@@ -137,15 +137,33 @@ final class TunnelAgentWiringTests: XCTestCase {
                           "the calls must be in the two different handlers, in file order")
     }
 
-    /// The six strings appear once, in the list the shared function reads. A
-    /// second copy is how the old shape comes back.
+    /// The success lines are listed once, where the decision is made — and the two
+    /// that arrive while openconnect is still negotiating are not listed at all.
+    ///
+    /// A second copy is how the old shape comes back; an entry for the HTTPS
+    /// handshake or the CSTP line is how the app came to announce a connection
+    /// fourteen seconds early (see `ConnectSignals`).
     func testTheSuccessSignalsAreListedOnce() throws {
-        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
-        for signal in ["Established DTLS", "ESP session established", "Connected as",
-                       "CSTP connected", "Configured as", "Got CONNECT response"] {
+        let manager = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        let signals = try strippedCode(at: "VPNConnect/System/ConnectSignals.swift")
+        for signal in ["Established DTLS", "ESP session established", "Configured as"] {
             XCTAssertEqual(
-                code.components(separatedBy: "\"\(signal)\"").count - 1, 1,
-                "\(signal) must be listed exactly once"
+                signals.components(separatedBy: "\"\(signal)\"").count - 1, 1,
+                "\(signal) must be listed exactly once, in the classifier"
+            )
+            XCTAssertEqual(
+                manager.components(separatedBy: "\"\(signal)\"").count - 1, 0,
+                "and not again in the manager"
+            )
+        }
+        for signal in ["Got CONNECT response", "CSTP connected", "Connected as"] {
+            XCTAssertEqual(
+                signals.components(separatedBy: "\"\(signal)\"").count - 1, 0,
+                "\(signal) arrives before the routing script has run and must not be a success signal"
+            )
+            XCTAssertEqual(
+                manager.components(separatedBy: "\"\(signal)\"").count - 1, 0,
+                "and the manager must not decide for itself that \(signal) means connected"
             )
         }
     }

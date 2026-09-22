@@ -36,6 +36,11 @@ public enum OpenConnectProcess {
     /// are accepted — but only the last path component is compared, so
     /// `/tmp/not-openconnect-at-all` does not pass. Nothing here looks at
     /// arguments, which is the whole point.
+    ///
+    /// It is also what tells a *live* tunnel from the remains of one. An
+    /// openconnect whose parent has not reaped it is a zombie, and a zombie still
+    /// answers `kill(pid, 0)` — but `ps -o comm=` reports it as `<defunct>`
+    /// (measured on this machine), which does not name an openconnect.
     public static func namesOpenConnect(_ comm: String) -> Bool {
         let trimmed = comm.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }

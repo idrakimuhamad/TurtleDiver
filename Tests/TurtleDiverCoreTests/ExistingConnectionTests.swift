@@ -89,16 +89,22 @@ final class ExistingConnectionTests: XCTestCase {
     func testNamesOpenConnectRejectsAnythingElse() {
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect(""))
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect("   \n"))
+        // Measured on this machine: a process whose parent has not reaped it is a
+        // zombie, and `ps -o comm=` reports it as `<defunct>` while `kill(pid, 0)`
+        // still answers zero. So this rejection is what lets a watchdog tell a
+        // tunnel that has gone from a tunnel that is still there.
+        XCTAssertFalse(OpenConnectProcess.namesOpenConnect("<defunct>"))
+        XCTAssertFalse(OpenConnectProcess.namesOpenConnect("Z\n<defunct>"))
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect("/bin/bash"))
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect("sudo"))
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect("/tmp/not-openconnect-at-all"))
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect("/tmp/openconnect-lookalike"))
-        XCTAssertFalse(OpenConnectProcess.namesOpenConnect("openconnect9"))
         // A name that merely starts with the word is not the word. Strictness is
         // the safe direction: the cost of a false negative is that the app does
         // not adopt a tunnel, and the cost of a false positive is a signalled
         // process that was never openconnect.
         XCTAssertFalse(OpenConnectProcess.namesOpenConnect("/tmp/openconnectx"))
+        XCTAssertFalse(OpenConnectProcess.namesOpenConnect("openconnect9"))
     }
 
     // MARK: - Reading the processes

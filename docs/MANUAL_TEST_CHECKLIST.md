@@ -530,6 +530,31 @@ except the dialog itself is covered by `ElevationPolicyTests`,
       administrator password and connect → status `Failed - Admin Password`
       (not a bare `Connection failed (status: 1)`), and the log says the stored
       password was not accepted. Do not test this by editing PAM.
+- [ ] **When the tunnel counts as connected (2.1.2 fix).** Connect and watch the
+      window while openconnect negotiates: the pill must read `Connecting…` — with
+      the action button offering an orange **Cancel**, not a red **Disconnect** —
+      until the log shows `Configured as <address>, with SSL connected and DTLS in
+      progress`. Only then does the pill turn green and the button offer
+      *Disconnect*. On this machine that is a gap of ~14 s, and the log proves it:
+      the `Got CONNECT response` and `CSTP connected` lines must each be followed by
+      **no** `detected successful connection signal`, and the first such line must
+      be the `Configured as` one. The duration the history row records starts at
+      that same moment, so it no longer counts the negotiation.
+- [ ] **A connect that dies says so (2.1.2 fix).** Install the agent too —
+      `./packaging/install-agent.sh`, **without** `sudo`: it signs first, as you,
+      and asks for the administrator password itself when it installs. (Run under
+      `sudo` it signs as root, finds no usable identity and blames your
+      certificate.) This matters because the in-app updater ships only the app,
+      and the liveness check inside the *agent* is what ends the leftover root
+      process. Then connect with the network unable to reach the gateway
+      (Wi-Fi off is the easy way): the attempt must end within a few seconds of
+      openconnect exiting, the status must be `Failed - Tunnel Ended` with the
+      tunnel's own last `STDERR` line in the debug log behind it, and there must
+      be exactly one History row. It must **not** sit on `Connecting…` and then
+      report `Failed - Connection timeout` after 90 s — which is what 2.1.1 did,
+      leaving the agent and its `sudo` alive as root processes watching a tunnel
+      that was already gone. Afterwards `pgrep -x sudo` and
+      `pgrep -x openconnect` are both empty.
 - [ ] During a connect, `cat ~/Library/Application\ Support/TurtleDiver/run/elevation.pgid`
       → a plausible pgid, and `ps -o pid=,pgid=,comm= -g <pgid>` shows the
       wrapper (names only — never `ps` with args).

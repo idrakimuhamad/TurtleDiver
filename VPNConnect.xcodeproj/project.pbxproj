@@ -44,6 +44,7 @@
 		7C0FFEEA0000000000000010 /* ElevatedTermination.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000020 /* ElevatedTermination.swift */; };
 		7C0FFEEA0000000000000021 /* TunnelAgentProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000022 /* TunnelAgentProtocol.swift */; };
 		7C0FFEEA0000000000000023 /* TunnelAgentChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000024 /* TunnelAgentChannel.swift */; };
+		7C0FFEEA0000000000000025 /* ConnectSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA0000000000000026 /* ConnectSignals.swift */; };
 		7C0FFEEA000000000000000F /* UpdateRelaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001F /* UpdateRelaunch.swift */; };
 		7C0FFEEA000000000000000B /* UpdateModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001B /* UpdateModel.swift */; };
 		7C0FFEEA000000000000000C /* UpdatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEEA000000000000001C /* UpdatesView.swift */; };
@@ -104,6 +105,7 @@
 		7C0FFEEA0000000000000020 /* ElevatedTermination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ElevatedTermination.swift; sourceTree = "<group>"; };
 		7C0FFEEA0000000000000022 /* TunnelAgentProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelAgentProtocol.swift; sourceTree = "<group>"; };
 		7C0FFEEA0000000000000024 /* TunnelAgentChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelAgentChannel.swift; sourceTree = "<group>"; };
+		7C0FFEEA0000000000000026 /* ConnectSignals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectSignals.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001F /* UpdateRelaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateRelaunch.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001B /* UpdateModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateModel.swift; sourceTree = "<group>"; };
 		7C0FFEEA000000000000001C /* UpdatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdatesView.swift; sourceTree = "<group>"; };
@@ -262,6 +264,7 @@
 				7C0FFEEA0000000000000020 /* ElevatedTermination.swift */,
 				7C0FFEEA0000000000000022 /* TunnelAgentProtocol.swift */,
 				7C0FFEEA0000000000000024 /* TunnelAgentChannel.swift */,
+				7C0FFEEA0000000000000026 /* ConnectSignals.swift */,
 				7C0FFEEA000000000000001F /* UpdateRelaunch.swift */,
 				7C0FFEE30000000000000012 /* VPNRuleGenerator.swift */,
 			);
@@ -408,6 +411,7 @@
 				7C0FFEEA0000000000000010 /* ElevatedTermination.swift in Sources */,
 				7C0FFEEA0000000000000021 /* TunnelAgentProtocol.swift in Sources */,
 				7C0FFEEA0000000000000023 /* TunnelAgentChannel.swift in Sources */,
+				7C0FFEEA0000000000000025 /* ConnectSignals.swift in Sources */,
 				7C0FFEEA000000000000000F /* UpdateRelaunch.swift in Sources */,
 				7C0FFEEA000000000000000B /* UpdateModel.swift in Sources */,
 				7C0FFEEA000000000000000C /* UpdatesView.swift in Sources */,

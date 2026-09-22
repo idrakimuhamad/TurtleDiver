@@ -342,6 +342,48 @@ item, with the window's tappable branch asserting the same set. `.error` is not 
 terminal state; a UI affordance backed by a guard mismatch is a defect, not a UX
 quirk.
 
+### 10. A tunnel that is gone is a tunnel that ends
+
+The supervisor has to notice its child dying, and the app has to notice even if
+the supervisor does not.
+
+`openconnect` can fail before a tunnel exists — a handshake refused, a gateway
+unreachable — and exit within seconds. That is the ordinary case, and on the
+agent path it used to be silent. The agent's command-reading thread was blocked
+in `read()` on the credentials pipe and nothing else watched the child, so the
+exit went unseen: the agent and its `sudo` stayed alive supervising a tunnel that
+was gone, the app saw no protocol word and no exit, and the only thing that ended
+the attempt was the 90-second connect timeout — which then reported
+`Failed - Connection timeout`. The cause had been in the tunnel's own output the
+whole time. Nothing was reported to the history either, so a failure left a row
+that explained nothing.
+
+Three things changed:
+
+- **The agent watches its child.** `TunnelAgentLoop` installs a
+  `DispatchSourceProcess` on the pid it has just started — and holds it, because
+  an unretained source is cancelled and never fires — so the exit arrives as a
+  signal instead of being polled for. The word it writes says which ending it
+  was: `stopped N` only for a stop the app asked for, `done` for a tunnel that
+  ended by itself. The watch is cancelled before a requested stop, so one ending
+  cannot start a second.
+- **The tunnel's last line is kept, not only the successes.** The classifier is
+  still the only success test, but the line is recorded before it, and only from
+  the tunnel's own `STDERR` — the agent's protocol words (`done`) name no cause.
+- **The app watches too, and does not depend on the agent's version.** The
+  in-app updater ships a `.dmg`: the app, not the privileged agent. An agent an
+  older package installed keeps its older behaviour, so the app also checks the
+  pid it recorded itself, every few seconds *while still connecting*, and ends a
+  tunnel that is no longer there. It checks by name (`isOpenConnect`), never by
+  `kill(pid, 0)`: a died tunnel is not always a gone one, and an openconnect
+  whose parent has not reaped it is a zombie that answers `kill` as alive while
+  `ps -o comm=` reports it as `<defunct>` (measured on this machine). Only a pid
+  the attempt *saw alive* counts — an empty or leftover record is not evidence
+  that anything died.
+
+Both paths produce the same name, `Failed - Tunnel Ended`, with the tunnel's own
+last line behind it, and the attempt is recorded either way.
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:
@@ -484,3 +526,7 @@ tunnel: `killpg` still cannot signal a root process.
 - **The `networksetup` bound against the real tool** — the tests drive an
   injected executable, because they must never touch this machine's network
   settings. The 60 s value is a judgement call, not a measurement.
+- **The agent binary that is installed.** The suite runs the agent it has just
+  built, from `.build`. A machine keeps whatever the last package installed, and
+  the in-app updater does not replace it. This is why the app does not rely on
+  the agent for the liveness check in §10.

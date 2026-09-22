@@ -81,6 +81,20 @@ final class TunnelAgentProcessTests: XCTestCase {
     }
 
     // MARK: - The tests
+    /// A stand-in for openconnect that gives up on its own, the way a tunnel
+    /// whose authentication failed does.
+    ///
+    /// It waits first, deliberately: the agent's watch is installed *after* the
+    /// tunnel is announced, so a stand-in that was already gone would be
+    /// measuring whether a dead process can still be watched rather than whether
+    /// the watch is there at all.
+    private func makeFailingStandIn(in directory: URL) throws -> URL {
+        let url = directory.appendingPathComponent("openconnect")
+        try "#!/bin/sh\necho \"Failed to complete authentication\" >&2\n/usr/bin/sleep 0.4\nexit 7\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
 
     /// `--path` exists because the agent is started as root by an app, and the
     /// search path a tunnel needs (`vpn-slice`, `sed`) is not the one an app has.
@@ -207,6 +221,35 @@ final class TunnelAgentProcessTests: XCTestCase {
                        TunnelAgentWord.supervising(pid) + "\n" + TunnelAgentWord.stopped(pid) + "\n",
                        "the agent wrote more than the two words it owes")
         XCTAssertTrue(agent.errors.isEmpty, "the agent wrote to the log stream: \(agent.errors)")
+    }
+
+    /// The agent supervises the tunnel, and supervising means noticing.
+    ///
+    /// This is the defect a live connect found: openconnect failed at the HTTPS
+    /// stage and exited, and the agent — whose reading thread was blocked on the
+    /// channel — said nothing. The app then sat on `.connecting` until its own
+    /// 90 s timeout, and a root agent stayed on the machine for that whole time
+    /// supervising a process that no longer existed. Nothing is sent from this
+    /// side, because that is the case under test: the tunnel ends by itself, so
+    /// the only thing that can end this channel is the watch.
+    func testTheAgentEndsTheChannelWhenTheTunnelGoesAwayByItself() throws {
+        let standIn = try makeFailingStandIn(in: scratch)
+        let agent = try AgentDriver(agent: agentURL, arguments: ["--credential-lines", "2", standIn.path])
+        agent.send("PIN-placeholder")
+        agent.send("VPN-pw-placeholder")
+
+        let pid = try XCTUnwrap(agent.supervisedPid(within: 5))
+        startedChild = pid
+
+        let answer = try XCTUnwrap(agent.awaitLine(within: 10),
+                                   "the agent never noticed that its tunnel had gone")
+        XCTAssertEqual(answer, TunnelAgentWord.finished,
+                       "the tunnel ended by itself, which is not a stop that was asked for")
+        XCTAssertEqual(agent.awaitExit(within: 10), TunnelAgent.ExitCode.ok.rawValue)
+        XCTAssertFalse(childIsAlive(pid), "the tunnel outlived the agent")
+        XCTAssertEqual(agent.output,
+                       TunnelAgentWord.supervising(pid) + "\n" + TunnelAgentWord.finished + "\n",
+                       "the agent wrote more than the two words it owes")
     }
 
     func testTheTunnelGetsItsOwnProcessGroup() throws {
