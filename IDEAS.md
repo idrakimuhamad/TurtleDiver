@@ -49,12 +49,13 @@ or decided before the work is worth starting.
 | 11 | A Surge-profile compatibility report | S | — |
 | 12 | DNS beyond the system resolver | L | Deciding whether we want to be a resolver at all |
 | 13 | Automation: CLI, HTTP API, URL schemes | M | Somewhere for state to live that is not a window |
-| 14 | Outbound protocol breadth | L | Somebody who actually needs one of them |
-| 15 | Enhanced Mode: capture at the packet layer | XL | A privileged helper, signing, and a decision about what this app is |
-| 16 | An agent the updater cannot replace | M | A version story for the helper |
-| 17 | Liveness without shelling out to `ps` | S | A protocol version, so an old agent can be refused by name |
-| 18 | A root `sudo` that waits through part of every connect | S | An hour with the process table |
-| 19 | Notarization | S | An Apple Developer Program enrolment |
+| 14 | A CLI a program can drive, not just a person | M | The state question in idea 13 |
+| 15 | Outbound protocol breadth | L | Somebody who actually needs one of them |
+| 16 | Enhanced Mode: capture at the packet layer | XL | A privileged helper, signing, and a decision about what this app is |
+| 17 | An agent the updater cannot replace | M | A version story for the helper |
+| 18 | Liveness without shelling out to `ps` | S | A protocol version, so an old agent can be refused by name |
+| 19 | A root `sudo` that waits through part of every connect | S | An hour with the process table |
+| 20 | Notarization | S | An Apple Developer Program enrolment |
 
 ## Small and contained
 
@@ -73,7 +74,7 @@ matching on it means holding the client's first bytes before connecting
 upstream, and a rule that rejects on the SNI can no longer answer `403 Forbidden`
 — the client has been told the tunnel is up and will just see it close. Surge has
 the same problem and answers it with fake-IP and pre-matching at the DNS layer
-(idea 10, idea 15).
+(idea 10, idea 16).
 
 Worth doing for the routing correctness alone, but it needs a decision about
 failure shapes first, not a field in the match context.
@@ -184,10 +185,10 @@ at the cheapest possible moment. We have a resolver of our own
 (`SystemDNSResolver` with a positive/negative TTL cache), which is the part that
 would need intercepting.
 
-Without fake-IP or a packet layer (idea 15), the DNS half is available and the
+Without fake-IP or a packet layer (idea 16), the DNS half is available and the
 handshake half mostly is not: we only see a connection once an application has
 chosen to send it through our proxy port. So this is worth doing for the DNS
-half, and worth *knowing* that the rest waits for idea 15.
+half, and worth *knowing* that the rest waits for idea 16.
 
 ### 11. A Surge-profile compatibility report
 
@@ -201,7 +202,7 @@ The idea: make importing a foreign profile a first-class action that ends in a
 report — "these 412 lines do what you think, these 6 do not, here is what each
 one would have done" — instead of a diagnostics list nobody reads. It is the
 cheapest honest answer to "can I use my Surge profile", and it also gives ideas
-2–7 and 14 a place to announce themselves as they land.
+2–7 and 15 a place to announce themselves as they land.
 
 ### 12. DNS beyond the system resolver
 
@@ -213,7 +214,7 @@ lookup, and nothing can be blocked at the DNS stage (idea 10).
 
 This is a large piece of work with a real risk of being worse than the system
 resolver for ordinary use. It is also the prerequisite for the interesting half
-of ideas 10 and 15, which is the argument for doing it or for closing the door
+of ideas 10 and 16, which is the argument for doing it or for closing the door
 deliberately.
 
 ### 13. Automation: CLI, HTTP API, URL schemes
@@ -226,9 +227,59 @@ smoke test). The useful subset for this app is small: switch profile, switch a
 The design question is where state lives, since the engine and the policy store
 currently live in the app process and a CLI would be talking to something that
 may not be running. A URL scheme that a shell can open is the smallest honest
-step, and it is worth doing before an API that needs a port and a trust story.
+step, and it is worth doing before an API that needs a port and a trust story. The CLI's concrete shape, and the case for it
+being the first of the three, is card 14.
 
-### 14. Outbound protocol breadth
+### 14. A CLI a program can drive, not just a person
+
+The concrete form of idea 13, and the piece most likely to be used by something
+that is not a person at all: `turtlediver status --json`, `connect`,
+`disconnect`, `profile use <name>`, `policy set <group> <member>`,
+`rules explain <host>`, `requests --json`.
+
+**The cheap half is genuinely cheap.** The profile parser, rule matcher and
+policy resolver are Foundation-only and already build as SwiftPM libraries
+(`TurtleDiverCore`, `TurtleDiverRules`), and a second executable target has
+precedent — `TurtleDiverAgent` is one. So `rules explain` ("which rule would
+match this host, and which policy does it resolve to?"), `profile validate` and
+the tool doctor are pure functions over a profile file: no daemon, no privilege,
+no network, no window. They are also the questions an agent gets wrong most
+often when left to infer routing from a config file, and our answers are
+deterministic.
+
+**The expensive half is state.** Connect and disconnect have to reach a running
+process, and that state lives in the app today: an XPC or unix-socket channel to
+the running app, or the CLI driving the privileged agent directly (it is already
+a root-owned binary with a line protocol). A third option — the CLI growing its
+own engine — is worth refusing early, because two engines would both own the
+system-proxy snapshot and fight over restoring it.
+
+**Two traps, both already paid for once.**
+
+- **Elevation.** Connecting needs a privilege decision (the agent path, or Touch
+  ID / a sudo wrapper). A CLI may be run with nobody at the keyboard — over SSH,
+  or in a loop — so it must be able to say "a human has to approve this" as a
+  distinct, documented exit code rather than as a timeout. A program can act on
+  an exit code; it cannot act on a dialog.
+- **The orphan.** A CLI killed mid-connect (agent timeout, Ctrl-C, `kill -9`)
+  must not leave a root `openconnect` and its `sudo` behind. That is precisely
+  the 2.1.1 failure this release fixed, so the CLI needs the same ownership rule
+  the app now has: the tunnel's life is tied to the CLI's, and a tunnel that
+  disappears is an *ending*, not something to wait out on a clock.
+
+For agents specifically: `disconnect` should be idempotent and report whether it
+changed anything, `status --json` should carry the same diagnosis strings the
+History rows carry so a caller can react to a reason instead of parsing prose,
+and every read-only command should need no privilege at all. What must **not** be
+exposed: profile credentials live in the Keychain, so `profile show` prints the
+reference and never the secret — and `requests --json` is a list of the user's
+hosts, which is exactly the data the privacy guard exists to keep out of the
+repository, so it should never default to writing a file.
+
+Depends on: idea 13 for where state lives, and idea 18 for anything that drives
+the helper.
+
+### 15. Outbound protocol breadth
 
 We speak HTTP, HTTPS and SOCKS5 upstream. Surge adds Shadowsocks, Snell, VMess,
 Trojan, TUIC, Hysteria 2, AnyTLS, SSH, WireGuard and Tailscale. Each one is a
@@ -239,7 +290,7 @@ that the answer to "why not X" is written down rather than rediscovered.
 
 ## Shape of the product
 
-### 15. Enhanced Mode: capture at the packet layer
+### 16. Enhanced Mode: capture at the packet layer
 
 Surge's virtual interface takes over traffic; ours is a system proxy, so only
 applications that honour the system proxy are routed at all. This is risk #1 in
@@ -277,7 +328,7 @@ Not ideas — anti-goals, recorded so nobody re-proposes them expecting a surpri
 Measured first, unexplained second. Each of these came out of real runs rather
 than reading the code, so the context is the expensive part — keep it.
 
-### 16. An agent the updater cannot replace
+### 17. An agent the updater cannot replace
 
 The in-app updater ships a `.dmg`: the app, and never the privileged helper. The
 agent at `/usr/local/libexec/turtlediver-agent` is only ever replaced by the
@@ -290,7 +341,7 @@ Ideas, none of them obviously right:
 - The app compares the installed agent against itself at launch and says
   something in Setup when they disagree, with a button that runs the installer.
   Needs an agent version or protocol number to compare, which the protocol
-  deliberately does not have today (see idea 17).
+  deliberately does not have today (see idea 18).
 - Ship the agent inside the app bundle and install it with one elevation on the
   next connect after an update. Fewer moving parts for the user, but it makes a
   single elevation prompt do two jobs, and the agent would then live in two
@@ -302,7 +353,7 @@ Constraints to respect, from `docs/ELEVATION.md` and `docs/UPDATES.md`: nothing
 is installed while the tunnel is up, nothing is elevated silently, and an update
 a user did not ask for is worse than an old helper.
 
-### 17. Liveness without shelling out to `ps`
+### 18. Liveness without shelling out to `ps`
 
 The app decides "the tunnel is gone" by running `ps` on a pid it recorded, every
 3 s while connecting, because an old agent cannot say what happened to its child.
@@ -315,7 +366,7 @@ any replacement, and is worth keeping written down: a zombie answers
 `kill(pid, 0)` as *alive* while `ps -o comm=` reports `<defunct>`, so liveness is
 a question about a **name**, never a signal. That is `docs/ELEVATION.md` § 10.
 
-### 18. A root `sudo` that waits through part of every connect
+### 19. A root `sudo` that waits through part of every connect
 
 During the live pass for 2.1.2, a `sudo` process owned by root was visible for
 about half a minute during a normal connect and then exited by itself. Nothing
@@ -328,7 +379,7 @@ a prompt waiting on nothing, that is a root process alive for a fraction of ever
 connect; if it is the elevated setup doing slow work, it is worth a line of
 comment saying so.
 
-### 19. Notarization
+### 20. Notarization
 
 `publish.sh` refuses to build release artifacts without a Developer ID
 certificate, so 2.1.2 went out through `--local` and anyone downloading it needs
