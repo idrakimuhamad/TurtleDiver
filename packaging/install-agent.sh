@@ -92,6 +92,15 @@ if [ "$DO_UNINSTALL" = 1 ]; then
     exit 0
 fi
 
+if [ "$(id -u)" = 0 ] && [ "$DO_UNINSTALL" != 1 ]; then
+    die "run this as yourself, without sudo: ./packaging/install-agent.sh
+       Signing happens before anything needs root, and it has to happen as the
+       user whose keychain holds the certificate: a codesign running as root
+       looks in root's keychain, finds no identity that can sign for the app's
+       team, and reports it as a missing certificate. This script asks for your
+       administrator password itself, when it installs."
+fi
+
 step "Building $PRODUCT"
 cd "$ROOT" || die "cannot enter $ROOT"
 command -v swift >/dev/null 2>&1 || die "swift not found — install Xcode from the App Store"

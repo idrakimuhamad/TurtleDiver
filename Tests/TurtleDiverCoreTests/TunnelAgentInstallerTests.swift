@@ -67,6 +67,28 @@ final class TunnelAgentInstallerTests: XCTestCase {
         XCTAssertTrue(script.contains("codesign --verify --strict \"$INSTALLED\""))
     }
 
+    /// Root cannot sign for the app's team, however good the certificate is.
+    ///
+    /// `codesign` looks in the keychain of the user it runs as, and the private
+    /// key it needs belongs to the person who installed Xcode. Run under `sudo`,
+    /// every candidate identity fails, and the script used to report that as a
+    /// certificate that is not in this keychain — which is a wrong diagnosis of a
+    /// mistake the script can see before it starts. Measured: that is exactly what
+    /// happened when `sudo packaging/install-agent.sh` was typed by hand.
+    func testTheInstallerRefusesToRunAsRoot() throws {
+        let script = try source("packaging/install-agent.sh")
+        XCTAssertTrue(script.contains("if [ \"$(id -u)\" = 0 ]"),
+                      "nothing stops the installer being run with sudo")
+        XCTAssertTrue(script.contains("run this as yourself, without sudo"),
+                      "the refusal has to say what to type instead")
+        // Removing the agent needs root and signs nothing, so it stays allowed.
+        XCTAssertTrue(script.contains("[ \"$DO_UNINSTALL\" != 1 ]"),
+                      "a root uninstall is harmless and must keep working")
+        // And the step that does need root asks for it itself.
+        XCTAssertTrue(script.contains("sudo install -o root -g wheel -m 0755 \"$BIN\""),
+                      "the install step has to elevate by itself")
+    }
+
     /// The signature's name has to be the installed name, not the build product's.
     ///
     /// The app asks the signature what file it is (`Identifier`), and compares the
