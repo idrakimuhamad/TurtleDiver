@@ -504,7 +504,7 @@ options, and output lands in `dist/` (git-ignored).
 ### Tests
 
 ```bash
-swift test          # 962 tests (core engine + app glue)
+swift test          # the whole suite: core engine + app glue
 ```
 
 The SwiftPM package compiles the Foundation-only engine sources plus a small
@@ -536,6 +536,13 @@ VPNConnect/
 `docs/` holds the longer form of everything in this file, plus
 [`docs/MANUAL_TEST_CHECKLIST.md`](docs/MANUAL_TEST_CHECKLIST.md) for the checks
 that need a human and a real network.
+
+### Ideas
+
+[`IDEAS.md`](IDEAS.md) is the inbox for things that are not designed yet: one
+line or ten, measured or guessed, including the ones that turn out to be bad.
+When an idea graduates it moves into `docs/`, and a one-line ledger in the
+inbox records where it went, so the same ground is not covered twice.
 
 ## License
 
