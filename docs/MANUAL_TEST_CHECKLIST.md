@@ -555,7 +555,11 @@ except the dialog itself is covered by `ElevationPolicyTests`,
       leaving the agent and its `sudo` alive as root processes watching a tunnel
       that was already gone. Afterwards `pgrep -x sudo` and
       `pgrep -x openconnect` are both empty.
-- [ ] During a connect, `cat ~/Library/Application\ Support/TurtleDiver/run/elevation.pgid`
+- [ ] **The wrapper path only** — with the agent installed there is no wrapper
+      and this file is never written (measured across a whole connect on the
+      agent path; the agent's own record there is the log's `supervising <pid>`
+      line, and `ps -o pid=,comm= -p <pid>` names it). During a connect,
+      `cat ~/Library/Application\ Support/TurtleDiver/run/elevation.pgid`
       → a plausible pgid, and `ps -o pid=,pgid=,comm= -g <pgid>` shows the
       wrapper (names only — never `ps` with args).
 - [ ] Disconnect, then `ps -o comm= -g <pgid>` → nothing. No `sudo`, no
