@@ -67,6 +67,30 @@ final class TunnelAgentInstallerTests: XCTestCase {
         XCTAssertTrue(script.contains("codesign --verify --strict \"$INSTALLED\""))
     }
 
+    /// The signature's name has to be the installed name, not the build product's.
+    ///
+    /// The app asks the signature what file it is (`Identifier`), and compares the
+    /// answer with `TunnelAgent.executableName`. `codesign` names a bare binary
+    /// after the file it was handed — the SwiftPM product, `TurtleDiverAgent` — so
+    /// without this flag the app refuses the agent that was just installed, and
+    /// the teardown silently goes back to prompting. Measured on this machine
+    /// before the flag was added: `Identifier=TurtleDiverAgent`.
+    func testTheInstallersSignTheAgentUnderItsInstalledName() throws {
+        let installer = try source("packaging/install-agent.sh")
+        XCTAssertTrue(installer.contains("--sign \"$candidate\" --identifier \"$INSTALL_NAME\""),
+                      "the installed agent's signature would be named after the build product")
+        XCTAssertTrue(installer.contains("signature_field \"$BIN\" Identifier"),
+                      "the installer never reads back the name it signed under")
+        XCTAssertTrue(installer.contains("signature_field \"$INSTALLED\" Identifier"),
+                      "what was installed is not checked for the name the app looks for")
+
+        let publisher = try source("publish.sh")
+        XCTAssertTrue(publisher.contains("--sign \"$SIGN_ID\" --identifier \"$AGENT_INSTALL_NAME\""),
+                      "the packaged agent's signature would be named after the build product")
+        XCTAssertTrue(publisher.contains("sed -n 's/^Identifier=//p'"),
+                      "the package is never checked for the name the app looks for")
+    }
+
     func testThePackageAgreesWithTheProtocol() throws {
         let script = try source("publish.sh")
 

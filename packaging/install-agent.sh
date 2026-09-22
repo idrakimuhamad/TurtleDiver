@@ -137,7 +137,7 @@ SIGNED_WITH=""
 # and SIGNED_WITH would be thrown away with it.
 while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
-    codesign --force --options runtime --sign "$candidate" "$BIN" >/dev/null 2>&1 || continue
+    codesign --force --options runtime --sign "$candidate" --identifier "$INSTALL_NAME" "$BIN" >/dev/null 2>&1 || continue
     agent_team="$(signature_field "$BIN" TeamIdentifier)"
     if [ "$agent_team" = "$EXPECTED_TEAM" ]; then
         SIGNED_WITH="$candidate"
@@ -150,6 +150,12 @@ done <<<"$candidates"
        starting it, so an agent signed by anyone else would not be used.
        Install a certificate for this team, or set TURTLE_AGENT_SIGN_IDENTITY."
 codesign --verify --strict "$BIN" >/dev/null 2>&1 || die "the agent does not verify after signing"
+# The app checks that the file at the installed path is signed *as the agent*,
+# and "as the agent" is the installed name. Left to itself, `codesign` names the
+# signature after the build product — `TurtleDiverAgent` — and the app would
+# refuse the agent it had just installed. Measured: that is what it does.
+agent_id="$(signature_field "$BIN" Identifier)"
+[ "$agent_id" = "$INSTALL_NAME" ] || die "the agent is signed as '${agent_id:-nothing}', not $INSTALL_NAME"
 ok "signed by $SIGNED_WITH, team $EXPECTED_TEAM"
 [ "$DO_SIGN_ONLY" = 1 ] && { ok "$BIN"; exit 0; }
 
@@ -176,7 +182,9 @@ esac
 codesign --verify --strict "$INSTALLED" >/dev/null 2>&1 || die "the installed agent does not verify"
 INSTALLED_TEAM="$(signature_field "$INSTALLED" TeamIdentifier)"
 [ "$INSTALLED_TEAM" = "$EXPECTED_TEAM" ] || die "installed agent has team '${INSTALLED_TEAM:-none}', expected $EXPECTED_TEAM"
-ok "signed, team $INSTALLED_TEAM"
+INSTALLED_ID="$(signature_field "$INSTALLED" Identifier)"
+[ "$INSTALLED_ID" = "$INSTALL_NAME" ] || die "the installed agent is signed as '${INSTALLED_ID:-nothing}', not $INSTALL_NAME"
+ok "signed as $INSTALLED_ID, team $INSTALLED_TEAM"
 
 printf '\n%sDone.%s TurtleDiver will use the agent on its next connection.\n' "$GREEN" "$OFF"
 printf 'Remove it again with: ./packaging/install-agent.sh --uninstall\n'

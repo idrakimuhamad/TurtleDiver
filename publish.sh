@@ -402,11 +402,17 @@ make_pkg() {
     # build works with no network.
     agent_sign=(--force --options runtime)
     [ "$LOCAL_MODE" = 0 ] && agent_sign+=(--timestamp)
-    agent_sign+=(--sign "$SIGN_ID")
+    agent_sign+=(--sign "$SIGN_ID" --identifier "$AGENT_INSTALL_NAME")
     codesign "${agent_sign[@]}" "$agent_bin" || die "could not sign the agent"
     codesign --verify --strict "$agent_bin" >/dev/null 2>&1 || die "the agent does not verify after signing"
     agent_team="$(codesign -dv --verbose=2 "$agent_bin" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
     [ "$agent_team" = "$TEAM_ID" ] || die "the agent's team is '${agent_team:-none}', expected $TEAM_ID"
+    # The app checks that the file at the installed path is signed *as the agent*,
+    # which is the name it is installed under. `codesign` would otherwise name
+    # the signature after the build product, and the app would refuse the agent
+    # the package had just installed.
+    agent_id="$(codesign -dv --verbose=2 "$agent_bin" 2>&1 | sed -n 's/^Identifier=//p')"
+    [ "$agent_id" = "$AGENT_INSTALL_NAME" ] || die "the agent is signed as '${agent_id:-nothing}', not $AGENT_INSTALL_NAME"
     mkdir -p "$pkgroot/$AGENT_INSTALL_DIR" || die "could not create the agent's install directory"
     ditto "$agent_bin" "$pkgroot/$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME" || die "could not stage the agent"
     chmod 0755 "$pkgroot/$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME"
@@ -527,7 +533,12 @@ verify_pkg() {
     agent_dir="$(find "$expand" -maxdepth 6 -type d -name "$(basename "$AGENT_INSTALL_DIR")" 2>/dev/null | head -1)"
     if [ -n "$agent_installed" ] && [ "$(dirname "$agent_installed")" = "$agent_dir" ]; then
         if codesign --verify --strict "$agent_installed" >/dev/null 2>&1; then
-            ok "installs the agent to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME, and it verifies"
+            packaged_id="$(codesign -dv --verbose=2 "$agent_installed" 2>&1 | sed -n 's/^Identifier=//p')"
+            if [ "$packaged_id" = "$AGENT_INSTALL_NAME" ]; then
+                ok "installs the agent to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME, and it verifies"
+            else
+                bad "the packaged agent is signed as '${packaged_id:-nothing}', not $AGENT_INSTALL_NAME"; rc=1
+            fi
         else
             bad "the packaged agent does not verify after unpacking"; rc=1
         fi
