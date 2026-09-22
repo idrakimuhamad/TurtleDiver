@@ -525,7 +525,6 @@ verify_pkg() {
         fi
     fi
 
-    rm -rf "$expand"
     # The helper is what the package installs that the app does not carry. A
     # package that shipped without it would install an app that silently keeps
     # prompting on disconnect, so its absence is a failure, not a warning.
@@ -546,6 +545,12 @@ verify_pkg() {
         bad "the package would not install the agent to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME"
         rc=1
     fi
+
+    # Everything above reads `$expand`, so this is the last thing to leave it —
+    # it used to run before the agent check, which made that check search a
+    # directory that no longer existed and refuse a package that was correct.
+    # A check that cannot pass reads as "the package is wrong".
+    rm -rf "$expand"
     [ "$rc" = 0 ] || die "the installer package did not pass verification"
 }
 

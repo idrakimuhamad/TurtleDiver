@@ -131,6 +131,54 @@ final class TunnelAgentInstallerTests: XCTestCase {
                       "the package is never checked to contain a working agent")
     }
 
+    /// The inspection has to look at the *expanded* package, and it throws that
+    /// expansion away when it is done with it.
+    ///
+    /// It used to throw it away first, so the agent check searched a directory
+    /// that no longer existed, found nothing, and refused a package that was in
+    /// fact correct — verified by expanding the payload by hand, which does
+    /// contain the agent at its installed path, and watching the check say it
+    /// did not. A verification that cannot pass is worse than none: it reads as
+    /// "the package is wrong", and it stops every release at the last step.
+    /// Nothing caught it because nothing tested this function.
+    func testThePackageIsLookedIntoBeforeTheExpansionIsThrownAway() throws {
+        let script = try source("publish.sh")
+        let start = try XCTUnwrap(script.range(of: "verify_pkg() {"),
+                                  "publish.sh no longer inspects the package it just built")
+        let rest = script[start.lowerBound...]
+        let end = try XCTUnwrap(rest.range(of: "\n}"),
+                                "verify_pkg has no end, so this test cannot see its body")
+        let body = String(rest[..<end.lowerBound])
+
+        // Anchored on the agent check itself, not on the first `find "$expand"`
+        // in the function — that one is the *app* payload check, and a loose
+        // anchor there would let the deletion sit between the two and still
+        // read as an ordering this test is happy with.
+        let agentCheck = try XCTUnwrap(body.range(of: "agent_installed=\"$(find \"$expand\""),
+                                       "verify_pkg no longer searches the expanded package for the agent")
+        XCTAssertTrue(body.contains("$AGENT_INSTALL_NAME"),
+                      "verify_pkg does not look for the agent by the name the app looks for")
+
+        // Clearing an earlier expansion *before* making one is fine; deleting the
+        // one the checks are reading is not. So the question is only what
+        // happens after `pkgutil --expand-full`.
+        let expanded = try XCTUnwrap(body.range(of: "pkgutil --expand-full"),
+                                     "verify_pkg no longer expands the package it is inspecting")
+        let thrownAway = body.range(of: "rm -rf \"$expand\"",
+                                    range: expanded.upperBound..<body.endIndex)
+        if let thrownAway {
+            XCTAssertTrue(thrownAway.lowerBound > agentCheck.upperBound,
+                          "publish.sh throws the expanded package away after expanding it and before it "
+                          + "looks for the agent, so the agent check can only ever find nothing and every "
+                          + "package is refused")
+        }
+
+        let refusal = try XCTUnwrap(body.range(of: "die \"the installer package did not pass verification\""),
+                                    "verify_pkg no longer refuses a package it cannot verify")
+        XCTAssertTrue(refusal.lowerBound > agentCheck.upperBound,
+                      "the package is refused before the agent is looked for, which is not a check")
+    }
+
     func testEveryInstalledNameInTheRepositoryAgrees() throws {
         // A search rather than a list of files, so a third installer added later
         // cannot quietly disagree. The name is distinctive enough that anything
