@@ -259,6 +259,13 @@ class VPNManager: ObservableObject {
     /// Set when the agent refused the launch, so the termination handler can
     /// report the refusal instead of the bare exit status that carried it.
     private var agentDiagnosis: TunnelAgentChannel.Diagnosis?
+    /// The agent's answer to a stop request.
+    ///
+    /// A box rather than a plain property because the answer is written by the
+    /// channel's readability handler and read by the shut-down path, and because
+    /// the waiting half of that path runs on a queue — a box can be handed to it
+    /// without the manager travelling with it.
+    private let agentStopBox = AgentStopBox()
     private var connectionTimer: DispatchSourceTimer?
 
     /// How long a connect may stay in `.connecting` before it is treated as
@@ -268,6 +275,16 @@ class VPNManager: ObservableObject {
     /// is a `sed` over a small file. Named separately from the connect timeout
     /// because a `sed` that has not returned in twenty seconds is not going to.
     private static let helperStepTimeoutSeconds: TimeInterval = 20
+    /// How long the agent gets to end the tunnel before the app stops waiting and
+    /// does it the old way. Measured, an agent that was raised by the connect ends
+    /// a tunnel in about twenty milliseconds; this is a bound for a loaded
+    /// machine, not a retry budget. It is spent off the main thread.
+    private static let agentStopGraceSeconds: TimeInterval = 5
+    /// The same bound for a quit, which is synchronous and on the main thread.
+    /// One second is fifty times the measured cost, and it does not need to be
+    /// generous: the channel's end of input is the backstop, and the pipe closes
+    /// when this process goes.
+    private static let agentStopQuitGraceSeconds: TimeInterval = 1
 
     /// How this attempt asks for privilege. Decided *before* the launch, from
     /// what `/etc/pam.d` and a bounded `sudo -n -v` say — this is what stops a
@@ -386,6 +403,23 @@ class VPNManager: ObservableObject {
             ConnectionHistoryManager.shared.updateAttempt(attempt)
         }
         
+        // The agent, when this run raised one, is asked to end the tunnel before
+        // anything is signalled — and before the pipes below stop being read, or
+        // the answer it writes back would have had nowhere to arrive. It is the
+        // only party that can end the root-owned tunnel it raised without a
+        // dialog, and an agent that has been signalled cannot run the code that
+        // would: its child is in a process group of its own and outlives it. The
+        // wait is bounded and does not need to succeed; what it cannot do, the
+        // pid branch below still attempts.
+        if let channel = agentChannelInput {
+            agentStopBox.clear()
+            let stop = AgentStopOutcome.request(to: channel, agentRunning: process?.isRunning ?? false)
+            debugOutput += stop.explanation
+            if stop == .requested {
+                debugOutput += agentStopBox.wait(within: Self.agentStopQuitGraceSeconds).explanation
+            }
+        }
+
         // Synchronous cleanup to ensure no processes are left behind
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
@@ -517,11 +551,48 @@ class VPNManager: ObservableObject {
     /// tunnel started by this run.
     ///
     /// `ps`/`pgrep` get up to 3 s each; the UI must not wait on them.
+    ///
+    /// When this run raised an agent, the agent is asked first — it owns the
+    /// tunnel as root and needs no elevation to end it, which is the reason the
+    /// connect raises it at all. The wait is bounded and runs off the main thread.
+    /// What the agent *says* is only what happens next; whether a tunnel is gone
+    /// is still decided by the scan below, so a word on a pipe can never by
+    /// itself produce a "Disconnected".
     private func detectTunnelForTeardown() async -> ExistingConnectionDetection {
+        let stop = await askAgentToStop(
+            channel: agentChannelInput,
+            agentRunning: process?.isRunning ?? false,
+            within: Self.agentStopGraceSeconds
+        )
+        debugOutput += stop.explanation
+
         let pidFilePid = OpenConnectPidFile.recordedPid()
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(returning: ExistingConnectionScanner.detect(pidFilePid: pidFilePid))
+            }
+        }
+    }
+
+    /// Writes the one command into the agent's channel and waits, bounded, for
+    /// its answer. The write is five bytes; the wait is the part that is moved
+    /// off the main thread.
+    private func askAgentToStop(
+        channel: Pipe?,
+        agentRunning: Bool,
+        within seconds: TimeInterval
+    ) async -> AgentStopOutcome {
+        let box = agentStopBox
+        // The answer must be to *this* request: a report left behind by an earlier
+        // one would otherwise be read as this one's.
+        agentStopBox.clear()
+        // Nothing that crosses to the queue below but the box: the channel is
+        // written to here, on the caller's thread.
+        let sent = AgentStopOutcome.request(to: channel, agentRunning: agentRunning)
+        guard sent == .requested else { return sent }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: box.wait(within: seconds))
             }
         }
     }
@@ -593,6 +664,13 @@ class VPNManager: ObservableObject {
         // a surviving process again.
         if tunnelEnded {
             OpenConnectPidFile.discard()
+            // The channel is the other handle on a tunnel, and it is let go here
+            // for the same reason the record is: holding it open on a tunnel that
+            // is gone only keeps the agent on the far end of it.
+            if agentChannelInput != nil {
+                agentChannelInput = nil
+                debugOutput += "Released the tunnel agent's channel\n"
+            }
         }
         
         // STEP 3: Gracefully terminate the bash/sudo wrapper process
@@ -811,6 +889,11 @@ class VPNManager: ObservableObject {
         self.pipeClosed = false
         self.agentDecoder = TunnelAgentChannel.Decoder()
         self.agentDiagnosis = nil
+        // A new attempt owns its own channel: an answer recorded by a previous
+        // one says nothing about this one, and holding the previous pipe here
+        // kept its agent — and its tunnel — alive through a reconnect.
+        self.agentStopBox.clear()
+        self.agentChannelInput = nil
         
         // Handle output — now unbuffered since we run bash directly, not via osascript
         outPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -902,7 +985,13 @@ class VPNManager: ObservableObject {
         // The agent path is the one that must not let go of its input pipe.
         // `inputPipe` keeps its old meaning — nothing else in this file writes
         // to a running tunnel's stdin — and the agent's channel lives on its own.
-        if launch.keepsInputOpen { self.agentChannelInput = inPipe }
+        // The agent's channel is deliberately not published here even though
+        // `launch.keepsInputOpen` says this pipe is it: the pipe only becomes the
+        // channel once the credential block is on it, because the agent reads
+        // commands *after* the credentials — a `stop` written in the window
+        // between the launch and the credentials would be consumed as a
+        // credential line, and the tunnel would start with a replaced PIN. It is
+        // published with the write below.
         
         let gen = connectionGeneration
         proc.terminationHandler = { [weak self] p in
@@ -946,7 +1035,7 @@ class VPNManager: ObservableObject {
         
         do {
             try proc.run()
-            log.write("[INIT] bash process started with PID \(proc.processIdentifier)")
+            log.write("[INIT] \(launch.executable.lastPathComponent) process started with PID \(proc.processIdentifier)")
             log.flush()
             
             DispatchQueue.main.async {
@@ -967,6 +1056,14 @@ class VPNManager: ObservableObject {
             }
             if !launch.keepsInputOpen {
                 try? inPipe.fileHandleForWriting.close()
+            } else {
+                // Now it is a channel: the credentials are on it, so the next
+                // thing written down it can only be read as a command. The
+                // descriptor is marked first, so a far end that has already gone
+                // makes a later write an error instead of a `SIGPIPE` that would
+                // take the app down with the tunnel.
+                TunnelAgentChannel.Launch.ignoreBrokenPipe(on: inPipe.fileHandleForWriting.fileDescriptor)
+                self.agentChannelInput = inPipe
             }
             
             // Start polling for connection success via PID file.
@@ -1090,7 +1187,11 @@ class VPNManager: ObservableObject {
         log.write("Agent: \(TunnelAgent.installedPath) (root-owned, signed for this team)")
         log.write("Agent credential stdin: \(credentials.count) bytes, \(TunnelAgentChannel.Launch.credentialLineCount) lines")
         log.write("Agent search path: \(searchPath)")
-        log.logSend("Admin password (for sudo)", value: settings.adminPassword)
+        // The administrator password is not on this path's channel, and in
+        // `.systemPrompt` mode it is not sent anywhere at all — the system's own
+        // dialog answers. Logging it as sent in either case would be a claim
+        // about a credential this path does not carry.
+        Self.logAdminPassword(settings.adminPassword, strategy: strategy, log: log)
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
         log.flush()
@@ -1176,6 +1277,26 @@ class VPNManager: ObservableObject {
             return .storedPasswordRejected
         case .neverPrompt:
             return .timestampExpired
+        }
+    }
+
+    /// Records the administrator password only when the chosen strategy actually
+    /// sends it.
+    ///
+    /// `.systemPrompt` sends nothing down a pipe: the system's own dialog is what
+    /// answers, which is the whole reason that strategy exists. `.neverPrompt`
+    /// relies on a timestamp that is already warm. Only `.storedPassword` pipes
+    /// the password in. Logging it as sent in the other two cases would be a
+    /// claim about a credential that never left the app.
+    private static func logAdminPassword(
+        _ password: String,
+        strategy: ElevationStrategy,
+        log: VpnConnectionLogger
+    ) {
+        if strategy == .storedPassword {
+            log.logSend("Admin password (for sudo)", value: password)
+        } else {
+            log.write("Admin password: not sent (\(strategy) — no pipe to send it down)")
         }
     }
 
@@ -1278,13 +1399,20 @@ class VPNManager: ObservableObject {
                 }
             case .stopped(let pid), .killed(let pid):
                 log.logHandler("AGENT", action: "the tunnel (\(pid)) ended")
+                agentStopBox.record(.stopped)
             case .stubborn(let pid):
                 log.logHandler("AGENT", action: "the tunnel (\(pid)) would not stop")
+                agentStopBox.record(.stubborn)
                 DispatchQueue.main.async {
                     self.debugOutput += "The tunnel agent could not end PID \(pid)\n"
                 }
             case .peerGone, .finished:
                 log.logHandler("AGENT", action: "the channel ended")
+                // The end of the channel is the agent's other way of ending a
+                // tunnel, and it ends it for the same reason the verb does. What
+                // is *not* taken from it is the tunnel's fate: the shut-down
+                // path looks at the process table for that.
+                agentStopBox.record(.stopped)
             case .refused(let word):
                 log.logHandler("AGENT", action: "refused: \(word)")
                 let diagnosis = TunnelAgentChannel.diagnosis(forRefusal: word)
@@ -2154,5 +2282,111 @@ class VPNManager: ObservableObject {
     /// `ProcessStartTime`.
     private func processStartTime(pid: Int32) -> Date? {
         processStartTimeReader.startTime(pid: pid)
+    }
+}
+
+// MARK: - Asking the agent to end the tunnel
+
+/// What came of asking the tunnel agent to end the tunnel it raised.
+///
+/// Every case is something that was observed, not something that was intended:
+/// nothing here says the tunnel is gone. That judgement is made from the process
+/// table by the caller, which is what keeps a disconnect from reporting a tunnel
+/// stopped because a word arrived on a pipe.
+enum AgentStopOutcome: Equatable {
+    /// This run raised no agent: a tunnel started the old way is ended the old
+    /// way, and there is nothing to say about it.
+    case noAgent
+    /// An agent was raised, but it is no longer running. Its loop only returns
+    /// after it has ended the tunnel (or refused to start one), and the pipe
+    /// closed with it, so the tunnel it held is gone or was never there.
+    case agentGone
+    /// The request could not be written down the channel.
+    case writeFailed(String)
+    /// The request went down the channel; this is the state between writing it
+    /// and hearing back.
+    case requested
+    /// The agent reported the tunnel stopped — or that it ended the channel,
+    /// which ends the tunnel for the same reason.
+    case stopped
+    /// The agent tried to end the tunnel and could not. The tunnel is still up.
+    case stubborn
+    /// Nothing came back within the bound.
+    case unanswered(TimeInterval)
+
+    /// The one place the app writes the verb, so the builder is used rather than
+    /// a literal, and so "was a request sent?" is answered once.
+    static func request(to channel: Pipe?, agentRunning: Bool) -> AgentStopOutcome {
+        guard let channel else { return .noAgent }
+        guard agentRunning else { return .agentGone }
+        do {
+            try channel.fileHandleForWriting.write(contentsOf: TunnelAgentChannel.Launch.stopRequest())
+            return .requested
+        } catch {
+            return .writeFailed(error.localizedDescription)
+        }
+    }
+
+    /// What to put in the connection log. `.noAgent` and `.requested` are
+    /// silent: the first has nothing to report, and the second is not a result.
+    var explanation: String {
+        switch self {
+        case .noAgent, .requested:
+            return ""
+        case .agentGone:
+            return "The tunnel agent is not running — its channel ended with it\n"
+        case .writeFailed(let why):
+            return "Could not ask the tunnel agent to end the tunnel: \(why)\n"
+        case .stopped:
+            return "The tunnel agent ended the tunnel (no elevation needed)\n"
+        case .stubborn:
+            return "The tunnel agent could not end the tunnel — ending it from here\n"
+        case .unanswered(let seconds):
+            return "The tunnel agent did not answer in \(Int(seconds))s\n"
+        }
+    }
+}
+
+/// The agent's answer to a stop request: one lock, one optional.
+///
+/// The answer is written on the channel's readability handler and waited for by
+/// the shut-down path, so it needs a lock; it is a box rather than a property on
+/// the manager so the waiting half can run on a queue without the manager being
+/// captured across threads.
+final class AgentStopBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answer: AgentStopOutcome?
+
+    func record(_ outcome: AgentStopOutcome) {
+        lock.lock()
+        answer = outcome
+        lock.unlock()
+    }
+
+    func recorded() -> AgentStopOutcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return answer
+    }
+
+    func clear() {
+        lock.lock()
+        answer = nil
+        lock.unlock()
+    }
+
+    /// Waits, bounded, for the agent's answer.
+    ///
+    /// Polls rather than waiting on a semaphore: the answer arrives on a pipe's
+    /// readability handler, and twenty milliseconds of latency on a disconnect
+    /// nobody can perceive is worth not adding another synchronisation primitive
+    /// to this path. The bound is the caller's, and it is always finite.
+    func wait(within seconds: TimeInterval) -> AgentStopOutcome {
+        let deadline = Date().addingTimeInterval(seconds)
+        while true {
+            if let answer = recorded() { return answer }
+            if Date() >= deadline { return .unanswered(seconds) }
+            usleep(20_000)
+        }
     }
 }

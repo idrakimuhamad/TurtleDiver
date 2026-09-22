@@ -126,6 +126,51 @@ final class TunnelAgentProcessTests: XCTestCase {
         _ = agent.awaitExit(within: 15)
     }
 
+    /// The app's own argument builder has to produce an argument list this agent
+    /// accepts.
+    ///
+    /// Every other test in this file spells the agent's arguments by hand, and
+    /// that is exactly how a live connect came to fail: the app put the agent's
+    /// flags where `sudo` reads its *own* options, `sudo` answered
+    /// `unrecognized option '--credential-lines'`, and no test had ever fed what
+    /// the app builds to the real binary. This one does: it builds the arguments
+    /// with `TunnelAgentChannel.Launch.agentArguments` and starts the agent with
+    /// them. It is the smallest check that would have caught that failure.
+    func testTheArgumentsTheAppBuildsAreArgumentsTheAgentAccepts() throws {
+        let standIn = try makeStandIn(in: scratch)
+        let built = TunnelAgentChannel.Launch.agentArguments(
+            agentPath: agentURL.path,
+            openconnectPath: standIn.path,
+            tunnelArguments: ["180"],
+            searchPath: TunnelAgentChannel.Launch.searchPath(inherited: nil)
+        )
+        // The first element is the agent's own argv[0], and `Process` supplies
+        // argv[0] from the executable URL — the same way the app's own launch
+        // gives `sudo` its `-n` as argv[1].
+        let agent = try AgentDriver(agent: agentURL, arguments: Array(built.dropFirst()))
+        // The same two lines the app's credential block carries, because the
+        // agent reads them before it starts anything: a block that ends early
+        // starts nothing, and a test that sent one line would be measuring that
+        // instead of the arguments.
+        agent.send("PIN-placeholder")
+        agent.send("account-password-placeholder")
+
+        startedChild = agent.supervisedPid(within: 5)
+        if startedChild == nil {
+            // The agent's own words are the diagnosis: a refusal says what it
+            // refused, and silence says the arguments were never the problem.
+            XCTFail("the agent did not start from \(built) — stdout: \(agent.output) stderr: \(agent.errors)")
+            agent.closeInput()
+            _ = agent.awaitExit(within: 15)
+            return
+        }
+        XCTAssertFalse(agent.output.contains("refused"),
+                       "the agent refused what the app builds: \(agent.output)")
+
+        agent.closeInput()
+        _ = agent.awaitExit(within: 15)
+    }
+
     func testTheAgentStartsTheTunnelAndSaysSo() throws {
         let standIn = try makeStandIn(in: scratch)
         let agent = try AgentDriver(agent: agentURL, arguments: ["--credential-lines", "2", standIn.path, "180"])

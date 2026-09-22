@@ -134,6 +134,29 @@ final class TunnelAgentProtocolTests: XCTestCase {
         XCTAssertEqual(session.phase, .finished)
     }
 
+    /// The verb is not a verb until the credential block is complete.
+    ///
+    /// This is a fact about the *channel*, not a curiosity: the app keeps its
+    /// writing end open for the life of the tunnel and writes the verb when the
+    /// user disconnects, and it publishes that end only once the credentials are
+    /// on it. The window is small but it is real — a disconnect pressed while a
+    /// connect is still launching — and what it would cost is the PIN: `stop`
+    /// would be handed to openconnect as a credential and the tunnel would start
+    /// with a replaced secret, or with one line fewer than it needs.
+    func testTheVerbArrivingInsideTheCredentialBlockIsJustAnotherLine() throws {
+        var session = try TunnelAgentSession(credentialLines: 2)
+        XCTAssertEqual(session.receive(line: TunnelAgent.stopVerb), .credential)
+        XCTAssertEqual(session.credentials, [TunnelAgent.stopVerb])
+        XCTAssertEqual(session.phase, .credentials(remaining: 1))
+
+        // And it is a credential line even as the last line of the block: the
+        // block is what starts the tunnel, so there is no room for a command
+        // before it.
+        XCTAssertEqual(session.receive(line: "VPN-pw-placeholder"), .start)
+        XCTAssertEqual(session.credentials, [TunnelAgent.stopVerb, "VPN-pw-placeholder"])
+        XCTAssertEqual(session.receive(line: TunnelAgent.stopVerb), .end(.stop))
+    }
+
     func testAnOverLongLineCannotBeTruncatedIntoTheVerb() throws {
         // A reader that kept the first N bytes of an over-long line could turn a
         // 5000-byte line into `stop` if the verb happened to be at the front.

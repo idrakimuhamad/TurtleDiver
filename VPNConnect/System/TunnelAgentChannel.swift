@@ -245,7 +245,14 @@ public enum TunnelAgentChannel {
         /// connect stops carrying a credential it has no use for.
         public static let credentialLineCount = 2
 
-        /// The agent's own arguments, followed by the tunnel's command line.
+        /// The agent, its own arguments, and then the tunnel's command line.
+        ///
+        /// The agent's path comes FIRST, before any of its flags, because this
+        /// array is handed to `sudo` as its command line: `sudo` parses
+        /// everything up to the command word as its own options, so an agent
+        /// argument in that position is read as a `sudo` option and the whole
+        /// launch dies with `sudo: unrecognized option '--credential-lines'`.
+        /// That is what a live connect did before the path was put in front.
         ///
         /// The tunnel's arguments are passed through unchanged, including the
         /// `--pid-file` the agent path does not need: openconnect only writes
@@ -260,6 +267,7 @@ public enum TunnelAgentChannel {
             credentialLines: Int = credentialLineCount
         ) -> [String] {
             [
+                agentPath,
                 "--credential-lines", String(credentialLines),
                 "--path", searchPath,
                 openconnectPath
@@ -275,9 +283,38 @@ public enum TunnelAgentChannel {
             Data((pin + "\n" + vpnPassword + "\n").utf8)
         }
 
+        /// The one command the app ever writes after the credentials: the verb
+        /// that ends the tunnel.
+        ///
+        /// Built here rather than spelled at the call site so the app and the
+        /// agent's session agree on it by construction: the agent matches the
+        /// line by exact equality, so a stray space or a `\r` would be a refusal,
+        /// and a refusal leaves the tunnel running. A test pins the bytes.
+        public static func stopRequest() -> Data {
+            Data((TunnelAgent.stopVerb + "\n").utf8)
+        }
+
+        /// Marks one descriptor so that writing to a pipe whose far end has gone
+        /// is an error the caller sees rather than a signal that kills the app.
+        ///
+        /// The channel is written to on a live tunnel's behalf, so its far end
+        /// can be gone: the agent can exit between the check that it is running
+        /// and the write. `EPIPE` is then a thrown error and a `.writeFailed` the
+        /// log can explain; without this, it is `SIGPIPE` and the app dies with no
+        /// message. It is a *descriptor* flag, not a process-wide one — the same
+        /// thing `SO_NOSIGPIPE` does for the engine's sockets — so nothing else
+        /// in the app changes behaviour. Returns whether the kernel accepted it.
+        @discardableResult
+        public static func ignoreBrokenPipe(on descriptor: Int32) -> Bool {
+            fcntl(descriptor, F_SETNOSIGPIPE, 1) == 0
+        }
+
         /// `sudo -n` around the agent: the timestamp was warmed a moment ago, and
         /// `-n` means a cold one fails fast with an error instead of raising a
-        /// dialog the user did not ask for.
+        /// dialog the user did not ask for. The agent's path must be the first
+        /// element after those options — `sudo` reads what follows as its own
+        /// flags until it meets a command word, so anything else here is refused
+        /// by `sudo` before the agent ever runs.
         public static func sudoArguments(agentArguments: [String]) -> [String] {
             ["-n"] + agentArguments
         }

@@ -87,17 +87,13 @@ final class TunnelAgentWiringTests: XCTestCase {
     /// to write two lines.
     func testOnlyTheWrapperLetsGoOfItsInput() throws {
         let connect = try connectBody()
-        XCTAssertTrue(
-            connect.contains("if launch.keepsInputOpen { self.agentChannelInput = inPipe }"),
+        let publication = try XCTUnwrap(
+            connect.range(of: "self.agentChannelInput = inPipe"),
             "the agent's pipe must be held: a deallocated Pipe closes both of its descriptors"
-        )
-        XCTAssertTrue(
-            connect.contains("if !launch.keepsInputOpen {"),
-            "the close must be conditional on the shape"
         )
         let closeIsGuarded = try XCTUnwrap(
             connect.range(of: "if !launch.keepsInputOpen {"),
-            "the guard is gone"
+            "the close must be conditional on the shape"
         )
         let close = try XCTUnwrap(
             connect.range(of: "inPipe.fileHandleForWriting.close()"),
@@ -105,6 +101,11 @@ final class TunnelAgentWiringTests: XCTestCase {
         )
         XCTAssertLessThan(closeIsGuarded.lowerBound, close.lowerBound,
                           "the close must be inside the guard, not before it")
+        // The publication is in the *other* arm, and after the credentials are on
+        // the pipe: the agent reads commands after the credential block, so a
+        // `stop` written before it would be consumed as a credential line.
+        XCTAssertGreaterThan(publication.lowerBound, close.lowerBound,
+                             "the channel is published before the credentials are on it")
     }
 
     // MARK: - Noticing that the tunnel came up
@@ -274,6 +275,158 @@ final class TunnelAgentWiringTests: XCTestCase {
     /// same indentation inside a `struct`, which is not one of the anchors, so a
     /// body slice would run on into them and an assertion about "the connect does
     /// not do X" would be answered by code that is not the connect.
+    // MARK: - Ending the tunnel through the agent
+
+    /// A disconnect asks the agent before it looks at the process table.
+    ///
+    /// The order is the whole point of the agent: it owns the tunnel as root, so
+    /// asking it is what makes a disconnect need no elevation at all. But the
+    /// scan still runs after it, and it is still what decides — a word on a pipe
+    /// can never by itself produce a "Disconnected".
+    func testTheTeardownAsksTheAgentBeforeItLooksAtTheProcessTable() throws {
+        let detect = try body(of: "private func detectTunnelForTeardown() async -> ExistingConnectionDetection {")
+        let asked = try XCTUnwrap(detect.range(of: "await askAgentToStop("), "the agent was never asked")
+        let scanned = try XCTUnwrap(detect.range(of: "ExistingConnectionScanner.detect("),
+                                    "the process table stopped being consulted")
+        XCTAssertLessThan(asked.lowerBound, scanned.lowerBound,
+                          "the tunnel was resolved before the agent was asked to end it")
+        XCTAssertTrue(detect.contains("debugOutput += stop.explanation"),
+                      "what the agent said never reaches the log")
+    }
+
+    /// The wait that follows a disconnect runs off the main thread.
+    ///
+    /// The spike measured the answer at about twenty milliseconds, but a wait is
+    /// a wait: a disconnect that held the window for five seconds on a loaded
+    /// machine would be the responsiveness bug this path was rebuilt to avoid.
+    func testTheDisconnectsWaitDoesNotRunOnTheMainThread() throws {
+        let ask = try body(of: "private func askAgentToStop(")
+        XCTAssertTrue(ask.contains("DispatchQueue.global(qos: .userInitiated).async"),
+                      "the bounded wait runs on the main thread")
+        XCTAssertTrue(ask.contains("continuation.resume(returning: box.wait(within: seconds))"),
+                      "the wait is somewhere else than where the bound says")
+    }
+
+    /// A quit asks the agent *before* it signals the agent, and before it stops
+    /// reading the channel.
+    ///
+    /// Both orderings are load-bearing. A signalled agent cannot run the code
+    /// that would end its tunnel — its child leads a process group of its own and
+    /// outlives it — and an answer written back to a pipe nobody is reading would
+    /// never be seen, which is the difference between a quit that reports what
+    /// happened and one that reports a timeout.
+    func testTheQuitAsksTheAgentBeforeAnythingElseHappens() throws {
+        let cleanup = try body(of: "func cleanupOnTermination() {")
+        let asked = try XCTUnwrap(cleanup.range(of: "AgentStopOutcome.request(to: channel"),
+                                   "the quit never asks the agent")
+        let signalled = try XCTUnwrap(cleanup.range(of: "proc.terminate()"))
+        let stoppedReading = try XCTUnwrap(cleanup.range(of: "readabilityHandler = nil"))
+        XCTAssertLessThan(asked.lowerBound, signalled.lowerBound,
+                          "the agent was signalled before it was asked to end its tunnel")
+        XCTAssertLessThan(asked.lowerBound, stoppedReading.lowerBound,
+                          "the answer had nowhere left to arrive")
+        XCTAssertTrue(cleanup.contains("agentStopBox.wait(within: Self.agentStopQuitGraceSeconds)"),
+                      "the quit's wait is not the bounded one")
+    }
+
+    /// The verb is built in one place, and the box is the only thing that waits.
+    func testTheVerbHasOneBuilderAndEveryWaitIsBounded() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        XCTAssertEqual(code.components(separatedBy: "TunnelAgentChannel.Launch.stopRequest()").count - 1, 1,
+                       "the verb is spelled at more than one call site")
+        XCTAssertFalse(code.contains("\"stop\\n\""), "the verb is a literal again")
+        XCTAssertEqual(code.components(separatedBy: "func wait(within seconds: TimeInterval)").count - 1, 1,
+                       "there is more than one wait to keep bounded")
+        XCTAssertTrue(code.contains("if Date() >= deadline { return .unanswered(seconds) }"),
+                      "the wait has no deadline, or one that does not report itself")
+    }
+
+    /// What the agent says is recorded from its own words, on both the paths that
+    /// mean the tunnel ended.
+    func testTheAnswerComesFromTheAgentsOwnWords() throws {
+        let handler = try body(of: "private func handleAgentChannel(data: Data, log: VpnConnectionLogger) {")
+        XCTAssertTrue(handler.contains("case .stopped(let pid), .killed(let pid):"))
+        XCTAssertTrue(handler.contains("case .stubborn(let pid):"))
+        XCTAssertTrue(handler.contains("case .peerGone, .finished:"))
+        XCTAssertEqual(handler.components(separatedBy: "agentStopBox.record(.stopped)").count - 1, 2,
+                       "the verb's answer and the channel's end must both release the wait")
+        XCTAssertTrue(handler.contains("agentStopBox.record(.stubborn)"),
+                      "a tunnel that would not stop must not be recorded as stopped")
+    }
+
+    /// The pipe becomes the channel only once the credentials are on it, and only
+    /// once a broken pipe can no longer kill the app.
+    ///
+    /// The agent reads commands *after* the credential block, so a `stop` written
+    /// in the window between the launch and the credentials would be consumed as
+    /// a credential line — the tunnel would start with a replaced PIN. The
+    /// descriptor is marked first so that a write to a channel whose far end has
+    /// already gone is an error and not a fatal signal.
+    func testTheChannelIsPublishedOnlyAfterTheCredentialsAreOnIt() throws {
+        let connect = try connectBody()
+        let written = try XCTUnwrap(connect.range(of: "write(contentsOf: launch.input)"))
+        let marked = try XCTUnwrap(connect.range(of: "ignoreBrokenPipe(on: inPipe"))
+        let published = try XCTUnwrap(connect.range(of: "self.agentChannelInput = inPipe"))
+        XCTAssertLessThan(written.lowerBound, marked.lowerBound, "the channel was marked before it was fed")
+        XCTAssertLessThan(marked.lowerBound, published.lowerBound,
+                          "the channel was published before it was safe to write to")
+    }
+
+    /// One attempt's channel is not the next attempt's, and a channel is let go
+    /// when the tunnel it was the handle on is gone.
+    func testAChannelBelongsToOneAttemptAndIsReleasedWithItsTunnel() throws {
+        let connect = try connectBody()
+        XCTAssertTrue(connect.contains("self.agentStopBox.clear()"),
+                      "a new attempt would read the previous one's answer")
+        XCTAssertTrue(connect.contains("self.agentChannelInput = nil"),
+                      "a new attempt would hold the previous tunnel's channel open")
+        XCTAssertTrue(try strippedCode(at: "VPNConnect/VPNManager.swift")
+            .contains("Released the tunnel agent's channel"),
+                      "a channel outlives the tunnel it was the handle on")
+    }
+
+    /// The two bounds, which are the difference between a disconnect that asks
+    /// the agent and one that waits on it.
+    ///
+    /// A finite bound is not enough: the spike measured the answer at about
+    /// twenty milliseconds, so five seconds is already fifty times the cost and
+    /// one second is the same statement made for a quit that runs on the main
+    /// thread. A bound in the minutes would satisfy "it always ends" while being
+    /// exactly the hang this path exists to avoid.
+    func testTheWaitsAreBoundedBySecondsNotByHope() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        XCTAssertTrue(code.contains("private static let agentStopGraceSeconds: TimeInterval = 5"),
+                      "the disconnect's bound changed")
+        XCTAssertTrue(code.contains("private static let agentStopQuitGraceSeconds: TimeInterval = 1"),
+                      "the quit's bound changed")
+    }
+
+    /// A log line is a claim about what happened, and this one used to name a
+    /// process that was not the one started: the agent path runs `/usr/bin/sudo`
+    /// directly, and the log said "bash". A live connect is diagnosed from this
+    /// file, so a line that misnames the child sends the reader the wrong way —
+    /// it did exactly that while the `--credential-lines` refusal was being
+    /// tracked down.
+    func testTheLaunchLogNamesTheProcessItActuallyStarted() throws {
+        let body = try connectBody()
+        XCTAssertTrue(body.contains("[INIT] \\(launch.executable.lastPathComponent) process started"),
+                      "the launch log no longer names the executable it started")
+        XCTAssertFalse(body.contains("bash process started"),
+                       "the launch log claims a bash process on every shape")
+    }
+
+    /// The administrator password is not on the agent's channel, and in
+    /// `.systemPrompt` mode it is not sent anywhere at all — the system's dialog
+    /// answers. Logging it as sent either way is a claim about a credential that
+    /// never moved.
+    func testTheAdministratorPasswordIsLoggedOnlyWhenItIsSent() throws {
+        let prepare = try body(of: "private func prepareAgentLaunch(")
+        XCTAssertTrue(prepare.contains("logAdminPassword("),
+                      "the agent path logs the administrator password without asking whether it is sent")
+        XCTAssertFalse(prepare.contains("logSend(\"Admin password"),
+                       "the agent path logs the administrator password as sent")
+    }
+
     private func connectBody() throws -> Substring {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
         return try XCTUnwrap(

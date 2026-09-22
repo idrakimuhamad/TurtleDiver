@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import TurtleDiverCore
 @testable import TurtleDiverSystem
 
@@ -204,18 +205,40 @@ final class TunnelAgentChannelTests: XCTestCase {
             searchPath: "/opt/homebrew/bin:/usr/bin"
         )
         XCTAssertEqual(arguments, [
+            "/usr/local/libexec/turtlediver-agent",
             "--credential-lines", "2",
             "--path", "/opt/homebrew/bin:/usr/bin",
             "/opt/homebrew/bin/openconnect"
         ] + tunnel)
+        // This array is `sudo`'s command line, and `sudo` reads everything before
+        // the command word as its own options. A live connect died with
+        // `sudo: unrecognized option '--credential-lines'` because the path was
+        // not in front of the agent's flags. The whole point of this assertion is
+        // the first element; the rest only has to stay in this order.
+        XCTAssertEqual(arguments.first, "/usr/local/libexec/turtlediver-agent",
+                       "sudo would read the agent's own flags as its own options")
+        XCTAssertEqual(TunnelAgentChannel.Launch.agentArguments(
+            openconnectPath: "/opt/homebrew/bin/openconnect",
+            tunnelArguments: [],
+            searchPath: "/usr/bin"
+        ).first, TunnelAgent.installedPath,
+                       "an argument built with no path at all does not start the installed agent")
     }
 
     /// The agent is started with `-n` and never with `-S`: it authenticates
     /// nothing. A `-S` here would read the tunnel's PIN as its own password.
     func testTheAgentIsLaunchedWithoutAPasswordOnItsStandardInput() {
-        let arguments = TunnelAgentChannel.Launch.sudoArguments(agentArguments: ["--credential-lines", "2"])
-        XCTAssertEqual(arguments, ["-n", "--credential-lines", "2"])
+        let agentArguments = TunnelAgentChannel.Launch.agentArguments(
+            agentPath: "/usr/local/libexec/turtlediver-agent",
+            openconnectPath: "/opt/homebrew/bin/openconnect",
+            tunnelArguments: [],
+            searchPath: "/usr/bin"
+        )
+        let arguments = TunnelAgentChannel.Launch.sudoArguments(agentArguments: agentArguments)
+        XCTAssertEqual(arguments, ["-n", "/usr/local/libexec/turtlediver-agent", "--credential-lines", "2",
+                                   "--path", "/usr/bin", "/opt/homebrew/bin/openconnect"])
         XCTAssertFalse(arguments.contains("-S"))
+        XCTAssertFalse(arguments.contains("-"), "no `-` — that would read a password from a terminal")
     }
 
     /// The channel carries exactly two lines, and the second is the account
@@ -227,6 +250,59 @@ final class TunnelAgentChannelTests: XCTestCase {
         XCTAssertEqual(TunnelAgentChannel.Launch.credentialLineCount, 2)
         // The agent must accept what the app sends: the protocol's own range.
         XCTAssertNoThrow(try TunnelAgentSession(credentialLines: TunnelAgentChannel.Launch.credentialLineCount))
+    }
+
+    /// The one command the app writes after the credentials. The agent matches
+    /// the line by exact equality, so the bytes are pinned: a trailing space, a
+    /// carriage return, or a capital would all be refused, and a refusal leaves
+    /// the tunnel running exactly when the user asked for it to stop.
+    func testTheStopRequestIsExactlyTheVerbAndANewline() throws {
+        XCTAssertEqual(TunnelAgentChannel.Launch.stopRequest(), Data("stop\n".utf8))
+        XCTAssertEqual(TunnelAgentChannel.Launch.stopRequest(), Data((TunnelAgent.stopVerb + "\n").utf8))
+        var verb = String(decoding: TunnelAgentChannel.Launch.stopRequest(), as: UTF8.self)
+        // And the session agrees: this is the line, and only this line, that ends
+        // a tunnel once the credential block is complete.
+        XCTAssertEqual(verb, "stop\n")
+        verb.removeLast()
+        var session = try TunnelAgentSession(credentialLines: 1)
+        XCTAssertEqual(session.receive(line: "pw"), .start)
+        XCTAssertEqual(session.receive(line: verb), .end(.stop))
+    }
+
+    /// A broken pipe must be a thrown error, not a fatal signal.
+    ///
+    /// The channel is written to on a live tunnel's behalf, so its far end can be
+    /// gone — the agent can exit between the check that it is running and the
+    /// write. `SIGPIPE` there would take the app down with no message at all,
+    /// which is the one failure mode this path must not have.
+    ///
+    /// The flag is checked by its *effect*, and in a child process: the property
+    /// is that a write to a descriptor whose far end has gone does not kill the
+    /// writer, and a test that is itself the process at risk is not a test. The
+    /// child's standard error *is* that descriptor, and all it does is write five
+    /// bytes to it. Its first act is to put the default disposition back, because
+    /// "the flag works" must not be a fact about what the runner happened to
+    /// inherit.
+    func testTheChannelIsMarkedSoABrokenPipeCannotKillTheApp() throws {
+        let pipe = Pipe()
+        let writer = pipe.fileHandleForWriting.fileDescriptor
+        XCTAssertTrue(
+            TunnelAgentChannel.Launch.ignoreBrokenPipe(on: writer),
+            "the kernel refused the flag for a plain pipe, so a write to a dead agent would be fatal"
+        )
+        // No reader at all from here on: the state the write has to survive.
+        try pipe.fileHandleForReading.close()
+
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sh")
+        child.arguments = ["-c", "trap - PIPE; printf stop >&2"]
+        child.standardError = pipe.fileHandleForWriting
+        try child.run()
+        child.waitUntilExit()
+
+        XCTAssertNotEqual(child.terminationReason, .uncaughtSignal,
+                          "the write to the marked descriptor still raised SIGPIPE")
+        try? pipe.fileHandleForWriting.close()
     }
 
     func testTheSearchPathPutsTheKnownDirectoriesInFront() {
