@@ -49,13 +49,14 @@ or decided before the work is worth starting.
 | 11 | A Surge-profile compatibility report | S | — |
 | 12 | DNS beyond the system resolver | L | Deciding whether we want to be a resolver at all |
 | 13 | Automation: CLI, HTTP API, URL schemes | M | Somewhere for state to live that is not a window |
-| 14 | A CLI a program can drive, not just a person | M | The state question in idea 13 |
+| 14 | A CLI a program can drive, not just a person — **picked up**, `docs/CLI.md` | M | The state question in idea 13 |
 | 15 | Outbound protocol breadth | L | Somebody who actually needs one of them |
 | 16 | Enhanced Mode: capture at the packet layer | XL | A privileged helper, signing, and a decision about what this app is |
 | 17 | An agent the updater cannot replace | M | A version story for the helper |
 | 18 | Liveness without shelling out to `ps` | S | A protocol version, so an old agent can be refused by name |
 | 19 | A root `sudo` that waits through part of every connect | S | An hour with the process table |
 | 20 | Notarization | S | An Apple Developer Program enrolment |
+| 21 | Route another device's network through the engine | M | Revising the "serves this machine only" anti-goal, and an auth story for a non-loopback listener |
 
 ## Small and contained
 
@@ -279,6 +280,17 @@ repository, so it should never default to writing a file.
 Depends on: idea 13 for where state lives, and idea 18 for anything that drives
 the helper.
 
+**Picked up.** Shipped as the `turtlediver` command: `docs/CLI.md` is the
+contract, `CLI/` is the code and `Tests/TurtleDiverCLITests` is what pins it.
+Both traps were answered rather than avoided — the orphan by the agent's own
+rule that a closed standard input ends the tunnel (so `connect` is foreground
+and blocking), and elevation by `sudo`'s own prompt plus exit code 6 when there
+is no terminal. The state question in idea 13 turned out to need no channel to
+the app at all: a pid file and the agent's line protocol were already enough, so
+the CLI works with the app closed. What has **not** been picked up from this
+card: `profile use`, `policy set` and `requests --json` are absent, because they
+are writes and the CLI is deliberately read-only apart from the tunnel.
+
 ### 15. Outbound protocol breadth
 
 We speak HTTP and SOCKS5 upstream. `https` is accepted as a proxy type by the
@@ -307,6 +319,57 @@ has been proposed before and never decided, which is not a state worth staying
 in: worth its own written decision either way, because a great deal of "why not
 parity" resolves to this one card.
 
+### 21. Route another device's network through the engine
+
+A phone, tablet or second laptop points at this machine and its traffic leaves
+through the tunnel the Mac already holds. The use case that made me write it
+down: a phone uses the VPN the Mac is connected to, without a profile, a
+certificate or a password ever being installed on the phone. The phone does not
+know a VPN exists; it just reaches the internet through a host that does.
+
+**The cheap half is genuinely cheap, and for the same reason idea 14 is.** The
+engine already is what the phone needs: an HTTP listener on `127.0.0.1:6152` and
+a SOCKS5 listener on `127.0.0.1:6153` with the whole rule engine behind them. Bind
+the same listeners on one LAN address, print that address and the port in the
+window, and a device on the same network can set a manual proxy and be routed.
+No new protocol, no packet layer, no DHCP. iOS honours a Wi-Fi HTTP proxy for
+anything using `NSURLSession`; Android does the same per network.
+
+**What that costs, in the order it bites:**
+
+- **Auth.** A loopback listener trusts every caller because only this machine can
+  reach it. A LAN listener has to not. SOCKS5 already has a username/password
+  method in the grammar and the listener is hand-written, but the HTTP listener
+  has no proxy-auth path at all, and credentials need somewhere to live that is
+  not the profile file.
+- **It serves traffic, not just routes it.** The request detail the app keeps
+  (host, SNI, ALPN, sizes) suddenly describes a second device's browsing. That is
+  the data `RepoPrivacyGuardTests` exists to keep out of the tree, and it is now
+  the host's job to decide who can read it in the window.
+- **Local Network permission.** macOS asks before an app binds or is reachable on
+  the LAN; a first-run prompt at connect time is a worse place for it than Setup.
+- **Partial coverage, and it will be read as full.** A manual proxy routes what
+  honours the proxy. Games and some apps do not, and nothing in the UI today can
+  say "this device is only partly routed" without inventing per-client state.
+
+**The expensive half is the honest version of the same thing.** Full routing for
+one device means the Mac forwarding packets for it — IP forwarding, NAT, and the
+same elevated helper territory as idea 16 — or a tunnel the device joins (a
+WireGuard/"connect to my Mac" endpoint), which is a different product with a key
+management story. Both are the packet layer again. Worth refusing early: an
+iOS/Android app for this, since the entire point is that nothing gets installed
+on the phone.
+
+**It collides with a written anti-goal, and that is the real first step.**
+"Gateway mode, DHCP, Surge Ponte, built-in servers ... This app serves the machine
+it runs on" is in *Out of reach* below. This card is a deliberate proposal to
+narrow that line — one device, a proxy, an explicit switch — rather than to move
+it, but the anti-goal has to be amended in the same commit or the next person
+will correctly read this idea as closed.
+
+Depends on: a decision about the anti-goal, then the auth and Local Network
+questions. The binding itself is small.
+
 ## Out of reach, and why
 
 Not ideas — anti-goals, recorded so nobody re-proposes them expecting a surprise.
@@ -321,7 +384,9 @@ Not ideas — anti-goals, recorded so nobody re-proposes them expecting a surpri
   without JavaScriptCore on purpose — and a script engine is also a permanent
   security surface in a process holding credentials.
 - **Gateway mode, DHCP, Surge Ponte, built-in servers.** These serve other
-  devices on the network. This app serves the machine it runs on.
+  devices on the network. This app serves the machine it runs on. (Idea 21 asks
+  to narrow this to "one device, over a proxy we already run" — the difference is
+  deliberate and not yet decided.)
 - **`DEVICE-NAME`, `MAC-ADDRESS`, `CELLULAR-RADIO`, `CELLULAR-CARRIER` rules.**
   The first two describe a client that is not this machine (gateway mode); the
   last two do not exist on macOS.
@@ -401,7 +466,15 @@ nothing stops the next person from publishing one by accident.
 
 ## Picked up
 
-- (nothing yet)
+- **14. A CLI a program can drive, not just a person** — the `turtlediver`
+  command, installed by the installer package alongside the app.
+  `docs/CLI.md` is the contract; `CLI/Kit` is the logic and
+  `Tests/TurtleDiverCLITests` is what pins it. Delivered: `status`, `rules
+  explain`, `profile list`/`validate`, `version`, and a foreground `connect` /
+  idempotent `disconnect`. Not delivered, and deliberately: the write commands
+  (`profile use`, `policy set`) and `requests --json` (a list of the user's
+  hosts). The reasoning that changed between the card and the commit is in the
+  card, above.
 
 ## Dropped
 

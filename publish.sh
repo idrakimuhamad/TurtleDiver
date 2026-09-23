@@ -35,6 +35,12 @@ PACKAGING_DIR="$ROOT/packaging"
 AGENT_PRODUCT="TurtleDiverAgent"
 AGENT_INSTALL_DIR="usr/local/libexec"
 AGENT_INSTALL_NAME="turtlediver-agent"
+# The command line tool, installed alongside the app and the agent so a person
+# or an agent can drive the same engine from a shell. These must agree with
+# `CLIInfo.name`, `CLIInfo.executableName` and the path `docs/CLI.md` documents.
+CLI_PRODUCT="turtlediver"
+CLI_INSTALL_DIR="usr/local/bin"
+CLI_INSTALL_NAME="turtlediver"
 
 MAKE_DMG=1
 MAKE_PKG=1
@@ -417,6 +423,34 @@ make_pkg() {
     ditto "$agent_bin" "$pkgroot/$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME" || die "could not stage the agent"
     chmod 0755 "$pkgroot/$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME"
     ok "the agent installs to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME, team $agent_team"
+
+    step "Building the command line tool"
+    (cd "$ROOT" && swift build -c release --product "$CLI_PRODUCT") >/dev/null \
+        || die "swift build failed for $CLI_PRODUCT"
+    cli_bin="$ROOT/.build/release/$CLI_PRODUCT"
+    [ -x "$cli_bin" ] || die "$cli_bin was not produced"
+    # Signed with the same identity as the app and the agent, and with the
+    # hardened runtime, so the notarized package covers it and Gatekeeper has
+    # nothing to say the first time somebody runs it. The identifier is the
+    # installed name — the same convention the agent uses — so a signature that
+    # names the build product instead cannot slip through.
+    cli_sign=(--force --options runtime)
+    [ "$LOCAL_MODE" = 0 ] && cli_sign+=(--timestamp)
+    cli_sign+=(--sign "$SIGN_ID" --identifier "$CLI_INSTALL_NAME")
+    codesign "${cli_sign[@]}" "$cli_bin" || die "could not sign the command line tool"
+    codesign --verify --strict "$cli_bin" >/dev/null 2>&1 \
+        || die "the command line tool does not verify after signing"
+    cli_team="$(codesign -dv --verbose=2 "$cli_bin" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [ "$cli_team" = "$TEAM_ID" ] \
+        || die "the command line tool's team is '${cli_team:-none}', expected $TEAM_ID"
+    cli_id="$(codesign -dv --verbose=2 "$cli_bin" 2>&1 | sed -n 's/^Identifier=//p')"
+    [ "$cli_id" = "$CLI_INSTALL_NAME" ] \
+        || die "the command line tool is signed as '${cli_id:-nothing}', not $CLI_INSTALL_NAME"
+    mkdir -p "$pkgroot/$CLI_INSTALL_DIR" || die "could not create the CLI's install directory"
+    ditto "$cli_bin" "$pkgroot/$CLI_INSTALL_DIR/$CLI_INSTALL_NAME" \
+        || die "could not stage the command line tool"
+    chmod 0755 "$pkgroot/$CLI_INSTALL_DIR/$CLI_INSTALL_NAME"
+    ok "the command line tool installs to /$CLI_INSTALL_DIR/$CLI_INSTALL_NAME, team $cli_team"
     sed "s/@VERSION@/$VERSION/g" "$PACKAGING_DIR/README_INSTALL.txt" > "$resources/README_INSTALL.txt"
 
     rm -f "$component"
@@ -543,6 +577,35 @@ verify_pkg() {
         fi
     else
         bad "the package would not install the agent to /$AGENT_INSTALL_DIR/$AGENT_INSTALL_NAME"
+        rc=1
+    fi
+
+    # The command line tool is part of what "installed" means: a package that
+    # shipped the app without it would leave every documented shell instruction
+    # failing with "command not found". Its absence is a failure, not a warning,
+    # for the same reason the agent's is.
+    cli_installed="$(find "$expand" -maxdepth 7 -type f -name "$CLI_INSTALL_NAME" 2>/dev/null | head -1)"
+    cli_dir="$(find "$expand" -maxdepth 6 -type d -name "$(basename "$CLI_INSTALL_DIR")" 2>/dev/null | head -1)"
+    if [ -n "$cli_installed" ] && [ "$(dirname "$cli_installed")" = "$cli_dir" ]; then
+        if codesign --verify --strict "$cli_installed" >/dev/null 2>&1; then
+            cli_id="$(codesign -dv --verbose=2 "$cli_installed" 2>&1 | sed -n 's/^Identifier=//p')"
+            if [ "$cli_id" = "$CLI_INSTALL_NAME" ]; then
+                ok "installs the command line tool to /$CLI_INSTALL_DIR/$CLI_INSTALL_NAME, and it verifies"
+            else
+                bad "the packaged command line tool is signed as '${cli_id:-nothing}', not $CLI_INSTALL_NAME"; rc=1
+            fi
+        else
+            bad "the packaged command line tool does not verify after unpacking"; rc=1
+        fi
+        # It has to run, not merely be present: a binary that was damaged by
+        # packaging verifies far less often than one that was not.
+        if "$cli_installed" version >/dev/null 2>&1; then
+            ok "the packaged command line tool runs"
+        else
+            bad "the packaged command line tool did not run"; rc=1
+        fi
+    else
+        bad "the package would not install the command line tool to /$CLI_INSTALL_DIR/$CLI_INSTALL_NAME"
         rc=1
     fi
 

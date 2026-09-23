@@ -78,6 +78,11 @@ The launch itself never gets `-S`, in any mode. Its stdin carries openconnect's
 PIN and account password, and an `-S` that decided it needed a password would
 consume the PIN as its own and hand openconnect half a credential.
 
+The CLI in `docs/CLI.md` reaches the same two refresh steps from its own side,
+and the same rule holds there: `--sudo-password` runs `sudo -S -v` as a child of
+the CLI, never on the agent's pipe, whose standard input carries the tunnel's
+credentials.
+
 ### 1a. The timestamp the app cannot measure
 
 The first version of this decision had a third input: the app ran `sudo -n -v`

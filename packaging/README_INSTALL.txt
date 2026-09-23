@@ -63,11 +63,29 @@ You can install or remove it yourself:
     ./packaging/install-agent.sh
     ./packaging/install-agent.sh --uninstall
 
+THE COMMAND LINE TOOL
+---------------------
+The package also installs `turtlediver` at /usr/local/bin/turtlediver, on the
+PATH of both zsh and bash. It drives the same engine as the app, from a shell
+or from a script:
+
+    turtlediver status --json           # is a tunnel up?
+    turtlediver rules explain host.com  # which policy does this host use?
+    turtlediver profile list
+    turtlediver connect                 # Ctrl-C ends the tunnel
+
+The disk image does not carry it — drag-to-Applications installs only the app.
+It reads the settings the app already has and never writes them, and it never
+stores your administrator password: it authenticates through sudo's own prompt.
+See docs/CLI.md in the source for the full command set and exit codes.
+
 WHERE THINGS LIVE
 -----------------
     ~/Library/Application Support/TurtleDiver/Profiles/   your profiles
     ~/Library/Application Support/TurtleDiver/run/        openconnect.pid
     ~/Library/Logs/TurtleDiver/vpn.log                    connection log
     ~/Library/Logs/TurtleDiver/launch.log                 launch log
+    /usr/local/bin/turtlediver                            the command line tool
+    /usr/local/libexec/turtlediver-agent                  the tunnel helper
 
 Credentials live in the login Keychain, never in a preferences file.

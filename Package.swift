@@ -23,6 +23,13 @@ let package = Package(
         .library(
             name: "TurtleDiverCore",
             targets: ["TurtleDiverCore", "TurtleDiverRules", "TurtleDiverEngine", "TurtleDiverSystem"]
+        ),
+        // The command line front door: installed by the .pkg alongside the app
+        // and the agent, so a person or an agent can ask the same engine
+        // questions without a window. `docs/CLI.md` is the contract.
+        .executable(
+            name: "turtlediver",
+            targets: ["TurtleDiverCLI"]
         )
     ],
     targets: [
@@ -56,6 +63,24 @@ let package = Package(
             name: "TurtleDiverAgent",
             dependencies: ["TurtleDiverSystem"],
             path: "Agent"
+        ),
+        // The CLI's logic lives in a library so the parts that decide *what to
+        // run* can be tested without running it: argv building, config reading,
+        // profile parsing, rule explanation, exit codes. `CLI/main.swift` is
+        // then a one-line entry point with nothing to test.
+        .target(
+            name: "TurtleDiverCLIKit",
+            dependencies: ["TurtleDiverCore", "TurtleDiverRules", "TurtleDiverSystem"],
+            path: "CLI/Kit"
+        ),
+        .executableTarget(
+            name: "TurtleDiverCLI",
+            dependencies: ["TurtleDiverCLIKit"],
+            path: "CLI",
+            // `Kit` is its own target; without this the executable target's
+            // path would claim the same sources and `swift build` would refuse
+            // the overlap.
+            exclude: ["Kit"]
         ),
         .target(
             name: "TurtleDiverAppGlue",
@@ -138,6 +163,11 @@ let package = Package(
                 "Views/ToolSetupModel.swift",
                 "Views/UpdateModel.swift"
             ]
+        ),
+        .testTarget(
+            name: "TurtleDiverCLITests",
+            dependencies: ["TurtleDiverCLIKit", "TurtleDiverCore", "TurtleDiverSystem"],
+            path: "Tests/TurtleDiverCLITests"
         ),
         .testTarget(
             name: "TurtleDiverAppTests",

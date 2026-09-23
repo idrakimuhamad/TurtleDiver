@@ -274,6 +274,13 @@ correct and expected; it is the Developer ID gap, not a build failure.
 `dist/` is ignored by git: installers are build outputs, and the two older
 1.1.0/1.2.0 sets are being kept on disk but no longer tracked.
 
+The `.pkg` is the only artifact that carries more than the app. `publish.sh`
+builds and signs two companions with the same identity — `turtlediver-agent`
+into `/usr/local/libexec` ([`ELEVATION.md`](ELEVATION.md) §10) and `turtlediver`
+into `/usr/local/bin` ([`CLI.md`](CLI.md)) — and `verify_pkg` refuses a package
+that is missing either, ships one that does not verify, or ships a `turtlediver`
+that will not run.
+
 ---
 
 ## 4. A privileged helper instead of `sudo` (deferred)

@@ -70,6 +70,14 @@ nothing is installed unless five gates pass. See
 with the path and version each one reports; missing ones can be installed with
 one click (`brew install`, run as you, no password).
 
+**Command line.** The installer package also drops a `turtlediver` command in
+`/usr/local/bin`, so the same engine answers from a shell — see
+[The command line](#the-command-line). It reads the settings and profiles the
+app already has and never writes them. It never *stores* your administrator
+password: by default it authenticates through `sudo`'s own prompt, and a
+scripted caller with no terminal can hand it one with
+`--sudo-password keychain|stdin` for the single run that needs it.
+
 ## Requirements
 
 - **macOS 14 or later.**
@@ -104,7 +112,9 @@ re-signing work.
 Download `TurtleDiver-<version>.dmg` from the
 [releases page](https://github.com/idrakimuhamad/TurtleDiver/releases), open it,
 and drag **TurtleDiver** onto the **Applications** shortcut. A `.pkg` is also
-built for managed installs.
+built for managed installs, and is the only installer that carries the two
+companions: `turtlediver` in `/usr/local/bin` and the tunnel helper in
+`/usr/local/libexec` (see [`docs/CLI.md`](docs/CLI.md)).
 
 **Release builds are signed but not notarized**, so a downloaded copy is
 quarantined by macOS and the first launch refuses to open it. Either right-click
@@ -336,8 +346,40 @@ flows through the tunnel.
   VPN tie-in
 - [`docs/ELEVATION.md`](docs/ELEVATION.md) — how the app asks for privilege, and
   every deadline it waits on
+- [`docs/CLI.md`](docs/CLI.md) — the `turtlediver` command: commands, exit
+  codes, and why `connect` stays in the foreground
 - [`docs/SETTINGS_LAYOUT.md`](docs/SETTINGS_LAYOUT.md) — why the sidebar is
   172 pt wide, and the titlebar height contract
+
+### The command line
+
+Installing from the `.pkg` puts `turtlediver` in `/usr/local/bin`, on the
+`PATH` of both `zsh` and `bash` (a drag-install from the `.dmg` does not). It is
+the same engine with a different front door: it answers from the app's own
+settings files, so it works with the app closed.
+
+```bash
+turtlediver status --json            # is a tunnel up, and whose pid
+turtlediver rules explain github.com # which rule matches, which policy it resolves to
+turtlediver profile list             # what profiles exist
+turtlediver profile validate         # does the active one parse and resolve
+turtlediver connect                  # start one; Ctrl-C ends it
+turtlediver disconnect               # idempotent: nothing to do is still success
+```
+
+Every read command takes `--json`, which prints exactly one JSON document on
+stdout with progress on stderr. Exit codes are part of the interface — `3` for
+"not configured", `6` for "needs approval and there is no terminal" — and
+`disconnect` reports `"changed": false` with exit `0` when there was nothing to
+end.
+
+`connect` is deliberately **foreground**: it holds the tunnel helper's standard
+input open, and closing that pipe is what ends the tunnel. Backgrounding it
+would end the tunnel the moment the command looked like it had worked. It never
+reads or stores your administrator password; it uses `sudo`'s own prompt on the
+terminal it is running in, and with no terminal it exits `6` rather than
+raising a dialog nothing can answer. [`docs/CLI.md`](docs/CLI.md) is the full
+contract.
 
 ## How it is built
 
@@ -358,6 +400,26 @@ flows through the tunnel.
 - **System** — `SystemProxyManager` (snapshot/apply/restore), the elevation
   policy, tool resolution, and the `vpn-slice` DIRECT-rule overlay
 - **SettingsManager** — configuration persistence (UserDefaults + Keychain)
+
+A second, smaller front door shares that engine:
+
+```
+CLI/
+├── main.swift                      # one-line entry point
+└── Kit/                            # the testable logic behind the command
+    ├── TurtleDiverCLI.swift        # command dispatch, usage, exit codes
+    ├── CLIArguments.swift          # argv parsing and `--version` metadata
+    ├── CLIExitCode.swift           # the exit codes agents match on
+    ├── Output.swift                # one JSON document, or human lines
+    ├── AppSettings.swift           # reads the app's defaults and Keychain
+    ├── ProfileDirectory.swift      # reads profiles without creating one
+    ├── ProfileCommands.swift       # profile list / validate
+    ├── RulesExplanation.swift      # rules explain, via the app's matcher
+    ├── OpenConnectInvocation.swift # builds the openconnect argv
+    ├── TokenGenerator.swift        # runs stoken for the one-time code
+    ├── TunnelStatus.swift          # is a tunnel up, and whose pid
+    └── TunnelCommands.swift        # connect (foreground), disconnect
+```
 
 ## Security and privacy
 
