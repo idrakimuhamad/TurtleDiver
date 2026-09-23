@@ -184,7 +184,8 @@ let package = Package(
                 "Views/SettingsCatalog.swift",
                 "Views/SettingsDraft.swift",
                 "Views/ToolSetupModel.swift",
-                "Views/UpdateModel.swift"
+                "Views/UpdateModel.swift",
+                "Views/AskpassSetupModel.swift"
             ]
         ),
         .testTarget(

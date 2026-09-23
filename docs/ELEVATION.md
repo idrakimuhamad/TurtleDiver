@@ -204,7 +204,9 @@ than used, because that mode already names its own door, and one function —
 `SudoPasswordDelivery.resolve(strategy:askpassHelper:)` — decides which of the
 two a connect is in, so the app and the command line cannot answer differently.
 Without a helper the plan is what it always was: a dialog a person answers, and
-the status that says so if nobody does.
+the status that says so if nobody does. Where the app's helper comes from, what a
+connect checks before trusting it, and the Settings button that grants it are
+§12.
 
 ### 2. Fail loud, and name the cause
 
@@ -517,6 +519,37 @@ Two consequences worth stating plainly:
   `codesign -dv --verbose=4` on it prints the identifier and team — so the grant
   is a named, revocable thing rather than "whatever ran a script".
 
+### 12. Where the approval is given, and what a connect checks
+
+The consent dialog is a decision, so the app gives it somewhere the user is
+looking: **Settings ▸ VPN ▸ Unattended elevation ▸ Prepare…**. Preparing runs
+`sudo -A -v` with this app's helper in `SUDO_ASKPASS` — a connect's own warm-up,
+run deliberately — so macOS asks about that program now, while the person is
+watching, instead of during a connect nobody is watching. The button is off
+until an administrator password is actually stored, because the helper reads
+what is stored and a preparation that tested a password the user had not saved
+would fail in a way that looks like a bug.
+
+What is remembered afterwards is the helper's **designated requirement** — the
+same text `codesign -d -r-` prints — and not a "prepared" flag. A connect
+compares it with the requirement of the helper that is in the bundle right now
+(`AskpassSetup`), and uses the helper only while they match. Two things follow,
+and both are the point:
+
+- a release signed with the same identity keeps working across updates, because
+  its requirement is `identifier` plus certificate, not a code hash;
+- a build signed differently — an ad-hoc development build, or a signature the
+  user's Keychain does not have a grant for — shows up in Settings as *not set
+  up*, and the remedy is to prepare again. The alternative is a connect that
+  quietly hangs on an unexpected dialog, which is the defect this whole document
+  is about.
+
+The record lives in the app's preferences, not the Keychain: it names a program
+and its signer, the same thing `codesign` prints for anyone who asks, and a
+Keychain read made while deciding whether a Keychain dialog is needed would be
+its own small comedy. Nothing here ever holds the password — the helper reads
+the item itself, and the app only points `sudo` at it.
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:
@@ -615,9 +648,13 @@ Running that helper by hand is not a check worth making: under its installed
 name it will try to read the administrator password and the Keychain will ask
 for consent — the dialog an unattended connect has to raise, and the one a
 person should answer deliberately rather than while debugging something else.
-Run it under any *other* name (a copy in `/tmp`) and it refuses with a usage
-sentence and `EX_USAGE` (64) instead, which is the part that costs nothing to
-verify.
+Settings ▸ VPN's *Prepare…* button raises exactly that dialog on purpose, next
+to the password field it is about. Run the helper under any *other* name (a copy
+in `/tmp`) and it refuses with a usage sentence and `EX_USAGE` (64) instead,
+which is the part that costs nothing to verify.
+
+    # what the app recorded after a successful Prepare (the helper's requirement)
+    defaults read com.xvii.kurakura.vpn askpassHelperRequirement
 
 `~/Library/Logs/TurtleDiver/launch.log` shows the sweep (`Step 0c`) and what it
 decided. `~/Library/Logs/TurtleDiver/vpn.log` shows the chosen strategy for each

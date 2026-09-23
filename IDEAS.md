@@ -302,7 +302,19 @@ and a missing helper is exit 7 naming its path. The route was then walked for
 real on a machine whose `pam_tid` answers first: a `connect --sudo-password
 keychain` with nobody at the keyboard reached a live tunnel and printed its one
 JSON document, and `disconnect --sudo-password keychain` took it down through the
-same helper, both exit 0. What has **not** been picked up
+same helper, both exit 0.
+
+(2026-09-23) The app got the same door on its own terms: it builds a helper into
+its own bundle (a nested Xcode target, so the signature survives — §11 of
+`docs/ELEVATION.md`), and Settings ▸ VPN gains **Unattended elevation ▸
+Prepare…**, which runs that helper once so macOS asks about it while the user is
+looking, then records its designated requirement. A connect uses it only while
+that record still matches the helper in the bundle, so an ad-hoc rebuild asks to
+be prepared again instead of hanging on a dialog nobody expected. The two copies
+obey one protocol (`AskpassProgram`, `StoredSecret`); the CLI's stays
+`/usr/local/bin/turtlediver-askpass`, because the Keychain grant belongs to the
+program and a user who installed only the app has no CLI copy to point at.
+What has **not** been picked up
 from this card: `profile use`, `policy set` and `requests --json` are absent,
 because they are writes and the CLI is deliberately read-only apart from the
 tunnel.

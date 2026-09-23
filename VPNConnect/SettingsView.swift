@@ -203,6 +203,10 @@ struct VPNConfigurationView: View {
     @State private var loaded = VPNConfigurationDraft()
     @State private var pickedTokenURL: URL?
     @State private var showFilePicker = false
+    @StateObject private var askpass = AskpassSetupModel()
+    /// Whether the Keychain holds an administrator password, read once per load
+    /// so the row can say so without a Keychain read on every render.
+    @State private var hasStoredAdminPassword = false
 
     var body: some View {
         SettingsPane(title: "VPN", subtitle: "Credentials, software token and split tunneling for the active profile") {
@@ -245,8 +249,34 @@ struct VPNConfigurationView: View {
             SettingsRow(label: "Passcode", caption: "If your gateway asks for two credentials: the token from the software token file, then the password") {
                 SettingsSecureField(prompt: "Passcode or token", text: $draft.passcode)
             }
-            SettingsRow(label: "Administrator password", caption: "Used for sudo: running the VPN helper and changing the system proxy", isLast: true) {
+            SettingsRow(label: "Administrator password", caption: "Used for sudo: running the VPN helper and changing the system proxy") {
                 SettingsSecureField(prompt: "Admin password", text: $draft.adminPassword)
+            }
+            SettingsRow(label: "Unattended elevation",
+                        caption: unattendedElevationCaption,
+                        isLast: true) {
+                HStack(spacing: 8) {
+                    if askpass.isPreparing {
+                        ProgressView().controlSize(.small)
+                    }
+                    Button("Prepare…") { Task { await askpass.prepare() } }
+                        .controlSize(.small)
+                        .disabled(!canPrepareUnattended)
+                    Button("Forget") { askpass.forget() }
+                        .controlSize(.small)
+                        .disabled(!askpass.canForget)
+                }
+            }
+            if let note = unattendedElevationNote {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(note)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, SettingsStyle.rowPaddingH)
+                .padding(.bottom, SettingsStyle.rowPaddingV)
             }
         }
     }
@@ -327,6 +357,29 @@ struct VPNConfigurationView: View {
 
     // MARK: Load / save
 
+    /// The row's one-line state, plus the one thing the user has to do first
+    /// when the app cannot prepare yet.
+    private var unattendedElevationCaption: String {
+        if !hasStoredAdminPassword { return "Save an administrator password first" }
+        if draft.adminPassword != loaded.adminPassword { return "Save your changes first" }
+        return AskpassSetupModel.caption(for: askpass.status)
+    }
+
+    /// Preparing runs the helper against what is *stored*, so an unsaved field or
+    /// an empty Keychain would prepare a password that is not the one on screen.
+    /// The button is therefore off until the pane's own state agrees with the
+    /// Keychain's.
+    private var canPrepareUnattended: Bool {
+        askpass.canPrepare && hasStoredAdminPassword && draft.adminPassword == loaded.adminPassword
+    }
+
+    /// What the state means, and what the button does — with the last attempt's
+    /// outcome, which is the only place a refusal can be read.
+    private var unattendedElevationNote: String? {
+        if let outcome = askpass.outcome { return outcome }
+        return AskpassSetupModel.explanation(for: askpass.status)
+    }
+
     private func load() {
         let current = VPNConfigurationDraft(
             host: settings.vpnHost,
@@ -341,6 +394,7 @@ struct VPNConfigurationView: View {
         draft = current
         loaded = current
         pickedTokenURL = nil
+        hasStoredAdminPassword = !settings.adminPassword.isEmpty
     }
 
     private func revert() {
@@ -371,6 +425,7 @@ struct VPNConfigurationView: View {
 
         loaded = draft
         pickedTokenURL = nil
+        hasStoredAdminPassword = !settings.adminPassword.isEmpty
     }
 }
 

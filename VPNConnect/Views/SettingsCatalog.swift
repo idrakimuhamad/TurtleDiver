@@ -82,7 +82,8 @@ public enum SettingsCatalog {
             tint: .blue,
             group: .connection,
             keywords: ["password", "passcode", "2fa", "token", "stoken", "sudo", "admin",
-                       "tunneling", "split", "vpn-slice", "slice", "host", "username", "login"]
+                       "tunneling", "split", "vpn-slice", "slice", "host", "username", "login",
+                       "unattended", "askpass", "prepare", "elevation", "touch id"]
         ),
         SettingsItem(
             route: .profiles,
