@@ -81,6 +81,10 @@ public enum TurtleDiverCLI {
         // to be up, and nothing should be asked for on the strength of a flag
         // that is wrong.
         let passwordSource = try sudoPasswordSource(parsed)
+        // Read here, before anything is asked for, because it decides whether a
+        // supplied password can be read at all — and the answer must come before
+        // a Keychain dialog or a Keychain read, not after both.
+        let elevation = ElevationRoute.strategy()
         // Refuse to start a second tunnel. Not a safety property — the pid file
         // and the group record tolerate two — but two openconnects on one host
         // is never what the caller meant, and saying so is cheaper than letting
@@ -92,6 +96,10 @@ public enum TurtleDiverCLI {
                 "a tunnel is already up (openconnect pid \(pid), found via \(existing.source ?? "unknown"))"
             )
         }
+        // After the state, because "already up" is a complete answer of its own;
+        // before anything is read or run, because a machine that raises its own
+        // sudo dialog would otherwise take the password and hang on that dialog.
+        if let refusal = ElevationRoute.refusal(for: passwordSource, on: elevation) { throw refusal }
 
         let settings = AppSettings.readFromAppDomains()
         let resolution = try ConnectCommand.resolve(settings: settings)
@@ -125,26 +133,22 @@ public enum TurtleDiverCLI {
         // failure — is reported before anything is asked for, and read here, not
         // earlier, so it is held for as little of the command's life as possible.
         let secret = try sudoPassword(passwordSource, output: output)
-        if secret == nil && !hasTerminal {
-            output.note("no terminal: using sudo -n; if it is not already warm, connect exits 6")
+        for line in ConnectCommand.warmUpNotes(
+            strategy: elevation,
+            hasTerminal: hasTerminal,
+            hasPassword: secret != nil
+        ) {
+            output.note(line)
         }
-        guard ConnectCommand.warmUp(hasTerminal: hasTerminal, secret: secret) else {
-            if secret != nil {
-                throw CLIFailure(
-                    .needsApproval,
-                    "sudo did not accept the administrator password that was supplied;"
-                        + " nothing was started. Check the item behind --sudo-password keychain"
-                        + " (Settings ▸ Advanced is where the app stores it), or leave the option out"
-                        + " and answer the prompt yourself."
-                )
-            }
-            if hasTerminal {
-                throw CLIFailure(.needsApproval, "sudo did not authenticate; nothing was started")
-            }
+        let warmUp = ConnectCommand.warmUp(
+            hasTerminal: hasTerminal,
+            strategy: elevation,
+            secret: secret
+        )
+        guard warmUp == .warmed else {
             throw CLIFailure(
                 .needsApproval,
-                "no terminal is attached and sudo is not already authenticated;"
-                    + " run `sudo -v` first, run connect from a terminal, or supply --sudo-password"
+                ConnectCommand.failureDetail(warmUp, strategy: elevation, hasTerminal: hasTerminal)
             )
         }
 
@@ -190,15 +194,33 @@ public enum TurtleDiverCLI {
         return .ok
     }
 
-    static func disconnect(_ parsed: ParsedCommandLine, output: Output) throws -> CLIExitCode {
+    static func disconnect(
+        _ parsed: ParsedCommandLine,
+        output: Output,
+        readStatus: () -> TunnelStatus = { TunnelStatus.read() },
+        readPassword: (SudoPasswordSource) throws -> String = { try SudoPassword.read($0) }
+    ) throws -> CLIExitCode {
         let passwordSource = try sudoPasswordSource(parsed)
-        let status = TunnelStatus.read()
-        let strategy = ElevationProbe.live { try? String(contentsOfFile: $0, encoding: .utf8) }.strategy
+        let strategy = ElevationRoute.strategy()
+        let status = readStatus()
+        // Only when there is something to stop. A password is needed to tear a
+        // tunnel down, and nothing else; with nothing to do this command is
+        // idempotent and says so, flag or no flag, which is the promise scripts
+        // rely on when they run it unconditionally at the end.
+        if status.connected, let refusal = ElevationRoute.refusal(for: passwordSource, on: strategy) {
+            throw refusal
+        }
+        // Read only when it will be used, for the same reason: a no-op
+        // disconnect must not raise a Keychain consent dialog for a password it
+        // is about to throw away, and the caller must not have to answer one.
+        let adminPassword = status.connected
+            ? try sudoPassword(passwordSource, output: output, read: readPassword)
+            : nil
         let result = try DisconnectCommand.run(
             status: status,
             mayPrompt: ConnectCommand.hasTerminal(),
             strategy: strategy,
-            adminPassword: try sudoPassword(passwordSource, output: output)
+            adminPassword: adminPassword
         )
 
         var body: [String: Any] = ["ok": true, "changed": result.changed, "connected": false]
@@ -347,6 +369,11 @@ public enum TurtleDiverCLI {
       one) or `stdin` (one line on the pipe), so sudo never has to prompt. Left
       out — the default — sudo prompts on a terminal and a pipe gets `sudo -n`.
       The CLI never guesses a source and never falls back to another.
+      This only works where sudo reads a piped password: on a Mac whose PAM
+      stack runs pam_tid (Touch ID for sudo) its dialog comes first, nothing can
+      read the pipe, and the option is refused with exit 6 rather than left to
+      wait on a dialog nobody asked for. Without the option that Mac prompts as
+      usual.
 
     connect runs in the foreground: the tunnel lives as long as the command does,
     and Ctrl-C ends it. `disconnect` is for a tunnel whose driver is already gone.

@@ -63,7 +63,7 @@ mean something else.
 | 3 | Not configured — no host, no profile, or the agent is not installed. |
 | 4 | Already connected (`connect`). |
 | 5 | Reserved for a command that needs a tunnel and there is none. No command uses it today; `disconnect` deliberately does not. |
-| 6 | Needs approval: a dialog would be needed, there is no terminal, and no password was supplied (`--sudo-password`). |
+| 6 | Needs approval: a dialog would be needed and no password can replace it — no terminal and none supplied, or `--sudo-password` on a machine whose `sudo` reaches a dialog first. |
 | 7 | A tool is missing (`openconnect`, `stoken`, `vpn-slice`). |
 | 8 | The tunnel did not stop. |
 | 9 | Timed out. |
@@ -133,16 +133,42 @@ exit 3 and 2 respectively — and never quietly replaced by the other door. A
 caller that asked for `stdin` and got a Touch ID dialog hangs; a caller that
 asked for the Keychain and got a prompt fails somewhere it cannot see.
 
+A handed-over password also has to be *readable* by this machine's `sudo`, and
+not every Mac's is. Where Touch ID for `sudo` is enabled, `/etc/pam.d/sudo`
+includes `sudo_local`, whose `auth sufficient pam_tid.so` answers *before* the
+module that would read a piped password: the dialog appears first, the pipe is
+never read, and the connect waits on the very dialog its caller asked to avoid.
+The CLI learns this from the same two world-readable files the app's own
+`ElevationPolicy` reads — no question is put to `sudo` — and refuses the option
+on such a machine **before it starts anything**:
+
+```console
+$ turtlediver connect --sudo-password keychain
+pam_tid answers sudo on this Mac, so its own Touch ID or administrator-password
+  dialog appears before anything can read a piped password, and --sudo-password
+  cannot skip it; nothing was started. Run the same connect without the option
+  and answer the prompt, or take the pam_tid line out of /etc/pam.d/sudo_local
+  if a connect has to run with nobody at the machine.
+$ echo $?
+6
+```
+
+Exit 6 in milliseconds, with nothing read and nothing run. That is the honest
+answer for a caller that cannot see a dialog, and the same code a mistyped
+source gets. The option is not silently ignored and the dialog route is not
+quietly taken in its place: either would leave the caller believing something
+happened that did not. On such a Mac an unattended connect needs either a
+`sudo_local` without that line, or a person.
+
 The password is not remembered between commands. `disconnect` needs its own
-`--sudo-password` if it needs one at all, and a supplied one also picks the
-pipe over the machine's preferred dialog, so a scripted session authenticates
-the same way at both ends.
+`--sudo-password` if it needs one at all, and where this machine reads a pipe a
+supplied one picks that pipe over the dialog the machine would otherwise prefer,
+so a scripted session authenticates the same way at both ends.
 
 `keychain` needs the app to have been given the password once — the stored item
 lives in **Settings ▸ Advanced**. A Mac that answers `sudo` with Touch ID may
 never have stored one, which is why a missing item is a named failure and not a
 silent fallback to a prompt.
-
 #### What happens to the password
 
 One value in this tool may never be seen by anyone, so the rules are stated
@@ -182,6 +208,26 @@ app's own service, and the first read may prompt:
 This is macOS's own gate, and it is the correct place for it: the alternative is
 a second copy of the password on disk. Clicking **Always Allow** makes it
 once-per-binary.
+
+There are two of these on a `connect` — the account password, and the passcode
+half of the PIN — because the app keeps them in two items. One dialog per item
+is macOS's rule, not this tool's; `--sudo-password` would have been a third, and
+on a machine where it is refused it is now never read at all.
+
+The prompt returning on *every* run is usually the binary rather than the item. A
+`swift build` product is ad-hoc signed, and its identifier is derived from the
+`cdhash`, so the CLI is a different program to the Keychain after every rebuild
+and no **Always Allow** can ever stick:
+
+```console
+$ codesign -dvv .build/debug/turtlediver 2>&1 | grep -E 'Identifier|Signature'
+Identifier=turtlediver-<hash of this build>
+Signature=adhoc
+```
+
+The binary `publish.sh` installs is signed with a stable identifier and the app's
+team, so there one **Always Allow** covers every later run — which is also what
+makes the tool usable from an agent, which has nobody to click it.
 
 ## What it reads, and what it will not write
 

@@ -190,13 +190,14 @@ final class CLISudoPasswordTests: XCTestCase {
 
     func testASuppliedPasswordGoesOnTheChildsStdinAndNotIntoArgv() throws {
         let sudo = try FakeSudo()
-        XCTAssertTrue(
+        XCTAssertEqual(
             ConnectCommand.warmUp(
                 hasTerminal: false,
                 secret: "hunter2",
                 runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
                 timeout: 10
-            )
+            ),
+            .warmed
         )
         // `-S -v`: read the password from standard input and refresh the
         // timestamp. The agent's own launch stays `sudo -n`, because the agent's
@@ -211,13 +212,14 @@ final class CLISudoPasswordTests: XCTestCase {
         // A scripted caller sitting in a pseudo-terminal asked for no dialog. It
         // gets no dialog.
         let sudo = try FakeSudo()
-        XCTAssertTrue(
+        XCTAssertEqual(
             ConnectCommand.warmUp(
                 hasTerminal: true,
                 secret: "hunter2",
                 runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
                 timeout: 10
-            )
+            ),
+            .warmed
         )
         XCTAssertEqual(sudo.argv, "-S\n-v\n")
         XCTAssertEqual(sudo.standardInput, "hunter2\n")
@@ -226,12 +228,13 @@ final class CLISudoPasswordTests: XCTestCase {
     func testWithoutAPasswordThePlainWarmupIsUsedAndGetsNoInput() throws {
         // The default, unchanged: no terminal, so the form that asks nobody.
         let sudo = try FakeSudo()
-        XCTAssertTrue(
+        XCTAssertEqual(
             ConnectCommand.warmUp(
                 hasTerminal: false,
                 runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
                 timeout: 10
-            )
+            ),
+            .warmed
         )
         XCTAssertEqual(sudo.argv, "-n\n-v\n")
         XCTAssertEqual(sudo.standardInput, "", "the no-password form received bytes on standard input")
@@ -241,13 +244,14 @@ final class CLISudoPasswordTests: XCTestCase {
         // What an empty shell variable looks like. It must not become a piped
         // empty line, which `sudo -S` would answer with a prompt.
         let sudo = try FakeSudo()
-        XCTAssertTrue(
+        XCTAssertEqual(
             ConnectCommand.warmUp(
                 hasTerminal: false,
                 secret: "",
                 runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
                 timeout: 10
-            )
+            ),
+            .warmed
         )
         XCTAssertEqual(sudo.argv, "-n\n-v\n")
         XCTAssertEqual(sudo.standardInput, "")
@@ -366,6 +370,222 @@ final class CLISudoPasswordTests: XCTestCase {
         XCTAssertTrue(plans.allSatisfy { $0.stdin == nil }, "a password was piped that nobody supplied")
     }
 
+    // MARK: - The machine's stack, and what it forbids
+
+    /// A reader that answers for a machine whose PAM stack contains `lines`.
+    private func stack(_ lines: String) -> (String) -> String? {
+        { path in path.hasSuffix("sudo_local") ? lines : nil }
+    }
+
+    func testATouchIDStackIsReadAsTheSystemPromptStrategy() {
+        // The Mac this was found on: `pam_tid` answers `auth` first, ahead of
+        // the module that would read a piped password.
+        let strategy = ElevationRoute.strategy(
+            readFile: stack("auth sufficient pam_tid.so\n")
+        )
+        XCTAssertEqual(strategy, .systemPrompt)
+        XCTAssertFalse(strategy.pipesTheStoredPassword, "a piped password cannot skip pam_tid's dialog")
+    }
+
+    func testAStackWithoutTouchIDIsReadAsTheStoredPasswordStrategy() {
+        let strategy = ElevationRoute.strategy(
+            readFile: stack("auth required pam_opendirectory.so\n")
+        )
+        XCTAssertEqual(strategy, .storedPassword)
+        XCTAssertTrue(strategy.pipesTheStoredPassword)
+    }
+
+    func testNoSourceIsNeverRefused() {
+        // The option is opt-in: without it nothing about the machine's stack
+        // changes what the connect does.
+        XCTAssertNil(ElevationRoute.refusal(for: nil, on: .systemPrompt))
+    }
+
+    func testASourceOnAMachineThatCanReadItIsAccepted() {
+        for source in SudoPasswordSource.allCases {
+            XCTAssertNil(ElevationRoute.refusal(for: source, on: .storedPassword))
+        }
+    }
+
+    func testASourceOnATouchIDMachineIsRefusedWithBothRemedies() throws {
+        for source in SudoPasswordSource.allCases {
+            let refusal = try XCTUnwrap(
+                ElevationRoute.refusal(for: source, on: .systemPrompt),
+                "\(source.rawValue) was accepted on a machine that cannot read it"
+            )
+            // Exit 6 is "a dialog would be needed": that is exactly what this
+            // machine does, and the point is to say so before it appears.
+            XCTAssertEqual(refusal.code, .needsApproval)
+            let detail = refusal.message
+            XCTAssertTrue(detail.contains("pam_tid"), "the refusal does not name what answers: \(detail)")
+            XCTAssertTrue(detail.contains("/etc/pam.d/sudo_local"), "the refusal does not say where: \(detail)")
+            XCTAssertTrue(detail.contains("nothing was started"), "the refusal does not say nothing ran: \(detail)")
+            XCTAssertTrue(
+                detail.contains("without the option"),
+                "the refusal does not offer the dialog route: \(detail)"
+            )
+        }
+    }
+
+    func testAPasswordIsNeverPipedIntoAMachineThatWouldNotReadIt() throws {
+        // Not a route the CLI takes — it refuses the combination first — but the
+        // step itself must not be able to leak a password at a machine whose
+        // stack answers with a dialog ahead of the pipe.
+        let sudo = try FakeSudo()
+        let outcome = ConnectCommand.warmUp(
+            hasTerminal: true,
+            strategy: .systemPrompt,
+            secret: "hunter2",
+            runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+            timeout: 10
+        )
+        XCTAssertEqual(outcome, .warmed)
+        XCTAssertEqual(sudo.argv, "-v\n", "the dialog form was not used")
+        XCTAssertEqual(sudo.standardInput, "", "a password was piped where it could not be read")
+    }
+
+    // MARK: - Telling the three failures apart
+
+    func testARefusedPasswordIsReportedAsAPasswordRefusal() throws {
+        let sudo = try FakeSudo(status: 1)
+        XCTAssertEqual(
+            ConnectCommand.warmUp(
+                hasTerminal: false,
+                strategy: .storedPassword,
+                secret: "hunter2",
+                runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+                timeout: 10
+            ),
+            .passwordRefused
+        )
+        let detail = ConnectCommand.failureDetail(
+            .passwordRefused,
+            strategy: .storedPassword,
+            hasTerminal: false
+        )
+        XCTAssertTrue(detail.contains("did not accept the administrator password"), detail)
+        XCTAssertTrue(detail.contains("Settings ▸ Advanced"), detail)
+    }
+
+    func testAnUnansweredDialogIsReportedAsATimeoutAndNotAsABadPassword() throws {
+        // What the caller saw: Touch ID asked, nobody answered, and the CLI
+        // blamed the password. It now blames the dialog, because it can.
+        let sudo = try FakeSudo(hang: true)
+        XCTAssertEqual(
+            ConnectCommand.warmUp(
+                hasTerminal: true,
+                strategy: .systemPrompt,
+                runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+                timeout: 0.3
+            ),
+            .timedOut
+        )
+        let detail = ConnectCommand.failureDetail(
+            .timedOut,
+            strategy: .systemPrompt,
+            hasTerminal: true
+        )
+        XCTAssertTrue(detail.contains("pam_tid"), detail)
+        XCTAssertTrue(detail.contains("Touch ID"), detail)
+        XCTAssertFalse(detail.contains("password that was supplied"), detail)
+    }
+
+    func testARefusalWithNoTerminalIsReportedAsOne() throws {
+        let sudo = try FakeSudo(status: 1)
+        XCTAssertEqual(
+            ConnectCommand.warmUp(
+                hasTerminal: false,
+                strategy: .systemPrompt,
+                runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+                timeout: 10
+            ),
+            .refused
+        )
+        let headless = ConnectCommand.failureDetail(.refused, strategy: .systemPrompt, hasTerminal: false)
+        XCTAssertTrue(headless.contains("no terminal"), headless)
+        XCTAssertTrue(headless.contains("--sudo-password"), headless)
+        let terminal = ConnectCommand.failureDetail(.refused, strategy: .systemPrompt, hasTerminal: true)
+        XCTAssertTrue(terminal.contains("did not authenticate"), terminal)
+    }
+
+    // MARK: - Saying which way it will go, before it goes there
+
+    func testANoOpDisconnectNeitherReadsNorRefusesThePassword() throws {
+        // What a caller saw: `disconnect --sudo-password keychain` with nothing to
+        // stop announced a Keychain read, raised the consent dialog, took the
+        // password — and then reported that there was nothing to do. A no-op is
+        // worth exit 0 and one line, and nothing else; asking a person to
+        // authenticate for it is the one thing it must not do.
+        var sourceAsked: SudoPasswordSource?
+        var announcements = 0
+        let errors = Pipe()
+        let output = Output(json: false, quiet: false, out: errors.fileHandleForWriting, err: .nullDevice)
+
+        let code = try TurtleDiverCLI.disconnect(
+            try ParsedCommandLine.parse(["disconnect", "--sudo-password", "keychain"]),
+            output: output,
+            readStatus: {
+                TunnelStatus(
+                    pid: nil,
+                    source: nil,
+                    pidFilePid: nil,
+                    pidFilePath: "/tmp/does-not-matter",
+                    rejections: []
+                )
+            },
+            readPassword: { source in
+                sourceAsked = source
+                announcements += 1
+                return "hunter2"
+            }
+        )
+
+        XCTAssertEqual(code, .ok)
+        XCTAssertNil(sourceAsked, "a no-op disconnect read the administrator password anyway")
+        XCTAssertEqual(announcements, 0, "a no-op disconnect announced a read it would not do")
+        try errors.fileHandleForWriting.close()
+        let said = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertTrue(said.contains("nothing to do"), said)
+        XCTAssertFalse(said.contains("Keychain"), "a no-op disconnect promised a Keychain read: \(said)")
+    }
+
+    func testTheNotesPredictTheRouteBeforeItIsTaken() {
+        let withPassword = ConnectCommand.warmUpNotes(
+            strategy: .storedPassword,
+            hasTerminal: true,
+            hasPassword: true
+        )
+        XCTAssertEqual(withPassword.count, 1)
+        XCTAssertTrue(withPassword[0].contains("no dialog"), withPassword[0])
+
+        let headless = ConnectCommand.warmUpNotes(
+            strategy: .systemPrompt,
+            hasTerminal: false,
+            hasPassword: false
+        )
+        XCTAssertEqual(headless.count, 1)
+        XCTAssertTrue(headless[0].contains("exits 6"), headless[0])
+
+        // A Touch ID machine, with a person able to answer: the note has to say
+        // a dialog is coming, because that is the part that needs a human.
+        let prompt = ConnectCommand.warmUpNotes(
+            strategy: .systemPrompt,
+            hasTerminal: true,
+            hasPassword: false
+        )
+        XCTAssertEqual(prompt.count, 1)
+        XCTAssertTrue(prompt[0].contains("pam_tid"), prompt[0])
+        XCTAssertTrue(prompt[0].contains("Touch ID"), prompt[0])
+
+        let typed = ConnectCommand.warmUpNotes(
+            strategy: .storedPassword,
+            hasTerminal: true,
+            hasPassword: false
+        )
+        XCTAssertEqual(typed.count, 1)
+        XCTAssertTrue(typed[0].contains("this terminal"), typed[0])
+    }
+
     // MARK: - The documentation
 
     func testTheDocsDescribeBothSources() throws {
@@ -399,17 +619,18 @@ private final class FakeSudo {
     let directory: URL
     let executable: String
 
-    init() throws {
+    init(status: Int32 = 0, hang: Bool = false) throws {
         directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("turtlediver-cli-sudo-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         executable = directory.appendingPathComponent("sudo").path
+        let body = hang ? "sleep 30" : "cat > '\(directory.path)/stdin'"
         let script = """
         #!/bin/sh
         printf '%s\\n' "$@" > '\(directory.path)/argv'
         env > '\(directory.path)/environment'
-        cat > '\(directory.path)/stdin'
-        exit 0
+        \(body)
+        exit \(status)
         """
         try script.write(toFile: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable)

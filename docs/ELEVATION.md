@@ -81,7 +81,11 @@ consume the PIN as its own and hand openconnect half a credential.
 The CLI in `docs/CLI.md` reaches the same two refresh steps from its own side,
 and the same rule holds there: `--sudo-password` runs `sudo -S -v` as a child of
 the CLI, never on the agent's pipe, whose standard input carries the tunnel's
-credentials.
+credentials. It also inherits this file's reason for existing: where `pam_tid`
+answers `auth` ahead of the password module the pipe is never read, so the CLI
+refuses a supplied password outright (exit 6, nothing started) instead of
+raising the dialog the caller asked to avoid and blaming the password for the
+timeout it then waited out.
 
 ### 1a. The timestamp the app cannot measure
 

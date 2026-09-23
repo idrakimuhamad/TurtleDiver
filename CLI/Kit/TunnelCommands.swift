@@ -6,6 +6,49 @@ import TurtleDiverSystem
 import Darwin
 #endif
 
+/// What this machine does when `sudo` needs to authenticate.
+///
+/// The one fact that decides whether `--sudo-password` can work at all, read
+/// from the machine rather than assumed. `ElevationProbe` is the app's own
+/// detector — two world-readable PAM files, and no question asked of `sudo` —
+/// and the CLI asks it for the reason it exists: `pam_tid` sits *ahead* of the
+/// module that reads a piped password, so a connect that pipes one into such a
+/// stack feeds a pipe nobody reads, waits on a dialog, and then blames the
+/// password for the timeout. `docs/CLI.md` records that failure.
+public enum ElevationRoute {
+
+    /// This machine's strategy. Both files the probe reads are world-readable,
+    /// so this needs no privilege and asks nobody anything.
+    public static func strategy(
+        readFile: (String) -> String? = { try? String(contentsOfFile: $0, encoding: .utf8) }
+    ) -> ElevationStrategy {
+        ElevationProbe.live(readFile: readFile).strategy
+    }
+
+    /// Refuses `--sudo-password` where the password would never be read.
+    ///
+    /// Refusing is the only honest answer available. Continuing would raise the
+    /// very dialog the caller asked to avoid and then blame the password for the
+    /// timeout; taking the password and quietly running the no-password route
+    /// would ignore what the caller said. Both are worse than naming what this
+    /// machine does and what the caller can do about it.
+    public static func refusal(
+        for source: SudoPasswordSource?,
+        on strategy: ElevationStrategy
+    ) -> CLIFailure? {
+        guard source != nil, !strategy.pipesTheStoredPassword else { return nil }
+        return CLIFailure(
+            .needsApproval,
+            "\(ElevationProbe.touchIDModuleName) answers sudo on this Mac, so its own Touch ID or"
+                + " administrator-password dialog appears before anything can read a piped password,"
+                + " and --sudo-password cannot skip it; nothing was started."
+                + " Run the same command without the option and answer the prompt, or take the"
+                + " \(ElevationProbe.touchIDModuleName) line out of /etc/pam.d/sudo_local if a connect has"
+                + " to run with nobody at the machine."
+        )
+    }
+}
+
 /// `connect`: resolve, warm `sudo`, start the agent, and stay in the foreground
 /// while the tunnel lasts.
 ///
@@ -15,8 +58,95 @@ import Darwin
 /// pipe and end the tunnel it had just announced. Ctrl-C is therefore the way to
 /// stop, and ending the command is the same thing as ending the tunnel.
 ///
-/// See `docs/CLI.md` for why the administrator password is never read here.
+/// See `docs/CLI.md` for when this command may be handed an administrator
+/// password, and what it then does with it.
 public enum ConnectCommand {
+
+    /// How long the one authentication may take before it is called unanswered.
+    /// The same 60s the app allows a dialog, named here because the timeout is
+    /// also what the failure message reports.
+    public static let warmUpTimeoutSeconds: TimeInterval = 60
+
+    /// What the one authentication came back with.
+    ///
+    /// Four outcomes rather than a `Bool`, because the sentences differ and the
+    /// difference is not guessable from the outside: a password that was not
+    /// accepted, a prompt nobody answered and a `sudo -n` that asked nobody all
+    /// want their own remedy, and the caller is being told what to do next.
+    public enum WarmUpOutcome: Equatable {
+        case warmed
+        /// A supplied password went to `sudo -S -v` and sudo would not take it.
+        case passwordRefused
+        /// The dialog or the terminal prompt went unanswered until the timeout.
+        case timedOut
+        /// `sudo` refused without asking: the `-n` route, where there was
+        /// nothing warm to find.
+        case refused
+
+        init(_ result: TunnelAgentChannel.SudoStepRunner.Result, passwordWasSupplied: Bool) {
+            if result.succeeded { self = .warmed; return }
+            if result.timedOut { self = .timedOut; return }
+            self = passwordWasSupplied ? .passwordRefused : .refused
+        }
+    }
+
+    /// What to say *before* authenticating, so a caller learns whether a dialog
+    /// is coming while there is still time to answer it — the same "diagnose
+    /// before the wait" the app's own log does. Pure, so all four combinations
+    /// are pinned by tests instead of being discovered at a prompt.
+    public static func warmUpNotes(
+        strategy: ElevationStrategy,
+        hasTerminal: Bool,
+        hasPassword: Bool
+    ) -> [String] {
+        if hasPassword {
+            return [
+                "sudo: authenticating with the supplied administrator password (sudo -S -v);"
+                    + " no dialog will be shown.",
+            ]
+        }
+        guard hasTerminal else {
+            return ["sudo -n: no prompt and no dialog; if the timestamp is cold this exits 6."]
+        }
+        if strategy.waitsForTheSystem {
+            return [
+                "sudo: \(ElevationProbe.touchIDModuleName) answers on this Mac, so Touch ID or an"
+                    + " administrator-password dialog is used if the timestamp is cold.",
+            ]
+        }
+        return ["sudo: this terminal's own prompt is used if the timestamp is cold."]
+    }
+
+    /// The sentence for an authentication that did not come back warm, and the
+    /// remedy for the reason it did not. Pure, and pinned by tests, because in
+    /// the failing case this sentence is the whole interface the caller has.
+    public static func failureDetail(
+        _ outcome: WarmUpOutcome,
+        strategy: ElevationStrategy,
+        hasTerminal: Bool
+    ) -> String {
+        switch outcome {
+        case .warmed:
+            return "sudo is authenticated"
+        case .passwordRefused:
+            return "sudo did not accept the administrator password that was supplied; nothing was started."
+                + " Check the item behind --sudo-password keychain (Settings ▸ Advanced is where the app"
+                + " stores it), or leave the option out and answer the prompt yourself."
+        case .timedOut:
+            guard strategy.waitsForTheSystem else {
+                return "the sudo prompt went unanswered for \(Int(warmUpTimeoutSeconds))s; nothing was started"
+            }
+            return "\(ElevationProbe.touchIDModuleName) asked for Touch ID or an administrator password and"
+                + " nothing answered within \(Int(warmUpTimeoutSeconds))s; nothing was started."
+                + " Run connect again with somebody at the machine to answer the dialog"
+        case .refused:
+            guard hasTerminal else {
+                return "no terminal is attached and sudo is not already authenticated;"
+                    + " run `sudo -v` first, run connect from a terminal, or supply --sudo-password"
+            }
+            return "sudo did not authenticate; nothing was started"
+        }
+    }
 
     /// Everything the connect resolved before it may run anything. Returned for
     /// `--json` preflight errors so a caller can print the remedy.
@@ -70,9 +200,10 @@ public enum ConnectCommand {
     /// Three routes, and offering a password is what picks between them:
     ///
     /// * **A supplied password** (`--sudo-password`) goes into `sudo -S -v`,
-    ///   which never prompts and never waits on a dialog. It is the same form
-    ///   the app uses for its unattended path, and the only route that works
-    ///   with nobody at the machine.
+    ///   which never prompts and never waits on a dialog — on a machine whose
+    ///   PAM stack can read the pipe. `pam_tid` sits *ahead* of the module that
+    ///   reads it and raises its own dialog first, so a password may only be
+    ///   piped where `strategy.pipesTheStoredPassword` says it will be read.
     /// * **No password, terminal**: `sudo -v` prompts on `/dev/tty` — its
     ///   standard input being `/dev/null` does not stop it — so Touch ID and a
     ///   typed password both work.
@@ -89,20 +220,27 @@ public enum ConnectCommand {
     /// openconnect half a credential.
     public static func warmUp(
         hasTerminal: Bool,
+        strategy: ElevationStrategy = .storedPassword,
         secret: String? = nil,
         runner: TunnelAgentChannel.SudoStepRunner = TunnelAgentChannel.SudoStepRunner(),
-        timeout: TimeInterval = 60
-    ) -> Bool {
-        if let secret, !secret.isEmpty {
+        timeout: TimeInterval = ConnectCommand.warmUpTimeoutSeconds
+    ) -> WarmUpOutcome {
+        if let secret, !secret.isEmpty, strategy.pipesTheStoredPassword {
             // The bytes go to the child, never into the arguments: argv is
             // readable by any process running as this user (`ps`, `pgrep -f`),
             // and it is copied into crash reports.
-            return runner.run(
+            let result = runner.run(
                 arguments: TunnelAgentChannel.Launch.warmupArguments(.storedPassword),
                 stdin: TunnelAgentChannel.Launch.warmupInput(.storedPassword, adminPassword: secret),
                 timeout: timeout
-            ).succeeded
+            )
+            return WarmUpOutcome(result, passwordWasSupplied: true)
         }
+        // Everything below asks the *machine* to authenticate rather than a
+        // pipe: `sudo -v` where a person can see the prompt, `sudo -n -v` where
+        // nobody can. A password handed over on a machine whose stack answers
+        // with its own dialog lands here deliberately — it would never be read,
+        // and `ElevationRoute.refusal` stops that combination before this step.
         // With a terminal, the form that may raise a dialog. `sudo -v` reads no
         // standard input: `pam_tid` raises its own dialog, and on a Mac without
         // it `sudo` prompts on `/dev/tty` — either way a person can answer, and
@@ -116,7 +254,8 @@ public enum ConnectCommand {
         // No stdin: `sudo -v` with a pipe that is never written is not the same
         // thing as `</dev/null`, and the dialog the terminal case depends on
         // does not read a pipe anyway.
-        return runner.run(arguments: arguments, stdin: nil, timeout: timeout).succeeded
+        let result = runner.run(arguments: arguments, stdin: nil, timeout: timeout)
+        return WarmUpOutcome(result, passwordWasSupplied: false)
     }
 
     /// True when a prompt could be shown somewhere a person can see it. Checks
