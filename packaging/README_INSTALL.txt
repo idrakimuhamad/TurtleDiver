@@ -76,7 +76,13 @@ or from a script:
 
 The disk image does not carry it — drag-to-Applications installs only the app.
 It reads the settings the app already has and never writes them, and it never
-stores your administrator password: it authenticates through sudo's own prompt.
+stores your administrator password: by default it authenticates through sudo's
+own prompt, and it can be handed one for a single run with `--sudo-password
+keychain|stdin` (never on the command line). A connect that has to run with
+nobody at the machine needs one setup you install yourself: either a sudoers
+rule exempting /usr/local/libexec/turtlediver-agent from authentication, or
+dropping the pam_tid line from /etc/pam.d/sudo_local. Both are written up under
+"Unattended connects" in docs/CLI.md.
 See docs/CLI.md in the source for the full command set and exit codes.
 
 WHERE THINGS LIVE

@@ -87,6 +87,17 @@ refuses a supplied password outright (exit 6, nothing started) instead of
 raising the dialog the caller asked to avoid and blaming the password for the
 timeout it then waited out.
 
+That refusal has one exception, and it is the CLI's alone: a machine whose
+`/etc/sudoers.d` exempts the installed agent from authentication
+(`Defaults!/usr/local/libexec/turtlediver-agent !authenticate`) needs no refresh
+of any kind. The CLI asks `sudo -n -l <agent>` — policy, not authentication —
+skips the refresh when the answer is yes, and never reads a password it would not
+use; `docs/CLI.md` §"Unattended connects" has the rule and what it costs. The
+app cannot use that trick, which is why this section still governs it: its plan
+runs several different `sudo` commands from one generated script, so no single
+command can be named to `sudoers` — only the shell, which would exempt
+everything.
+
 ### 1a. The timestamp the app cannot measure
 
 The first version of this decision had a third input: the app ran `sudo -n -v`

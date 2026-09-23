@@ -96,14 +96,25 @@ public enum TurtleDiverCLI {
                 "a tunnel is already up (openconnect pid \(pid), found via \(existing.source ?? "unknown"))"
             )
         }
-        // After the state, because "already up" is a complete answer of its own;
-        // before anything is read or run, because a machine that raises its own
-        // sudo dialog would otherwise take the password and hang on that dialog.
-        if let refusal = ElevationRoute.refusal(for: passwordSource, on: elevation) { throw refusal }
-
         let settings = AppSettings.readFromAppDomains()
         let resolution = try ConnectCommand.resolve(settings: settings)
         output.note("openconnect: \(resolution.invocation.commandLinePreview())")
+
+        // Whether the launch needs an authenticated sudo at all, asked before
+        // anything is read or refused. A machine that exempts the agent command
+        // (a sudoers rule — see Unattended connects in `usageText`) needs no
+        // refresh, no dialog and no password, so a caller that offered one should
+        // not be refused on a machine where nothing would read it.
+        let authentication = ConnectCommand.launchAuthentication(agentPath: resolution.agentPath)
+        // After the state, because "already up" is a complete answer of its own,
+        // and after the probe, because the refusal is only true of a launch that
+        // has to authenticate; before anything is read or run, because a machine
+        // that raises its own sudo dialog would otherwise take the password and
+        // hang on that dialog.
+        if authentication == .required,
+           let refusal = ElevationRoute.refusal(for: passwordSource, on: elevation) {
+            throw refusal
+        }
 
         // Credentials: the account password, and the passcode half of the PIN.
         // Read before elevation so a missing one is reported before a password
@@ -128,28 +139,36 @@ public enum TurtleDiverCLI {
         let pin = TokenGenerator.combine(passcode: passcode, code: token)
 
         let hasTerminal = ConnectCommand.hasTerminal()
-        // The administrator password, if the caller offered one. Read after the
-        // credentials above so that a missing VPN password — the more common
-        // failure — is reported before anything is asked for, and read here, not
-        // earlier, so it is held for as little of the command's life as possible.
-        let secret = try sudoPassword(passwordSource, output: output)
-        for line in ConnectCommand.warmUpNotes(
-            strategy: elevation,
-            hasTerminal: hasTerminal,
-            hasPassword: secret != nil
-        ) {
-            output.note(line)
-        }
-        let warmUp = ConnectCommand.warmUp(
-            hasTerminal: hasTerminal,
-            strategy: elevation,
-            secret: secret
-        )
-        guard warmUp == .warmed else {
-            throw CLIFailure(
-                .needsApproval,
-                ConnectCommand.failureDetail(warmUp, strategy: elevation, hasTerminal: hasTerminal)
+        if authentication == .required {
+            // The administrator password, if the caller offered one. Read after the
+            // credentials above so that a missing VPN password — the more common
+            // failure — is reported before anything is asked for, and read here, not
+            // earlier, so it is held for as little of the command's life as possible.
+            let secret = try sudoPassword(passwordSource, output: output)
+            for line in ConnectCommand.warmUpNotes(
+                strategy: elevation,
+                hasTerminal: hasTerminal,
+                hasPassword: secret != nil
+            ) {
+                output.note(line)
+            }
+            let warmUp = ConnectCommand.warmUp(
+                hasTerminal: hasTerminal,
+                strategy: elevation,
+                secret: secret
             )
+            guard warmUp == .warmed else {
+                throw CLIFailure(
+                    .needsApproval,
+                    ConnectCommand.failureDetail(warmUp, strategy: elevation, hasTerminal: hasTerminal)
+                )
+            }
+        } else {
+            // Nothing to authenticate, so nothing is read either: the launch is
+            // still `sudo -n`, and it succeeds because the rule exempts it.
+            for line in ConnectCommand.exemptionNotes(hasPassword: passwordSource != nil) {
+                output.note(line)
+            }
         }
 
         OpenConnectPidFile.prepareDirectory()
@@ -373,7 +392,33 @@ public enum TurtleDiverCLI {
       stack runs pam_tid (Touch ID for sudo) its dialog comes first, nothing can
       read the pipe, and the option is refused with exit 6 rather than left to
       wait on a dialog nobody asked for. Without the option that Mac prompts as
-      usual.
+      usual — and where the agent command is exempt from authentication (see
+      Unattended connects) no refresh and no password are needed at all.
+
+    Unattended connects
+      connect starts the agent with `sudo -n`, so sudo has to be authenticated
+      first. With nobody at the machine, only a stack that reads a piped password
+      can do that, which is what --sudo-password is for. Two ways to get there,
+      both of which you install yourself with the administrator password, and
+      both of which undo by deleting what you added:
+
+      1. Exempt the agent command, and nothing else. In
+         /etc/sudoers.d/turtlediver (write it with `sudo visudo -f`):
+
+           Defaults!/usr/local/libexec/turtlediver-agent !authenticate
+
+         connect notices this (`sudo -n -l`), skips the refresh and needs no
+         password at all, and Touch ID still guards every other use of sudo. The
+         cost is that anything running as you can then start a root tunnel
+         without authenticating.
+
+      2. Or drop Touch ID for sudo machine-wide, by taking the pam_tid line out
+         of /etc/pam.d/sudo_local, and keep --sudo-password keychain (or stdin)
+         as the connect's credential.
+
+      The CLI makes neither change and never relaxes sudo on its own; docs/CLI.md
+      has the full note, including the Keychain prompts an unattended connect
+      also has to get past.
 
     connect runs in the foreground: the tunnel lives as long as the command does,
     and Ctrl-C ends it. `disconnect` is for a tunnel whose driver is already gone.

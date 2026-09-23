@@ -63,7 +63,7 @@ mean something else.
 | 3 | Not configured — no host, no profile, or the agent is not installed. |
 | 4 | Already connected (`connect`). |
 | 5 | Reserved for a command that needs a tunnel and there is none. No command uses it today; `disconnect` deliberately does not. |
-| 6 | Needs approval: a dialog would be needed and no password can replace it — no terminal and none supplied, or `--sudo-password` on a machine whose `sudo` reaches a dialog first. |
+| 6 | Needs approval: a dialog would be needed and no password can replace it — no terminal and none supplied, or `--sudo-password` on a machine whose `sudo` reaches a dialog first and whose agent command is not exempt from authentication. |
 | 7 | A tool is missing (`openconnect`, `stoken`, `vpn-slice`). |
 | 8 | The tunnel did not stop. |
 | 9 | Timed out. |
@@ -146,9 +146,9 @@ on such a machine **before it starts anything**:
 $ turtlediver connect --sudo-password keychain
 pam_tid answers sudo on this Mac, so its own Touch ID or administrator-password
   dialog appears before anything can read a piped password, and --sudo-password
-  cannot skip it; nothing was started. Run the same connect without the option
-  and answer the prompt, or take the pam_tid line out of /etc/pam.d/sudo_local
-  if a connect has to run with nobody at the machine.
+  cannot skip it; nothing was started. Run the same command without the option
+  and answer the prompt, or run `turtlediver help` and read Unattended connects
+  for the two ways to do this with nobody at the machine.
 $ echo $?
 6
 ```
@@ -157,8 +157,8 @@ Exit 6 in milliseconds, with nothing read and nothing run. That is the honest
 answer for a caller that cannot see a dialog, and the same code a mistyped
 source gets. The option is not silently ignored and the dialog route is not
 quietly taken in its place: either would leave the caller believing something
-happened that did not. On such a Mac an unattended connect needs either a
-`sudo_local` without that line, or a person.
+happened that did not. On such a Mac an unattended connect needs one of the two
+setups in "Unattended connects" below, or a person.
 
 The password is not remembered between commands. `disconnect` needs its own
 `--sudo-password` if it needs one at all, and where this machine reads a pipe a
@@ -169,6 +169,94 @@ so a scripted session authenticates the same way at both ends.
 lives in **Settings ▸ Advanced**. A Mac that answers `sudo` with Touch ID may
 never have stored one, which is why a missing item is a named failure and not a
 silent fallback to a prompt.
+
+#### Unattended connects
+
+A connect with nobody at the machine has to get past two doors, and only one of
+them is the password:
+
+1. **`sudo` has to be authenticated** before the agent is launched, because the
+   launch is `sudo -n` and its timestamp belongs to this process. With no
+   terminal and no readable pipe, nothing can do that.
+2. **The two VPN credentials are read from the Keychain**, and the first read of
+   each item may raise a consent dialog. See "The VPN credentials, from the
+   Keychain" below for what makes those durable.
+
+There are two ways past the first door. Both are machine changes the *user*
+installs, once, with the administrator password; the CLI makes neither on its own
+and never relaxes `sudo` silently.
+
+**Exempt the agent command, and nothing else** — the one that keeps Touch ID for
+sudo everywhere else. Write `/etc/sudoers.d/turtlediver` (with `sudo visudo -f`,
+which refuses to save a broken file):
+
+```
+Defaults!/usr/local/libexec/turtlediver-agent !authenticate
+```
+
+That is the path the app installs the agent at, root-owned, so the rule names the
+thing that actually runs rather than a shell. With it in place,
+`sudo -n /usr/local/libexec/turtlediver-agent …` runs with no authentication at
+all — no dialog, no timestamp, no password — and `connect` needs no
+`--sudo-password`:
+
+```sh
+nohup turtlediver connect </dev/null >~/turtlediver.log 2>&1 &
+```
+
+The CLI asks one question before it decides anything,
+`sudo -n -l /usr/local/libexec/turtlediver-agent`, which is a request for policy
+and not an attempt to authenticate: `-n` turns "a password would be required"
+into a failure instead of a prompt, so the question is safe to ask with nobody
+watching. Exit 0 — with the command named in the answer, so a `sudo` that exits 0
+for some other reason cannot be read as permission — means the launch will
+authenticate nothing, and then:
+
+* the refresh is skipped: there is nothing to warm, so no dialog is raised and no
+  terminal is needed;
+* a `--sudo-password` the caller offered is **not read**, and the CLI says so. A
+  door nobody has to open should not raise a Keychain dialog on the way past;
+* the refusal described above does not apply, because it is only true of a launch
+  that has to authenticate.
+
+Every other answer is treated as the ordinary case and `sudo` is refreshed as
+usual. The conservative direction is deliberate: an unnecessary refresh costs a
+prompt, and a skipped refresh costs a failed launch after the caller was told
+nothing was needed.
+
+```console
+$ turtlediver connect --sudo-password keychain
+sudo -n -l: the agent command needs no authentication on this machine, so sudo
+  is not refreshed and no prompt or dialog can appear.
+nothing to warm: the administrator password that was supplied was not read.
+connected: openconnect pid 51043 — press Ctrl-C to end the tunnel
+```
+
+The cost is worth stating plainly: with that rule in place, **anything running as
+this user can start a root tunnel without authenticating**. That is what
+"unattended" means, and it is the same property the app has when it stores the
+administrator password. Scope the rule to one user (`Defaults:someone!…`) or drop
+the file to undo it.
+
+**Or take Touch ID out of `sudo` machine-wide** — comment the line out of
+`/etc/pam.d/sudo_local`, the file macOS provides for local edits, and keep
+`--sudo-password` as the connect's credential:
+
+```sh
+read -rs pw; printf '%s\n' "$pw" | turtlediver connect --sudo-password stdin
+```
+
+This is the strategy the app's own `ElevationPolicy` calls `.storedPassword`, and
+the one `docs/ELEVATION.md` describes as the only way to elevate with nobody at
+the keyboard. Its cost is the whole machine: Touch ID stops being used for `sudo`
+at all, including the app's own connects, until the line comes back.
+
+A sudoers rule for the *app* is not an option, and not an oversight: the app's
+plan runs several different `sudo` commands from one generated script (`sudo -v`,
+the `/etc/hosts` cleanup, the launch), so no single command can be named — only
+`/bin/sh`, which would exempt everything. Unattended connects are a CLI property
+because the CLI runs exactly one thing as root.
+
 #### What happens to the password
 
 One value in this tool may never be seen by anyone, so the rules are stated

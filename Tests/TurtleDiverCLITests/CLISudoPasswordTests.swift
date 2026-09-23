@@ -407,7 +407,7 @@ final class CLISudoPasswordTests: XCTestCase {
         }
     }
 
-    func testASourceOnATouchIDMachineIsRefusedWithBothRemedies() throws {
+    func testASourceOnATouchIDMachineIsRefusedWithItsRemedies() throws {
         for source in SudoPasswordSource.allCases {
             let refusal = try XCTUnwrap(
                 ElevationRoute.refusal(for: source, on: .systemPrompt),
@@ -418,11 +418,18 @@ final class CLISudoPasswordTests: XCTestCase {
             XCTAssertEqual(refusal.code, .needsApproval)
             let detail = refusal.message
             XCTAssertTrue(detail.contains("pam_tid"), "the refusal does not name what answers: \(detail)")
-            XCTAssertTrue(detail.contains("/etc/pam.d/sudo_local"), "the refusal does not say where: \(detail)")
             XCTAssertTrue(detail.contains("nothing was started"), "the refusal does not say nothing ran: \(detail)")
             XCTAssertTrue(
                 detail.contains("without the option"),
                 "the refusal does not offer the dialog route: \(detail)"
+            )
+            // And where the machine-wide route used to be the only one named, the
+            // exemption now has to be reachable from here: it is the route that
+            // keeps Touch ID for everything else, and this message is the only
+            // thing a caller sees before they go looking.
+            XCTAssertTrue(
+                detail.contains("turtlediver help"),
+                "the refusal does not point at the recipe: \(detail)"
             )
         }
     }

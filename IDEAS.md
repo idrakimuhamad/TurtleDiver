@@ -287,7 +287,12 @@ rule that a closed standard input ends the tunnel (so `connect` is foreground
 and blocking), and elevation by `sudo`'s own prompt plus exit code 6 when there
 is no terminal. The state question in idea 13 turned out to need no channel to
 the app at all: a pid file and the agent's line protocol were already enough, so
-the CLI works with the app closed. What has **not** been picked up from this
+the CLI works with the app closed. Elevation got its own two answers later:
+`--sudo-password keychain|stdin` for a caller with no terminal, refused with
+exit 6 where `pam_tid` answers `sudo` first and never quietly replaced by another
+door; and, for a connect with nobody at the machine, a sudoers exemption naming
+the installed agent — detected with `sudo -n -l`, after which the refresh and the
+password read are both skipped. What has **not** been picked up from this
 card: `profile use`, `policy set` and `requests --json` are absent, because they
 are writes and the CLI is deliberately read-only apart from the tunnel.
 

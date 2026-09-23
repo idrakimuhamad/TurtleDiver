@@ -76,7 +76,12 @@ one click (`brew install`, run as you, no password).
 app already has and never writes them. It never *stores* your administrator
 password: by default it authenticates through `sudo`'s own prompt, and a
 scripted caller with no terminal can hand it one with
-`--sudo-password keychain|stdin` for the single run that needs it.
+`--sudo-password keychain|stdin` for the single run that needs it. A connect
+that has to run with nobody at the machine is a setup you install once — a
+sudoers rule exempting `/usr/local/libexec/turtlediver-agent` from
+authentication, or dropping the `pam_tid` line from `/etc/pam.d/sudo_local`;
+both recipes are under **Unattended connects** in
+[`docs/CLI.md`](docs/CLI.md).
 
 ## Requirements
 
@@ -376,10 +381,14 @@ end.
 `connect` is deliberately **foreground**: it holds the tunnel helper's standard
 input open, and closing that pipe is what ends the tunnel. Backgrounding it
 would end the tunnel the moment the command looked like it had worked. It never
-reads or stores your administrator password; it uses `sudo`'s own prompt on the
-terminal it is running in, and with no terminal it exits `6` rather than
-raising a dialog nothing can answer. [`docs/CLI.md`](docs/CLI.md) is the full
-contract.
+stores your administrator password; it uses `sudo`'s own prompt on the terminal
+it is running in, and with no terminal it exits `6` rather than raising a dialog
+nothing can answer — unless the agent command is exempt from authentication, in
+which case the refresh is skipped and no password is read at all. Where the
+machine's PAM stack can read a pipe it can also be *handed* one for a single run
+with `--sudo-password keychain|stdin`. [`docs/CLI.md`](docs/CLI.md) is the full
+contract, including the two setups that let a connect run with nobody at the
+machine.
 
 ## How it is built
 

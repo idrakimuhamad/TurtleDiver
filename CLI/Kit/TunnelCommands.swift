@@ -42,9 +42,9 @@ public enum ElevationRoute {
             "\(ElevationProbe.touchIDModuleName) answers sudo on this Mac, so its own Touch ID or"
                 + " administrator-password dialog appears before anything can read a piped password,"
                 + " and --sudo-password cannot skip it; nothing was started."
-                + " Run the same command without the option and answer the prompt, or take the"
-                + " \(ElevationProbe.touchIDModuleName) line out of /etc/pam.d/sudo_local if a connect has"
-                + " to run with nobody at the machine."
+                + " Run the same command without the option and answer the prompt, or run"
+                + " `turtlediver help` and read Unattended connects for the two ways to do this with"
+                + " nobody at the machine."
         )
     }
 }
@@ -88,6 +88,73 @@ public enum ConnectCommand {
             if result.timedOut { self = .timedOut; return }
             self = passwordWasSupplied ? .passwordRefused : .refused
         }
+    }
+
+    /// Whether the launch will need an authenticated `sudo` at all.
+    ///
+    /// The ordinary answer is yes: the agent is started with `sudo -n`, whose
+    /// timestamp has to be warmed by this same process, and the three routes in
+    /// `warmUp` are about how. But a machine can be set up so that the *agent
+    /// command alone* needs no authentication — a sudoers rule naming the
+    /// installed agent, which is the way to let a connect run with nobody at the
+    /// machine without turning Touch ID off for everything else (`docs/CLI.md`
+    /// has the file, and what it costs). Where that rule exists there is nothing
+    /// to warm and nobody to ask, and a caller that offered a password should not
+    /// be refused, or prompted for one, on a machine where nothing would read it.
+    public enum LaunchAuthentication: Equatable {
+        /// `sudo -n <agent>` runs with no refresh, no prompt and no password.
+        case notRequired
+        /// The launch needs a warm timestamp: see `warmUp` for the three routes.
+        case required
+    }
+
+    /// How long the one *question* may take. `sudo -l` reads policy files and
+    /// authenticates nobody, so it cannot be waiting on a dialog that has to be
+    /// answered; a machine slower than this is treated as the ordinary case.
+    public static let authenticationProbeTimeout: TimeInterval = 5
+
+    /// Asks sudo whether the launch itself needs a password, without asking
+    /// anybody anything.
+    ///
+    /// `sudo -n -l <command>` is a question about policy, and `-n` turns "a
+    /// password would be required" into a failure rather than a prompt — measured
+    /// on this Mac, for a user with no exemption: exit 1 and `sudo: a password is
+    /// required`. Exit 0 means the command may run without a password, and the
+    /// command's path has to appear in the answer as well, so a `sudo` that exits
+    /// 0 for some other reason cannot be read as permission.
+    ///
+    /// Every other answer — refused, unanswered, unreadable — is `.required`,
+    /// which is the direction that cannot hurt: an unnecessary refresh costs a
+    /// prompt, a missing one costs a failed launch. The runner is the app's
+    /// bounded one, which gives the child no standard input at all, so a `sudo`
+    /// that would find a way to prompt cannot.
+    public static func launchAuthentication(
+        agentPath: String,
+        runner: BoundedProcessRunning = SystemBoundedProcessRunner(),
+        timeout: TimeInterval = authenticationProbeTimeout
+    ) -> LaunchAuthentication {
+        let answer = try? runner.run(
+            executable: ElevatedTermination.sudo,
+            arguments: ["-n", "-l", agentPath],
+            timeout: timeout
+        )
+        guard let answer, !answer.timedOut, answer.terminationStatus == 0,
+              answer.stdout.contains(agentPath) else { return .required }
+        return .notRequired
+    }
+
+    /// What to say when there is nothing to authenticate: the refresh is skipped
+    /// because there is nothing to refresh, and a password the caller offered is
+    /// left unread rather than prompted for with no reader waiting.
+    public static func exemptionNotes(hasPassword: Bool) -> [String] {
+        var lines = [
+            "sudo -n -l: the agent command needs no authentication on this machine, so sudo is not"
+                + " refreshed and no prompt or dialog can appear.",
+        ]
+        if hasPassword {
+            lines.append("nothing to warm: the administrator password that was supplied was not read.")
+        }
+        return lines
     }
 
     /// What to say *before* authenticating, so a caller learns whether a dialog
@@ -210,6 +277,9 @@ public enum ConnectCommand {
     /// * **No password, no terminal**: `sudo -n -v` asks nobody. It succeeds
     ///   when the caller already warmed `sudo` *for this process*, and fails in
     ///   milliseconds when it did not, which is the case exit 6 exists for.
+    ///
+    /// A machine that exempts the agent command needs none of this, and
+    /// `launchAuthentication` answers that before a route is chosen at all.
     ///
     /// Whichever route runs, the timestamp it warms belongs to this process,
     /// which is the one the later `sudo -n` around the agent runs under, and
