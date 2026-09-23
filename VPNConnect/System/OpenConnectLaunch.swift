@@ -60,6 +60,15 @@ public enum OpenConnectCommand {
     /// is never read, and the connect then waits for a dialog nobody can answer
     /// while a root-owned `sudo` sits blocked.
     ///
+    /// `askpassHelper` is the way out of that wait without a person: when it is
+    /// given *and* the strategy is one that would otherwise ask, every `sudo` in
+    /// the plan becomes `sudo -A` and the script exports `SUDO_ASKPASS` pointing
+    /// at that program, so the password comes from the helper's own output and
+    /// never enters this script, its argv or its pipe. Passing a helper where the
+    /// pipe is read (`.storedPassword`) changes nothing: that mode names its own
+    /// door, and `SudoPasswordDelivery.resolve(strategy:askpassHelper:)` is what
+    /// decides which of the two a connect is in.
+    ///
     /// The privileged work runs in its own process group, whose id is written to
     /// `pgidFile` so a wrapper that outlives the app can be found again. See
     /// `groupedWrapper` for why that is the only handle that survives.
@@ -71,28 +80,44 @@ public enum OpenConnectCommand {
         vpnPassword: String,
         searchPath: String = defaultSearchPath,
         elevation: ElevationStrategy = .storedPassword,
+        askpassHelper: String? = nil,
         pgidFile: String = ElevationRecord.path.path
     ) -> OpenConnectLaunchPlan {
         let escapedArguments = arguments.map(shellEscape).joined(separator: " ")
+        let askpass = askpassPath(elevation, askpassHelper)
         let body = [
-            timestampRefreshStep(elevation),
+            timestampRefreshStep(elevation, askpass: askpass),
             elevation == .neverPrompt ? timestampStillWarmStep : nil,
             // `2>/dev/null` is kept from the old pipeline on purpose: a stale
             // entry that cannot be cleaned is not a connection failure, and its
             // stderr would otherwise be parsed as an error burst. The still-warm
             // check above runs first, so nothing it reports is lost here.
-            hostsCleanupStep(elevation) + " 2>/dev/null",
+            hostsCleanupStep(elevation, askpass: askpass) + " 2>/dev/null",
             "printf '%s\\n%s\\n' \"$\(pinVariable)\" \"$\(passwordVariable)\""
-                + " | \(launchInvocation(elevation)) \(shellEscape(openconnectPath)) \(escapedArguments)"
+                + " | \(launchInvocation(elevation, askpass: askpass != nil)) \(shellEscape(openconnectPath)) \(escapedArguments)"
         ].compactMap { $0 }.joined(separator: "; ")
 
         let variables = credentialVariables(elevation)
         return OpenConnectLaunchPlan(
-            script: script(searchPath: searchPath, variables: variables,
+            script: script(searchPath: searchPath, variables: variables, askpass: askpass,
                           body: groupedWrapper(body: body, variables: variables, pgidFile: pgidFile)),
             standardInput: credentialLines(credentialValues(elevation, adminPassword: adminPassword,
                                                             pin: pin, vpnPassword: vpnPassword))
         )
+    }
+
+    /// The helper's path when this plan may use the askpass door, and nil when it
+    /// may not.
+    ///
+    /// Two conditions, and both are needed. The strategy must be one that would
+    /// otherwise raise a dialog — `.storedPassword` reads the pipe, and
+    /// `.neverPrompt` asks nobody anything, so a helper would be dead weight in
+    /// both. And a helper must actually have been given: nil is the ordinary case
+    /// on a Mac with Touch ID where nobody has prepared one, and it means the
+    /// connect waits for a person exactly as it did before.
+    public static func askpassPath(_ elevation: ElevationStrategy, _ helper: String?) -> String? {
+        guard elevation.waitsForTheSystem, let helper, !helper.isEmpty else { return nil }
+        return helper
     }
 
     /// The `sudo` prefix for the launch itself. Deliberately never `-S`: stdin
@@ -102,8 +127,13 @@ public enum OpenConnectCommand {
     /// the script with a marker if it cannot warm the timestamp, so a plain
     /// `sudo` here cannot prompt. In `.neverPrompt` mode `-n` states that
     /// outright.
-    public static func launchInvocation(_ elevation: ElevationStrategy) -> String {
-        elevation == .neverPrompt ? "sudo -n" : "sudo"
+    ///
+    /// `-A` is the third form, and it is not a prompt: it runs a *program* whose
+    /// output sudo reads, so it keeps the "cannot block on a dialog" property
+    /// that made the refresh step necessary.
+    public static func launchInvocation(_ elevation: ElevationStrategy, askpass: Bool = false) -> String {
+        if elevation == .neverPrompt { return "sudo -n" }
+        return askpass ? "sudo -A" : "sudo"
     }
 
     /// The credential lines the connect script reads, in the order the pipe
@@ -145,16 +175,26 @@ public enum OpenConnectCommand {
     ///   fails immediately, with a marker, so the connect reports a cause
     ///   instead of timing out. No connect resolves to it — see
     ///   `ElevationStrategy.resolve(mode:)`.
-    private static func timestampRefreshStep(_ elevation: ElevationStrategy) -> String {
+    ///
+    /// `askpass` is the fourth case, and it is the one that removes the wait
+    /// rather than the prompting: `sudo -A` authenticates by *running* a program,
+    /// so on a machine where a person could have answered the dialog, nobody has
+    /// to. It replaces the plain `sudo -v` of `.systemPrompt` and nothing else;
+    /// `-n` and `-S` keep their meaning, because both exist to avoid a human and
+    /// are already good at it. `</dev/null` is kept: a helper that fails must fail,
+    /// not fall back to reading a terminal that is not there.
+    private static func timestampRefreshStep(_ elevation: ElevationStrategy, askpass: String?) -> String {
         switch elevation {
         case .storedPassword:
             return "if ! sudo -n -v >/dev/null 2>&1; then"
                 + " printf '%s\\n' \"$\(adminVariable)\" | sudo -S -v"
                 + " || { \(marker(.storedPasswordRejected)); exit 1; }; fi"
         case .systemPrompt:
+            let invocation = askpass == nil ? "sudo -v" : "sudo -A -v"
+            let reason = askpass == nil ? ElevationBlockReason.systemPromptUnanswered : .askpassRefused
             return "if ! sudo -n -v >/dev/null 2>&1; then"
-                + " sudo -v </dev/null"
-                + " || { \(marker(.systemPromptUnanswered)); exit 1; }; fi"
+                + " \(invocation) </dev/null"
+                + " || { \(marker(reason)); exit 1; }; fi"
         case .neverPrompt:
             return "if ! sudo -n -v >/dev/null 2>&1; then"
                 + " \(marker(.timestampExpired)); exit 1; fi"
@@ -177,13 +217,13 @@ public enum OpenConnectCommand {
     /// the same process context that just authenticated. Cleaning from the app
     /// instead would run `sudo` as a child of the app — a different parent, hence
     /// a different timestamp record — and fail with "a password is required".
-    private static func hostsCleanupStep(_ elevation: ElevationStrategy) -> String {
+    private static func hostsCleanupStep(_ elevation: ElevationStrategy, askpass: String?) -> String {
         switch elevation {
         case .storedPassword:
             return "printf '%s\\n' \"$\(adminVariable)\""
                 + " | sudo -S sed -i '' '/# vpn-slice-/d' /etc/hosts"
         case .systemPrompt:
-            return "sudo sed -i '' '/# vpn-slice-/d' /etc/hosts"
+            return "\(askpass == nil ? "sudo" : "sudo -A") sed -i '' '/# vpn-slice-/d' /etc/hosts"
         case .neverPrompt:
             // A no-prompt launch cleans too, and keeps the same no-prompt rule: a
             // stale entry it cannot remove is reported, not asked about.
@@ -248,15 +288,23 @@ public enum OpenConnectCommand {
         + " rm -f \(shellEscape(pgidFile)); \(unsetStep(variables)); exit $status"
     }
 
-    /// `export PATH=…; read …; body`
+    /// `export PATH=…; export SUDO_ASKPASS=…; read …; body`
     ///
     /// A failed `read` exits instead of continuing: an empty credential sent to
     /// `sudo -S` would fail anyway, and this way the failure is one line in the
     /// log rather than a confusing sudo prompt.
-    private static func script(searchPath: String, variables: [String], body: String) -> String {
+    ///
+    /// The askpass export goes here, before any `sudo`, because `sudo` reads the
+    /// variable from its own environment: a path set after the first `sudo` would
+    /// apply to later steps only, and the connect would look as if the helper were
+    /// sometimes used. It is a *path* that travels this way and never a password —
+    /// that is the whole point of the door, and `AskpassProgramTests` pins it.
+    private static func script(searchPath: String, variables: [String], askpass: String? = nil,
+                               body: String) -> String {
         let reads = variables.map { "IFS= read -r \($0) || exit 1" }.joined(separator: "; ")
         let prefix = reads.isEmpty ? "" : "\(reads); "
-        return "export PATH=\(shellEscape(searchPath)):$PATH; \(prefix)\(body)"
+        let helper = askpass.map { "export SUDO_ASKPASS=\(shellEscape($0)); " } ?? ""
+        return "export PATH=\(shellEscape(searchPath)):$PATH; \(helper)\(prefix)\(body)"
     }
 
     private static func unsetStep(_ variables: [String]) -> String {

@@ -193,10 +193,23 @@ evidence rather than a guarantee. It was measured on this machine's version; a
 cheap probe after a macOS update is `SUDO_ASKPASS=/usr/bin/false sudo -A -v`,
 and a dialog appearing means the door has closed again.
 
+**The app uses the same door, with a helper of its own** (§11).
+`OpenConnectCommand.launchPlan` takes an optional helper path, and when it is
+given — and only where the strategy is one that would otherwise ask — every
+privileged step in the plan becomes `sudo -A`, with `SUDO_ASKPASS` exported ahead
+of the first one, the timestamp refresh included. The password stays out of the
+script, out of argv and out of the pipe: openconnect still receives exactly its
+PIN and account password. Where the pipe *is* read the helper is ignored rather
+than used, because that mode already names its own door, and one function —
+`SudoPasswordDelivery.resolve(strategy:askpassHelper:)` — decides which of the
+two a connect is in, so the app and the command line cannot answer differently.
+Without a helper the plan is what it always was: a dialog a person answers, and
+the status that says so if nobody does.
+
 ### 2. Fail loud, and name the cause
 
 The script writes one line to stderr before it exits, and the app matches that
-line by **exact trimmed equality** — never `contains`, because two of the three
+line by **exact trimmed equality** — never `contains`, because three of the four
 markers mention `sudo` and openconnect's own output must not be able to pass for
 one. Each marker is `turtlediver: elevation ` followed by the reason, and maps to
 its own status:
@@ -206,6 +219,11 @@ its own status:
 | `sudo timestamp expired before openconnect could use it` | `Failed - Elevation Expired` |
 | `the system Touch ID or password dialog was not answered` | `Failed - Elevation Blocked (Touch ID)` |
 | `sudo could not authenticate with the stored administrator password` | `Failed - Admin Password` |
+| `the askpass helper did not supply an administrator password` | `Failed - Admin Password` |
+
+The two password failures share a status on purpose: the remedy is the same
+sentence, and the log line above it already says which door was tried. Their
+details differ, and a test pins that the statuses are otherwise one per reason.
 
 The status reaches the log, the status hero and History, and each carries a
 one-line remedy. A 90 s timeout with a system dialog pending is classified the

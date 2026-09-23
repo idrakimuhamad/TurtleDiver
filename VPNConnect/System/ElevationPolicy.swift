@@ -47,6 +47,33 @@ public enum SudoPasswordDelivery: Equatable, Sendable, CaseIterable {
     /// password line only on this route, and on the askpass route the same pipe
     /// is left to the agent's credentials alone.
     public var writesThePasswordToStandardInput: Bool { self == .standardInput }
+
+    /// Which door a password goes through on a machine that behaves as
+    /// `strategy` says, or nil when no password can travel at all.
+    ///
+    /// The decision the app and the tool must make the same way, so it is a
+    /// function of the strategy rather than a setting:
+    ///
+    /// * Where the pipe is read — no module in front of it — `-S` is used. It is
+    ///   one process fewer and needs no helper installed, and asking the Keychain
+    ///   for a password to hand a program that will not read it would be theatre.
+    /// * Where `pam_tid` answers, the pipe is dead, and the helper is the only
+    ///   door left: `-A` with the prepared helper's path. Without a helper there is
+    ///   no door, and the honest answer is nil — the connect then waits for the
+    ///   system dialog, which is what it did before this existed.
+    /// * Where nothing is asked at all there is nothing to deliver, so nil.
+    ///
+    /// A nil here is not a failure. It is the statement "no stored password is
+    /// used by this connect", which is the correct state on a Mac whose sudo
+    /// stack answers with Touch ID and whose user has not prepared a helper.
+    public static func resolve(
+        strategy: ElevationStrategy,
+        askpassHelper: String? = nil
+    ) -> SudoPasswordDelivery? {
+        if strategy.pipesTheStoredPassword { return .standardInput }
+        guard strategy.waitsForTheSystem else { return nil }
+        return askpassHelper == nil ? nil : .askpass
+    }
 }
 
 /// What the connect path does about elevation, decided before anything runs.
@@ -227,6 +254,7 @@ public enum ElevationBlockReason: String, CaseIterable, Sendable {
     case timestampExpired = "sudo timestamp expired before openconnect could use it"
     case systemPromptUnanswered = "the system Touch ID or password dialog was not answered"
     case storedPasswordRejected = "sudo could not authenticate with the stored administrator password"
+    case askpassRefused = "the askpass helper did not supply an administrator password"
 
     /// Prefix that makes a marker line recognisable (and un-ignorable) in the log.
     public static let markerPrefix = "turtlediver: elevation "
@@ -239,7 +267,7 @@ public enum ElevationBlockReason: String, CaseIterable, Sendable {
         switch self {
         case .timestampExpired: return "Failed - Elevation Expired"
         case .systemPromptUnanswered: return ElevationFailure.touchIDStatus
-        case .storedPasswordRejected: return "Failed - Admin Password"
+        case .storedPasswordRejected, .askpassRefused: return "Failed - Admin Password"
         }
     }
 
@@ -253,6 +281,9 @@ public enum ElevationBlockReason: String, CaseIterable, Sendable {
                 + " Connect again with the app in front so the dialog can be answered."
         case .storedPasswordRejected:
             return "The stored administrator password was not accepted. Update it in Settings ▸ VPN."
+        case .askpassRefused:
+            return "sudo asked the helper for the stored administrator password and got nothing back."
+                + " Check the password in Settings ▸ VPN, and allow the helper to read it when macOS asks."
         }
     }
 

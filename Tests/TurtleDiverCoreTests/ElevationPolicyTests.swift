@@ -203,9 +203,24 @@ final class ElevationPolicyTests: XCTestCase {
         XCTAssertEqual(ElevationBlockReason.systemPromptUnanswered.historyStatus, ElevationFailure.touchIDStatus)
         XCTAssertEqual(ElevationBlockReason.timestampExpired.historyStatus, "Failed - Elevation Expired")
         XCTAssertEqual(ElevationBlockReason.storedPasswordRejected.historyStatus, "Failed - Admin Password")
+        XCTAssertEqual(ElevationBlockReason.askpassRefused.historyStatus, "Failed - Admin Password")
 
-        let statuses = Set(ElevationBlockReason.allCases.map(\.historyStatus))
-        XCTAssertEqual(statuses.count, ElevationBlockReason.allCases.count, "two reasons share a History status")
+        // The failure that is the *user's to fix* shares a status with the one
+        // that is also about the stored password: a person reading History does
+        // not need two labels for "the administrator password did not work",
+        // and the log line above it says which door was tried. Every other
+        // reason still needs its own wording, so the rule is pinned the way it
+        // is actually meant — one status per *remedy*.
+        let remedies: [String: [ElevationBlockReason]] = Dictionary(grouping: ElevationBlockReason.allCases,
+                                                                   by: { $0.historyStatus })
+        for (status, reasons) in remedies where reasons.count > 1 {
+            let details: Set<String> = Set(reasons.map { $0.detail })
+            XCTAssertEqual(details.count, reasons.count,
+                           "\(status) covers several reasons that say the same thing")
+        }
+        let shared = remedies.values.filter { $0.count > 1 }.count
+        XCTAssertEqual(shared, 1,
+                       "exactly one pair of reasons shares a status, and it is the password pair")
     }
 
     // MARK: - The process-group record

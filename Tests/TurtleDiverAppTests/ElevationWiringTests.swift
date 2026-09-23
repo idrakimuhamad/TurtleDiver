@@ -179,7 +179,7 @@ final class ElevationWiringTests: XCTestCase {
                        "…nor build a standalone cleanup plan")
 
         let launch = try strippedCode(at: "VPNConnect/System/OpenConnectLaunch.swift")
-        XCTAssertTrue(launch.contains("hostsCleanupStep(elevation)"),
+        XCTAssertTrue(launch.contains("hostsCleanupStep(elevation"),
                       "the plan must still remove stale entries")
         XCTAssertFalse(launch.contains("func hostsCleanupPlan"),
                        "no caller, no plan builder")

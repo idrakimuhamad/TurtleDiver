@@ -30,6 +30,7 @@ final class OpenConnectLaunchTests: XCTestCase {
                           openconnectPath: String = "/opt/homebrew/bin/openconnect",
                           searchPath: String = OpenConnectCommand.defaultSearchPath,
                           elevation: ElevationStrategy = .storedPassword,
+                          askpassHelper: String? = nil,
                           pgidFile: String = "/tmp/turtlediver-test-elevation.pgid") -> OpenConnectLaunchPlan {
         OpenConnectCommand.launchPlan(
             openconnectPath: openconnectPath,
@@ -39,6 +40,7 @@ final class OpenConnectLaunchTests: XCTestCase {
             vpnPassword: password,
             searchPath: searchPath,
             elevation: elevation,
+            askpassHelper: askpassHelper,
             pgidFile: pgidFile
         )
     }
@@ -273,6 +275,101 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(stillWarm.lowerBound < launch.lowerBound)
     }
 
+    // MARK: - The askpass door
+
+    /// The door that lets a Mac with Touch ID for `sudo` connect with nobody at
+    /// the keyboard: every privileged step names `-A`, and the helper's path — a
+    /// path, never a password — is exported before the first `sudo`, because
+    /// `sudo` reads that variable from its own environment.
+    func testTheAskpassPlanNamesTheHelperAndUsesDashAEverywhere() {
+        let helper = "/Applications/TurtleDiver.app/Contents/Library/HelperTools/turtlediver-askpass"
+        let script = makePlan(elevation: .systemPrompt, askpassHelper: helper).script
+
+        XCTAssertTrue(script.contains("export SUDO_ASKPASS='\(helper)'; "),
+                      "the helper's path must be in sudo's own environment")
+        XCTAssertTrue(script.contains("sudo -A -v </dev/null"),
+                      "the refresh must authenticate through the helper, not a dialog")
+        XCTAssertTrue(script.contains("sudo -A sed -i '' '/# vpn-slice-/d' /etc/hosts"))
+        XCTAssertTrue(script.contains("| sudo -A '/opt/homebrew/bin/openconnect'"))
+        XCTAssertFalse(script.contains("sudo -S"), "the pipe is dead on this machine")
+        XCTAssertFalse(script.contains("sudo -v </dev/null"),
+                       "a bare -v is the dialog this route exists to avoid")
+    }
+
+    /// The helper replaces the *password*, not the pipe: openconnect still gets
+    /// its PIN and account password, and the administrator password is nowhere —
+    /// not in the script, not in the pipe, not in any variable the script reads.
+    func testTheAskpassPlanKeepsTheAdministratorPasswordOutOfEverything() {
+        let plan = makePlan(elevation: .systemPrompt, askpassHelper: "/tmp/helper")
+
+        XCTAssertFalse(plan.script.contains(admin))
+        XCTAssertFalse(plan.script.contains(OpenConnectCommand.adminVariable))
+        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 2)
+
+        let lines = String(decoding: plan.standardInput, as: UTF8.self)
+        XCTAssertEqual(lines, "\(pin)\n\(password)\n")
+        XCTAssertFalse(lines.contains(admin))
+    }
+
+    /// Without a prepared helper, a machine whose sudo stack asks a person still
+    /// asks a person. That is the behaviour that shipped before this existed, and
+    /// it has to survive: a connect must not silently pretend to be unattended.
+    func testWithoutAHelperTheSystemPromptPlanStillWaitsForAPerson() {
+        let script = makePlan(elevation: .systemPrompt).script
+
+        XCTAssertFalse(script.contains("SUDO_ASKPASS"))
+        XCTAssertFalse(script.contains("sudo -A"))
+        XCTAssertTrue(script.contains("sudo -v </dev/null"))
+        XCTAssertTrue(script.contains(ElevationBlockReason.systemPromptUnanswered.markerLine))
+    }
+
+    /// A helper that runs but supplies nothing is a different failure from a
+    /// dialog nobody answered, and the log has to say which one happened.
+    func testAnAskpassFailureIsReportedAsItsOwnCause() {
+        let script = makePlan(elevation: .systemPrompt, askpassHelper: "/tmp/helper").script
+
+        XCTAssertTrue(script.contains(ElevationBlockReason.askpassRefused.markerLine))
+        XCTAssertFalse(script.contains(ElevationBlockReason.systemPromptUnanswered.markerLine))
+        XCTAssertEqual(ElevationBlockReason.askpassRefused.historyStatus, "Failed - Admin Password")
+        XCTAssertTrue(ElevationBlockReason.askpassRefused.detail.contains("Settings ▸ VPN"))
+    }
+
+    /// Where the pipe is read, a helper is dead weight and the plan says so: the
+    /// mode that cannot raise a dialog names its own door, and a stray helper
+    /// cannot turn `-S` into `-A` behind the caller's back.
+    func testAHelperIsIgnoredWhereThePipeIsRead() {
+        for elevation in [ElevationStrategy.storedPassword, .neverPrompt] {
+            let script = makePlan(elevation: elevation, askpassHelper: "/tmp/helper").script
+            XCTAssertFalse(script.contains("SUDO_ASKPASS"), "\(elevation) exported a helper path")
+            XCTAssertFalse(script.contains("sudo -A"), "\(elevation) used the askpass door")
+        }
+
+        XCTAssertEqual(OpenConnectCommand.askpassPath(.systemPrompt, "/tmp/helper"), "/tmp/helper")
+        XCTAssertNil(OpenConnectCommand.askpassPath(.systemPrompt, nil))
+        XCTAssertNil(OpenConnectCommand.askpassPath(.systemPrompt, ""), "an empty path is not a helper")
+        XCTAssertNil(OpenConnectCommand.askpassPath(.storedPassword, "/tmp/helper"))
+        XCTAssertNil(OpenConnectCommand.askpassPath(.neverPrompt, "/tmp/helper"))
+    }
+
+    /// The path is escaped like any other interpolated value, because it is the
+    /// one thing on this route that does come from outside the script.
+    func testAHelperPathWithAQuoteSurvivesEscaping() {
+        let script = makePlan(elevation: .systemPrompt, askpassHelper: "/tmp/it's here/helper").script
+
+        XCTAssertTrue(script.contains(#"export SUDO_ASKPASS='/tmp/it'\''s here/helper'; "#))
+    }
+
+    /// The same decision, stated once for both callers: the app and the command
+    /// line must not be able to disagree about which door a password takes.
+    func testTheDeliveryFollowsTheStrategyAndTheHelper() {
+        XCTAssertEqual(SudoPasswordDelivery.resolve(strategy: .storedPassword), .standardInput)
+        XCTAssertEqual(SudoPasswordDelivery.resolve(strategy: .systemPrompt, askpassHelper: "/tmp/helper"),
+                       .askpass)
+        XCTAssertNil(SudoPasswordDelivery.resolve(strategy: .systemPrompt),
+                     "no helper, no door: the dialog answers instead")
+        XCTAssertNil(SudoPasswordDelivery.resolve(strategy: .neverPrompt, askpassHelper: "/tmp/helper"))
+    }
+
     // MARK: - The process group
 
     func testThePrivilegedBodyRunsInItsOwnProcessGroup() {
@@ -357,7 +454,7 @@ final class OpenConnectLaunchTests: XCTestCase {
     /// the sandbox too, so a test can never write into the real run directory.
     private func run(
         makePlan: (String) -> OpenConnectLaunchPlan
-    ) throws -> (stdin: String, argv: [String], sudoCalls: [String], recordedPgid: String, openconnectPgid: String, wrapperPid: Int32) {
+    ) throws -> (stdin: String, argv: [String], sudoCalls: [String], recordedPgid: String, openconnectPgid: String, wrapperPid: Int32, askpassCalls: [String], askpassOutput: String) {
         let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("oclaunch-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
@@ -368,6 +465,8 @@ final class OpenConnectLaunchTests: XCTestCase {
         let argvFile = sandbox.appendingPathComponent("openconnect-argv.txt")
         let sudoLog = sandbox.appendingPathComponent("sudo-calls.txt")
         let pgidFile = sandbox.appendingPathComponent("elevation.pgid")
+        let askpassLog = sandbox.appendingPathComponent("askpass-calls.txt")
+        let askpassOut = sandbox.appendingPathComponent("askpass-output.txt")
         let myPgidFile = sandbox.appendingPathComponent("openconnect.pgid")
         let seenPgidFile = sandbox.appendingPathComponent("pgid-file-seen.pgid")
 
@@ -381,7 +480,10 @@ final class OpenConnectLaunchTests: XCTestCase {
         let sudoBody = """
         #!/bin/bash
         # Log the call, swallow the password `-S` expects, drop sudo's own
-        # flags, then run the rest of the command for real.
+        # flags, then run the rest of the command for real. `-A` is honoured the
+        # way sudo honours it: run the program named by SUDO_ASKPASS and read the
+        # password from *its* output — which is how a test can see that the
+        # helper really ran and that the calling script never held a password.
         printf '%s\\n' "$*" >> '\(sudoLog.path)'
         password=0
         args=()
@@ -390,6 +492,10 @@ final class OpenConnectLaunchTests: XCTestCase {
             -S) password=1 ;;
             -v) exit 0 ;;
             -n) ;;
+            -A)
+              printf '%s\n' "$SUDO_ASKPASS" >> '\(askpassLog.path)'
+              "$SUDO_ASKPASS" > '\(askpassOut.path)' 2>/dev/null || exit 1
+              ;;
             *) args+=("$arg") ;;
           esac
         done
@@ -398,6 +504,8 @@ final class OpenConnectLaunchTests: XCTestCase {
         """
         _ = try write("sudo", sudoBody)
         _ = try write("sed", "#!/bin/bash\nexit 0\n")
+        _ = try write("helper", "#!/bin/bash\nprintf '%s\\n' 'askpass-helper-ran'\n")
+        _ = try write("helper-that-refuses", "#!/bin/bash\nexit 1\n")
         let openconnectBody = """
         #!/bin/bash
         printf '%s\\n' "$@" > '\(argvFile.path)'
@@ -443,7 +551,76 @@ final class OpenConnectLaunchTests: XCTestCase {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let stderr = String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         XCTAssertTrue(stderr.isEmpty, "the plan wrote to stderr, which the app parses as log output: \(stderr)")
-        return (received, argv, calls, recordedPgid, openconnectPgid, process.processIdentifier)
+        let askpassCalls = ((try? String(contentsOf: askpassLog, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+        let askpassOutput = (try? String(contentsOf: askpassOut, encoding: .utf8)) ?? ""
+        return (received, argv, calls, recordedPgid, openconnectPgid, process.processIdentifier,
+                askpassCalls, askpassOutput)
+    }
+
+    /// The askpass plan, run for real against a fake `sudo` that honours `-A`
+    /// the way sudo does: it runs `$SUDO_ASKPASS` and reads that program's
+    /// output. Three things are being checked at once, and each is a claim the
+    /// design rests on — that the path really reaches sudo's environment, that
+    /// the helper really is what ran instead of a dialog, and that the connect's
+    /// own pipe still carries only the two tunnel credentials.
+    func testTheAskpassPlanRunsTheHelperAndKeepsTheConnectPipeClean() throws {
+        var helperPath = ""
+        let result = try run { sandbox in
+            helperPath = sandbox + "/helper"
+            return makePlan(openconnectPath: sandbox + "/openconnect", searchPath: sandbox,
+                            elevation: .systemPrompt, askpassHelper: helperPath,
+                            pgidFile: sandbox + "/elevation.pgid")
+        }
+
+        XCTAssertEqual(Set(result.askpassCalls), [helperPath],
+                       "the path that reached sudo was not the helper's — or it never ran")
+        XCTAssertEqual(result.askpassOutput, "askpass-helper-ran\n",
+                       "sudo did not get output from the helper, so nothing could authenticate")
+        // The first call is the warmth probe, which is `-n` by design: it must
+        // never authenticate. Every call *after* it goes through the helper.
+        XCTAssertFalse(result.sudoCalls.isEmpty)
+        XCTAssertEqual(result.sudoCalls.first, "-n -v", "the probe must not authenticate")
+        XCTAssertTrue(result.sudoCalls.dropFirst().allSatisfy { $0.hasPrefix("-A") },
+                      "a privileged step ran without the askpass door: \(result.sudoCalls)")
+        // The warmth probe succeeded, so the refresh never had to authenticate:
+        // the two remaining privileged steps are the ones that did.
+        XCTAssertEqual(result.sudoCalls.filter { $0.hasPrefix("-A") }.count, 2,
+                       "the hosts cleanup and the launch both need the helper")
+        XCTAssertFalse(result.sudoCalls.contains { $0.hasPrefix("-S") },
+                       "a piped password appeared on the askpass route")
+        XCTAssertEqual(result.stdin, "\(pin)\n\(password)\n")
+        XCTAssertTrue(result.argv.contains { $0.hasPrefix("--user=") }, "openconnect never ran")
+    }
+
+    /// A helper that cannot deliver ends the connect with its own marker rather
+    /// than hanging: that is the difference between a reported cause and the
+    /// blocked-`sudo` wait this whole route exists to remove.
+    func testARefusingHelperStopsTheConnectInsteadOfWaiting() throws {
+        let result = try runWithColdTimestamp { sandbox in
+            makePlan(openconnectPath: sandbox + "/openconnect", searchPath: sandbox,
+                     elevation: .systemPrompt, askpassHelper: sandbox + "/helper-that-refuses",
+                     pgidFile: sandbox + "/elevation.pgid")
+        }
+
+        XCTAssertEqual(result.status, 1)
+        XCTAssertFalse(result.launched, "the privileged body ran without authenticating")
+        XCTAssertTrue(result.stderr.contains(ElevationBlockReason.askpassRefused.markerLine),
+                      "the cause was not named: \(result.stderr)")
+    }
+
+    /// The same cold timestamp, with a helper that works: the connect proceeds
+    /// and the helper — not a dialog — is what answered.
+    func testAColdTimestampOnTheAskpassRouteIsAnsweredByTheHelper() throws {
+        let result = try runWithColdTimestamp { sandbox in
+            makePlan(openconnectPath: sandbox + "/openconnect", searchPath: sandbox,
+                     elevation: .systemPrompt, askpassHelper: sandbox + "/helper",
+                     pgidFile: sandbox + "/elevation.pgid")
+        }
+
+        XCTAssertTrue(result.launched, "a prepared helper must be enough to authenticate")
+        XCTAssertFalse(result.askpassCalls.isEmpty, "the helper was never asked")
+        XCTAssertTrue(result.stderr.isEmpty, result.stderr)
     }
 
     /// What the old `printf '<pin>\n<password>' | sudo openconnect …` pipeline
@@ -563,6 +740,7 @@ final class OpenConnectLaunchTests: XCTestCase {
         let stderr: String
         let sudoCalls: [String]
         let launched: Bool
+        let askpassCalls: [String]
     }
 
     /// The regression that produced `Failed - Elevation Expired`, driven through
@@ -611,6 +789,7 @@ final class OpenConnectLaunchTests: XCTestCase {
 
         let sudoLog = sandbox.appendingPathComponent("sudo-calls.txt")
         let launched = sandbox.appendingPathComponent("openconnect-ran")
+        let askpassSeen = sandbox.appendingPathComponent("askpass-path.txt")
 
         func write(_ name: String, _ body: String) throws {
             let url = sandbox.appendingPathComponent(name)
@@ -622,13 +801,19 @@ final class OpenConnectLaunchTests: XCTestCase {
         #!/bin/bash
         # A cold timestamp, modelled: the non-interactive form fails outright,
         # the forms that are allowed to ask succeed. Nothing authenticates for
-        # real, and the password pipe is swallowed rather than read.
+        # real, and the password pipe is swallowed rather than read. `-A` runs
+        # the helper, as sudo would: that is the evidence a dialog was *not*
+        # what answered.
         printf '%s\\n' "$*" >> '\(sudoLog.path)'
         args=()
         for arg in "$@"; do
           if [ "$arg" = "-n" ]; then exit 1; fi
           case "$arg" in
             -S) cat > /dev/null ;;
+            -A)
+              printf '%s\n' "$SUDO_ASKPASS" >> '\(askpassSeen.path)'
+              "$SUDO_ASKPASS" > /dev/null 2>&1 || exit 1
+              ;;
             -v) ;;
             *) args+=("$arg") ;;
           esac
@@ -638,6 +823,8 @@ final class OpenConnectLaunchTests: XCTestCase {
         """)
         _ = try write("sed", "#!/bin/bash\nexit 0\n")
         _ = try write("openconnect", "#!/bin/bash\ntouch '\(launched.path)'\ncat > /dev/null\n")
+        _ = try write("helper", "#!/bin/bash\nprintf '%s\\n' 'askpass-helper-ran'\n")
+        _ = try write("helper-that-refuses", "#!/bin/bash\nexit 1\n")
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -658,7 +845,9 @@ final class OpenConnectLaunchTests: XCTestCase {
             stderr: stderr,
             sudoCalls: ((try? String(contentsOf: sudoLog, encoding: .utf8)) ?? "")
                 .split(separator: "\n").map(String.init),
-            launched: FileManager.default.fileExists(atPath: launched.path)
+            launched: FileManager.default.fileExists(atPath: launched.path),
+            askpassCalls: ((try? String(contentsOf: askpassSeen, encoding: .utf8)) ?? "")
+                .split(separator: "\n").map(String.init)
         )
     }
 }
