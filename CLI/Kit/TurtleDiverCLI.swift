@@ -388,7 +388,7 @@ public enum TurtleDiverCLI {
             guard isPresent(.adminPassword) else {
                 throw CLIFailure.notConfigured(
                     "the app has no stored administrator password; save it in the app under"
-                        + " Settings ▸ Advanced"
+                        + " Settings ▸ VPN"
                 )
             }
             return nil

@@ -36,6 +36,17 @@ final class CLIAskpassTests: XCTestCase {
         XCTAssertEqual(AskpassHelper.environmentVariable, "SUDO_ASKPASS")
     }
 
+    /// The helper's *rules* live in `AskpassProgram`, shared with the copy the app
+    /// ships inside its bundle; `AskpassHelper` is only the part that is specific
+    /// to an installed command line tool (where to look for the second name, and
+    /// how to report a failure). These assertions are what stop the two copies
+    /// drifting into two slightly different dispensers of the same secret.
+    func testTheToolObeysTheSharedProgram() {
+        XCTAssertEqual(AskpassHelper.installedName, AskpassProgram.installedName)
+        XCTAssertEqual(AskpassHelper.environmentVariable, AskpassProgram.environmentVariable)
+        XCTAssertEqual(KeychainSecret.adminPassword.rawValue, AskpassProgram.administratorAccount)
+    }
+
     // MARK: - How the helper knows it is the helper
 
     func testTheHelperIsRecognisedByName() {

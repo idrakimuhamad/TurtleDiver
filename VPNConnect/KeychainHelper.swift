@@ -44,7 +44,14 @@ enum KeychainHelper {
     static var serviceName: String { AppIdentity.bundleIdentifier }
 
     /// Shared account names for credentials stored in the Keychain.
-    static let adminPasswordAccount = "adminPassword"
+    ///
+    /// The administrator password's name comes from `AskpassProgram`, which the
+    /// askpass helper reads by: the helper is compiled without this type, so a
+    /// second spelling here is a silent way for the two to disagree.
+    /// (`KeychainSecret.adminPassword` in the command line tool is a third
+    /// spelling, because an enum's raw value has to be a literal; a test asserts
+    /// the three agree.)
+    static let adminPasswordAccount = AskpassProgram.administratorAccount
     static let vpnPasswordAccount = "vpnPassword"
     static let vpnPasscodeAccount = "vpnPasscode"
 
@@ -109,26 +116,21 @@ enum KeychainHelper {
     }
 
     /// Reads one item from one service.
+    ///
+    /// The query itself lives in `StoredSecret`, shared with the command line
+    /// tool and the askpass helper, so all three read the same Keychain items the
+    /// same way. What stays here is the app's own logging; nothing else about the
+    /// answer changes, and `nil` still means "no value" for the migration below.
     private static func read(account: String, service: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-
-        guard status == errSecSuccess, let data = item as? Data else {
-            if status != errSecItemNotFound {
-                log.error("Failed to retrieve password for '\(account)': \(status)")
-            }
+        switch StoredSecret.read(services: [service], account: account) {
+        case .value(let secret):
+            return secret
+        case .missing:
+            return nil
+        case .refused(let status):
+            log.error("Failed to retrieve password for '\(account)': \(status)")
             return nil
         }
-
-        return String(data: data, encoding: .utf8)
     }
 
     /// Deletes a password string from the Keychain.

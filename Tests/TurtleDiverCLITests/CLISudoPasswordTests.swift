@@ -140,9 +140,10 @@ final class CLISudoPasswordTests: XCTestCase {
             guard let failure = error as? CLIFailure else { return XCTFail("not a CLIFailure: \(error)") }
             XCTAssertEqual(failure.code, .notConfigured)
             XCTAssertTrue(failure.message.contains("administrator password"), failure.message)
-            // The VPN password lives in Settings ▸ VPN and this one does not, so
-            // a shared remedy would send the reader to the wrong pane.
-            XCTAssertTrue(failure.message.contains("Settings ▸ Advanced"), failure.message)
+            // The administrator password is stored on the VPN pane, next to the
+            // credentials it belongs with, so a remedy naming another pane would
+            // send the reader somewhere the field is not.
+            XCTAssertTrue(failure.message.contains("Settings ▸ VPN"), failure.message)
         }
     }
 
@@ -595,7 +596,7 @@ final class CLISudoPasswordTests: XCTestCase {
             delivery: .askpass
         )
         XCTAssertTrue(detail.contains("askpass helper"), detail)
-        XCTAssertTrue(detail.contains("Settings ▸ Advanced"), detail)
+        XCTAssertTrue(detail.contains("Settings ▸ VPN"), detail)
     }
 
     // MARK: - Reading, or not reading, here
@@ -636,7 +637,7 @@ final class CLISudoPasswordTests: XCTestCase {
         )) { error in
             guard let failure = error as? CLIFailure else { return XCTFail("not a CLIFailure: \(error)") }
             XCTAssertEqual(failure.code, .notConfigured)
-            XCTAssertTrue(failure.message.contains("Settings ▸ Advanced"), failure.message)
+            XCTAssertTrue(failure.message.contains("Settings ▸ VPN"), failure.message)
         }
     }
 
@@ -705,7 +706,7 @@ final class CLISudoPasswordTests: XCTestCase {
             hasTerminal: false
         )
         XCTAssertTrue(detail.contains("did not accept the administrator password"), detail)
-        XCTAssertTrue(detail.contains("Settings ▸ Advanced"), detail)
+        XCTAssertTrue(detail.contains("Settings ▸ VPN"), detail)
     }
 
     func testAnUnansweredDialogIsReportedAsATimeoutAndNotAsABadPassword() throws {

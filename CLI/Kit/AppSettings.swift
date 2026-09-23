@@ -118,7 +118,7 @@ public struct AppSettings: Equatable {
 public enum KeychainSecret: String, CaseIterable {
     case vpnPassword
     case vpnPasscode
-    /// Written by the app's Settings ▸ Advanced, under the same service as the
+    /// Written by the app's Settings ▸ VPN, under the same service as the
     /// other two. Its presence here does not make it read: only
     /// `--sudo-password keychain` does, and `docs/CLI.md` says so in as many
     /// words.
@@ -141,19 +141,17 @@ public enum KeychainSecret: String, CaseIterable {
     var remedy: String {
         switch self {
         case .vpnPassword, .vpnPasscode: return "set it in the app under Settings ▸ VPN"
-        case .adminPassword: return "save it in the app under Settings ▸ Advanced"
+        case .adminPassword: return "save it in the app under Settings ▸ VPN"
         }
     }
 
     /// Three outcomes, not two, because "you denied the prompt" and "the app has
     /// never stored a password" want different sentences and different remedies.
-    public enum ReadResult: Equatable {
-        case value(String)
-        /// The item is not in the Keychain at all.
-        case missing
-        /// The item is there and the user (or the ACL) refused this binary.
-        case refused(OSStatus)
-    }
+    ///
+    /// The same type the app and the askpass helper read through
+    /// (`StoredSecret.ReadResult`), so all three agree on what a failure *is* even
+    /// though they describe it in their own words.
+    public typealias ReadResult = StoredSecret.ReadResult
 
     /// No `kSecUseAuthenticationUI` override: the ACL dialog is the point, and
     /// suppressing it would turn a one-time consent into an unusable command.
@@ -161,27 +159,11 @@ public enum KeychainSecret: String, CaseIterable {
     /// The service chain is tried in order — the current identifier, then the
     /// ones this app has shipped under — because an item can live under an older
     /// name and the connect would otherwise report "not configured" over a
-    /// credential that is right there.
+    /// credential that is right there. The query itself lives in `StoredSecret`:
+    /// three readers of the same item is three chances to disagree about what to
+    /// ask for.
     public func read() -> ReadResult {
-        var lastStatus: OSStatus = errSecItemNotFound
-        for service in AppIdentity.keychainServiceChain {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: rawValue,
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne,
-            ]
-
-            var item: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &item)
-            if status == errSecSuccess, let data = item as? Data,
-               let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                return .value(text)
-            }
-            lastStatus = status
-        }
-        return lastStatus == errSecItemNotFound ? .missing : .refused(lastStatus)
+        StoredSecret.read(services: AppIdentity.keychainServiceChain, account: rawValue)
     }
 
     /// The item's presence, read without its data.
@@ -200,18 +182,7 @@ public enum KeychainSecret: String, CaseIterable {
     /// `sudo -S` route, and the helper — which does use `read()` — fails on it
     /// with the sentence that names the item.
     public func isPresent() -> Bool {
-        for service in AppIdentity.keychainServiceChain {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: rawValue,
-                kSecReturnAttributes as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne,
-            ]
-            var item: CFTypeRef?
-            if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess { return true }
-        }
-        return false
+        StoredSecret.isPresent(services: AppIdentity.keychainServiceChain, account: rawValue)
     }
 
     /// The value, or nil for either failure. For callers that already know which
@@ -222,16 +193,9 @@ public enum KeychainSecret: String, CaseIterable {
     }
 
     /// What to tell a person about a refusal, quoting the status so the answer is
-    /// checkable rather than reassuring.
+    /// checkable rather than reassuring. The words are this tool's (the app is the
+    /// thing a reader has to go and open); the shape is `StoredSecret`'s.
     public static func explain(_ result: ReadResult, account: KeychainSecret) -> String? {
-        switch result {
-        case .value:
-            return nil
-        case .missing:
-            return "the app has no stored \(account.noun); \(account.remedy)"
-        case .refused(let status):
-            return "macOS refused access to the stored \(account.noun) (OSStatus \(status));"
-                + " allow the prompt, or run the app and connect once first"
-        }
+        StoredSecret.explain(result, noun: account.noun, remedy: account.remedy)
     }
 }

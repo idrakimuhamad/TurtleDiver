@@ -21,7 +21,7 @@ import Darwin
 /// same way (`ps -E`) and is inherited by every child.
 public enum SudoPasswordSource: String, CaseIterable, Equatable {
     /// The app's own Keychain item, `adminPassword` — written by the app's
-    /// Settings ▸ Advanced, under the same service as the VPN credentials. The
+    /// Settings ▸ VPN, under the same service as the VPN credentials. The
     /// only source in which the password never enters the caller's own memory.
     case keychain
     /// One line on this process's standard input. The CLI reads its own standard

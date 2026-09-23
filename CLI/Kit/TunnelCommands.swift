@@ -275,12 +275,12 @@ public enum ConnectCommand {
         case .passwordRefused:
             guard delivery != .askpass else {
                 return "sudo did not accept the password its askpass helper printed; nothing was started."
-                    + " Check the item behind --sudo-password keychain (Settings ▸ Advanced is where the app"
+                    + " Check the item behind --sudo-password keychain (Settings ▸ VPN is where the app"
                     + " stores it, and \(AskpassHelper.installedName) is what reads it), or leave the option"
                     + " out and answer the prompt yourself."
             }
             return "sudo did not accept the administrator password that was supplied; nothing was started."
-                + " Check the item behind --sudo-password keychain (Settings ▸ Advanced is where the app"
+                + " Check the item behind --sudo-password keychain (Settings ▸ VPN is where the app"
                 + " stores it), or leave the option out and answer the prompt yourself."
         case .timedOut:
             if delivery == .askpass {

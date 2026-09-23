@@ -30,6 +30,17 @@ let package = Package(
         .executable(
             name: "turtlediver",
             targets: ["TurtleDiverCLI"]
+        ),
+        // The askpass helper, under the name `sudo` has to be pointed at. The
+        // app ships this program inside its own bundle, built by Xcode (see
+        // `docs/ELEVATION.md` §11); building it here as well means `swift build`
+        // compiles the same source the app target does and a development build
+        // can be pointed at directly:
+        //
+        //     SUDO_ASKPASS=.build/debug/turtlediver-askpass sudo -A -v
+        .executable(
+            name: "turtlediver-askpass",
+            targets: ["TurtleDiverAskpass"]
         )
     ],
     targets: [
@@ -72,6 +83,15 @@ let package = Package(
             name: "TurtleDiverCLIKit",
             dependencies: ["TurtleDiverCore", "TurtleDiverRules", "TurtleDiverSystem"],
             path: "CLI/Kit"
+        ),
+        // The helper `sudo -A` runs on a machine whose `pam_tid` would swallow a
+        // piped password. It reads one Keychain item and prints it, and obeys the
+        // same protocol as the command line tool's copy of itself
+        // (`AskpassProgram`), so the two cannot drift apart.
+        .executableTarget(
+            name: "TurtleDiverAskpass",
+            dependencies: ["TurtleDiverSystem"],
+            path: "Askpass"
         ),
         .executableTarget(
             name: "TurtleDiverCLI",
@@ -133,6 +153,7 @@ let package = Package(
                 "Rules/RuleSetStore.swift",
                 "Rules/RuleMatcher.swift",
                 "System/AppIdentity.swift",
+                "System/AskpassProgram.swift",
                 "System/BoundedProcess.swift",
                 "System/ConnectSignals.swift",
                 "System/ElevationPolicy.swift",
@@ -141,6 +162,7 @@ let package = Package(
                 "System/LifecycleLog.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/ProcessStartTime.swift",
+                "System/StoredSecret.swift",
                 "System/SystemProxyManager.swift",
                 "System/ToolProcess.swift",
                 "System/ToolResolver.swift",

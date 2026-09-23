@@ -358,8 +358,10 @@ public enum TunnelAgentChannel {
             }
         }
 
-        /// The variable `sudo` reads the askpass program's path from.
-        public static let askpassVariable = "SUDO_ASKPASS"
+        /// The variable `sudo` reads the askpass program's path from, spelled once
+        /// for the whole project — the CLI, the app and the helper itself all name
+        /// it through `AskpassProgram`.
+        public static let askpassVariable = AskpassProgram.environmentVariable
 
         /// The environment for a child that authenticates through the askpass
         /// helper: the helper's *path*, and nothing else. The password is printed
