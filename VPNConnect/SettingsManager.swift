@@ -54,6 +54,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let settingsPane = "settingsPane"
         static let ruleSetAutoRefresh = "ruleSetAutoRefresh"
         static let updatesCheckEnabled = "updatesCheckEnabled"
+        static let askpassHelperRequirement = AskpassSetup.defaultsKey
     }
 
     /// `UserDefaults` keys that older builds wrote and nothing reads any more:
@@ -257,6 +258,30 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
     /// cookies — it stops hiding the next ones.
     @Published var revealSensitiveHeaders: Bool = false {
         didSet { defaults.set(revealSensitiveHeaders, forKey: Keys.revealSensitiveHeaders) }
+    }
+
+    /// The designated requirement of the askpass helper the user approved for
+    /// unattended elevation, or empty when nothing was approved.
+    ///
+    /// Not a credential: it names a program and its signer, which is what
+    /// `codesign -d` prints for anyone who asks, so it lives in `UserDefaults`
+    /// rather than the Keychain — whose reads can raise their own dialog, and a
+    /// dialog raised while deciding whether a dialog is needed would be a
+    /// comedy. The key's spelling comes from `AskpassSetup` so the connect's
+    /// question and Settings' answer cannot drift apart.
+    ///
+    /// Read directly by `VPNManager` at connect time, because the answer must be
+    /// this second's: a rebuild replaces the helper, and an approval for the old
+    /// one is not an approval for the new one (`docs/ELEVATION.md` §11).
+    var askpassHelperRequirement: String {
+        get { defaults.string(forKey: Keys.askpassHelperRequirement) ?? "" }
+        set {
+            if newValue.isEmpty {
+                defaults.removeObject(forKey: Keys.askpassHelperRequirement)
+            } else {
+                defaults.set(newValue, forKey: Keys.askpassHelperRequirement)
+            }
+        }
     }
     
     func updateStokenTokenURL(_ url: URL) {

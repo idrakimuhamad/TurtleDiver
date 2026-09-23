@@ -81,6 +81,7 @@
 		7D0A00000000000000000004 /* AppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000014 /* AppIdentity.swift */; };
 		7D0A00000000000000000006 /* AskpassProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000012 /* AskpassProgram.swift */; };
 		7D0A00000000000000000007 /* StoredSecret.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000013 /* StoredSecret.swift */; };
+		7D0A00000000000000000008 /* AskpassSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000015 /* AskpassSetup.swift */; };
 		7D0A00000000000000000005 /* turtlediver-askpass in Embed Helper */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000014 /* turtlediver-askpass */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -182,6 +183,7 @@
 		7D0A00000000000000000011 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		7D0A00000000000000000012 /* AskpassProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskpassProgram.swift; sourceTree = "<group>"; };
 		7D0A00000000000000000013 /* StoredSecret.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredSecret.swift; sourceTree = "<group>"; };
+		7D0A00000000000000000015 /* AskpassSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskpassSetup.swift; sourceTree = "<group>"; };
 		7D0A00000000000000000014 /* turtlediver-askpass */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "turtlediver-askpass"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -296,6 +298,7 @@
 				7C0FFEE30000000000000014 /* AppIdentity.swift */,
 				7D0A00000000000000000012 /* AskpassProgram.swift */,
 				7D0A00000000000000000013 /* StoredSecret.swift */,
+				7D0A00000000000000000015 /* AskpassSetup.swift */,
 				7C0FFEEA0000000000000013 /* ToolResolver.swift */,
 				7C0FFEEA0000000000000014 /* ToolProcess.swift */,
 				7C0FFEEA0000000000000015 /* ElevationPolicy.swift */,
@@ -507,6 +510,7 @@
 				7C0FFEE80000000000000003 /* RuleSetsView.swift in Sources */,
 				7D0A00000000000000000006 /* AskpassProgram.swift in Sources */,
 				7D0A00000000000000000007 /* StoredSecret.swift in Sources */,
+				7D0A00000000000000000008 /* AskpassSetup.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -305,6 +305,31 @@ class VPNManager: ObservableObject {
     /// whole bug: `pam_tid` answers first, the pipe is left full, and the
     /// `sudo` sits on a dialog nobody was told about.
     private var elevation: ElevationStrategy = .storedPassword
+    /// The askpass helper this attempt may use, or `nil` when it has none.
+    ///
+    /// Resolved once per connect from two facts that must both hold: the app's
+    /// bundle carries a helper, and the user's recorded approval still names
+    /// *that* program. A rebuild replaces the helper at the same path, so the
+    /// comparison is what keeps a stale approval from raising a Keychain dialog
+    /// in the middle of a connect — worst of all on a connect nobody is watching
+    /// (`AskpassSetup`, `docs/ELEVATION.md` §11).
+    ///
+    /// `nil` is the ordinary case, not a failure: the connect then asks the
+    /// system for approval exactly as it did before the helper existed.
+    private var askpass: String?
+
+    /// Which door this attempt uses to put the stored administrator password in
+    /// front of `sudo`, or `nil` when it uses no stored password at all.
+    ///
+    /// One function decides it — `SudoPasswordDelivery.resolve` — and the command
+    /// line tool asks the same one, so the two front doors cannot drift into
+    /// answering differently. `.storedPassword` pipes the password (the route for
+    /// a Mac without `pam_tid`), `.systemPrompt` with a prepared helper runs
+    /// `sudo -A`, and `.neverPrompt` asks nobody. `nil` is not a failure: it is
+    /// the connect that uses no stored password.
+    private var delivery: SudoPasswordDelivery? {
+        SudoPasswordDelivery.resolve(strategy: elevation, askpassHelper: askpass)
+    }
     /// Ends a tunnel this app raised as root. The connect path elevates, so the
     /// teardown has to be able to as well; see `ElevatedTermination`.
     let elevatedTerminator = ElevatedTerminator()
@@ -770,6 +795,11 @@ class VPNManager: ObservableObject {
         // files; it authenticates nothing and changes nothing.
         let snapshot = await Self.elevationSnapshot()
         elevation = snapshot.strategy
+        // The helper is a fact about this build *and* about what the user
+        // approved, so it is resolved here, next to the strategy it modifies —
+        // and off the main thread, because reading a code signature touches the
+        // disk.
+        askpass = await Self.askpassHelper(recorded: settings.askpassHelperRequirement)
         elevationBlock = nil
         await MainActor.run {
             for line in snapshot.strategy.debugLines(timeoutSeconds: Self.connectionTimeoutSeconds) {
@@ -811,10 +841,11 @@ class VPNManager: ObservableObject {
             }
         }
         
-        // The stored password is only *needed* when it is the one being piped.
-        // With Touch ID enabled the system answers, and demanding a password
-        // first would be asking for a credential the connect has no use for.
-        if elevation.pipesTheStoredPassword && settings.adminPassword.isEmpty {
+        // The stored password is needed whenever the connect has a way to use it
+        // — piped, or read out of the Keychain by the askpass helper. With Touch
+        // ID and no helper the system answers, and demanding a password first
+        // would be asking for a credential the connect has no use for.
+        if delivery != nil && settings.adminPassword.isEmpty {
             await MainActor.run {
                 self.debugOutput += "Admin password required for VPN connection.\n"
             }
@@ -1171,7 +1202,8 @@ class VPNManager: ObservableObject {
             adminPassword: settings.adminPassword,
             pin: pin,
             vpnPassword: settings.vpnPassword,
-            elevation: elevation
+            elevation: elevation,
+            askpassHelper: askpass
         )
         // Shape, for the log and for debugging — it is the same script every
         // time, and it contains nothing secret. The pipeline's *shape* is logged,
@@ -1181,7 +1213,15 @@ class VPNManager: ObservableObject {
         log.write("Pipeline: \(plan.script)")
         log.write("Credential stdin: \(plan.standardInput.count) bytes, \(elevation.credentialLineCount) lines")
         log.write("Elevation: \(elevation)")
-        log.logSend("Admin password (for sudo)", value: settings.adminPassword)
+        if let helper = OpenConnectCommand.askpassPath(elevation, askpass) {
+            log.write("Askpass helper: \(helper)")
+        }
+        Self.logAdminPassword(
+            settings.adminPassword,
+            strategy: elevation,
+            delivery: delivery,
+            log: log
+        )
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
         log.flush()
@@ -1220,7 +1260,12 @@ class VPNManager: ObservableObject {
         // `.systemPrompt` mode it is not sent anywhere at all — the system's own
         // dialog answers. Logging it as sent in either case would be a claim
         // about a credential this path does not carry.
-        Self.logAdminPassword(settings.adminPassword, strategy: strategy, log: log)
+        Self.logAdminPassword(
+            settings.adminPassword,
+            strategy: strategy,
+            delivery: SudoPasswordDelivery.resolve(strategy: strategy, askpassHelper: askpass),
+            log: log
+        )
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
         log.flush()
@@ -1232,7 +1277,12 @@ class VPNManager: ObservableObject {
         // One authentication, by the app itself, as a direct child. That is what
         // makes the timestamp the app's own — and therefore what makes a later
         // teardown silent, which is the defect this path exists to fix.
-        if let reason = await warmElevation(strategy: strategy, password: settings.adminPassword, log: log) {
+        if let reason = await warmElevation(
+            strategy: strategy,
+            password: settings.adminPassword,
+            askpass: askpass,
+            log: log
+        ) {
             await MainActor.run {
                 self.elevationBlock = reason
                 self.status = .error(reason.historyStatus)
@@ -1277,24 +1327,47 @@ class VPNManager: ObservableObject {
     private func warmElevation(
         strategy: ElevationStrategy,
         password: String,
+        askpass: String?,
         log: VpnConnectionLogger
     ) async -> ElevationBlockReason? {
-        let arguments = TunnelAgentChannel.Launch.warmupArguments(strategy)
+        // The same decision the plan and the CLI make, asked once more so the
+        // warm-up cannot take a different door than the launch that follows it.
+        let delivery = SudoPasswordDelivery.resolve(strategy: strategy, askpassHelper: askpass)
+        let arguments = TunnelAgentChannel.Launch.warmupArguments(
+            strategy,
+            delivery: delivery == .askpass ? .askpass : .standardInput
+        )
         let input = TunnelAgentChannel.Launch.warmupInput(strategy, adminPassword: password)
+        // The helper's *path*, and nothing else: the password is printed by that
+        // program, so it is not in this child's environment either.
+        let environment: [String: String]
+        if delivery == .askpass, let askpass {
+            environment = TunnelAgentChannel.Launch.askpassEnvironment(helperPath: askpass)
+        } else {
+            environment = [:]
+        }
         log.write("[SUDO] warm-up: sudo \(arguments.joined(separator: " "))"
-            + " (\(input.isEmpty ? "no input" : "one line on stdin"))")
+            + " (\(input.isEmpty ? "no input" : "one line on stdin"))"
+            + (delivery == .askpass ? " via askpass helper \(askpass ?? "")" : ""))
         log.flush()
 
         let result = await Self.runSudoStep(
             arguments: arguments,
             stdin: input.isEmpty ? nil : input,
-            timeout: TimeInterval(Self.connectionTimeoutSeconds)
+            timeout: TimeInterval(Self.connectionTimeoutSeconds),
+            environment: environment
         )
         if result.succeeded { return nil }
         log.write("[SUDO] warm-up failed: \(result.timedOut ? "timed out" : "exit \(result.terminationStatus)")"
             + (result.launchError.map { " — \($0)" } ?? ""))
         log.flush()
 
+        if delivery == .askpass {
+            // The helper ran and `sudo` got nothing usable out of it: either it
+            // could not read the item (never approved, or approved for a build
+            // that is no longer here) or what it read was not the password.
+            return .askpassRefused
+        }
         switch strategy {
         case .systemPrompt:
             // The dialog this mode relies on is the one thing that would have
@@ -1320,11 +1393,20 @@ class VPNManager: ObservableObject {
     private static func logAdminPassword(
         _ password: String,
         strategy: ElevationStrategy,
+        delivery: SudoPasswordDelivery?,
         log: VpnConnectionLogger
     ) {
-        if strategy == .storedPassword {
+        switch delivery {
+        case .askpass:
+            // The app does not send this value on this route: `sudo` starts the
+            // helper, and the helper reads the item and prints it. Logging the
+            // value here would be a claim about a credential this process never
+            // handled — what is worth recording is which program did.
+            log.write("Admin password: supplied by the askpass helper"
+                + " (read from the Keychain by that program, not by this app)")
+        case .standardInput?:
             log.logSend("Admin password (for sudo)", value: password)
-        } else {
+        case nil:
             log.write("Admin password: not sent (\(strategy) — no pipe to send it down)")
         }
     }
@@ -1337,15 +1419,32 @@ class VPNManager: ObservableObject {
     private static func runSudoStep(
         arguments: [String],
         stdin: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        environment: [String: String] = [:]
     ) async -> TunnelAgentChannel.SudoStepRunner.Result {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(returning: TunnelAgentChannel.SudoStepRunner().run(
                     arguments: arguments,
                     stdin: stdin,
-                    timeout: timeout
+                    timeout: timeout,
+                    environment: environment
                 ))
+            }
+        }
+    }
+
+    /// The askpass helper this connect may use, or `nil`.
+    ///
+    /// Off the main thread because reading a code signature touches the disk, and
+    /// this runs while a person is watching the connect. It is a *read* of the
+    /// helper in this app's own bundle: nothing is executed and the Keychain is
+    /// not touched, so a Mac that has never been set up pays one file read and
+    /// then asks the system, as before.
+    private static func askpassHelper(recorded: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: AskpassSetup.usableHelperPath(recorded: recorded))
             }
         }
     }
@@ -2099,7 +2198,8 @@ class VPNManager: ObservableObject {
             openConnectPid: pid,
             strategy: elevation,
             adminPassword: SettingsManager.shared.adminPassword,
-            mayPrompt: mayPrompt
+            mayPrompt: mayPrompt,
+            askpass: askpass
         )
         switch outcome {
         case .ended:

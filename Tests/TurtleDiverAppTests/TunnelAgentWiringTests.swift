@@ -230,12 +230,15 @@ final class TunnelAgentWiringTests: XCTestCase {
     /// an empty pipe is not the same thing as no input.
     func testTheWarmupUsesThePlanForItsStrategy() throws {
         let warm = try body(of: "private func warmElevation(")
-        XCTAssertTrue(warm.contains("TunnelAgentChannel.Launch.warmupArguments(strategy)"))
+        XCTAssertTrue(warm.contains("TunnelAgentChannel.Launch.warmupArguments("),
+                      "the warm-up's arguments must come from the tested builder")
+        XCTAssertTrue(warm.contains("delivery: delivery == .askpass ? .askpass : .standardInput"),
+                      "only the helper's route changes the form, and it says which one")
         XCTAssertTrue(warm.contains("TunnelAgentChannel.Launch.warmupInput(strategy, adminPassword: password)"))
         XCTAssertTrue(warm.contains("stdin: input.isEmpty ? nil : input"),
                       "empty input must mean /dev/null, not a pipe nobody writes")
         // Every strategy that fails gets a reason a user can act on.
-        for reason in ["systemPromptUnanswered", "storedPasswordRejected", "timestampExpired"] {
+        for reason in ["systemPromptUnanswered", "storedPasswordRejected", "timestampExpired", "askpassRefused"] {
             XCTAssertTrue(warm.contains(reason), "\(reason) is not reported")
         }
     }

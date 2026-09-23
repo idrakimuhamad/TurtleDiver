@@ -46,13 +46,108 @@ final class ElevationWiringTests: XCTestCase {
                        "it must not shell out to sudo — by any spelling — to decide this")
     }
 
-    /// With Touch ID answering, the stored password is unused. Demanding it first
-    /// would gate a connect that has no use for it — and would keep asking for a
-    /// credential after the app stopped needing one.
-    func testTheStoredPasswordIsOnlyRequiredWhenItIsTheOneBeingPiped() throws {
+    /// With Touch ID answering and no helper prepared, the stored password is
+    /// unused. Demanding it first would gate a connect that has no use for it —
+    /// and would keep asking for a credential after the app stopped needing one.
+    ///
+    /// The question is no longer "does the strategy pipe the password" but "does
+    /// this connect have any way to use one": the askpass route needs it too, so
+    /// the requirement is gated on the resolved delivery — the same function the
+    /// command line tool asks. A gate written twice is a gate that can be answered
+    /// two ways.
+    func testTheStoredPasswordIsRequiredWheneverTheConnectHasAWayToUseIt() throws {
         let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
-        XCTAssertTrue(code.contains("elevation.pipesTheStoredPassword && settings.adminPassword.isEmpty"),
-                      "the admin-password requirement must be gated on the strategy that pipes it")
+        XCTAssertTrue(code.contains("if delivery != nil && settings.adminPassword.isEmpty"),
+                      "the admin-password requirement must be gated on the resolved delivery")
+        XCTAssertTrue(code.contains("SudoPasswordDelivery.resolve(strategy: elevation, askpassHelper: askpass)"),
+                      "the delivery must be resolved by the shared function, with the helper")
+        XCTAssertFalse(code.contains("elevation.pipesTheStoredPassword && settings.adminPassword.isEmpty"),
+                       "the pipe-only gate no longer covers the askpass route")
+    }
+
+    // MARK: - The askpass helper
+
+    /// The helper is resolved once per connect, from the recorded approval *and*
+    /// the program in the bundle, and it modifies the strategy rather than
+    /// replacing it. Reading a code signature touches the disk, so it does not
+    /// happen on the main thread — and nothing about it may prompt: a setup that
+    /// was not done shows up as `nil` here, not as a dialog.
+    func testTheHelperIsResolvedPerConnectAndComparedWithWhatWasApproved() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        XCTAssertTrue(code.contains("askpass = await Self.askpassHelper(recorded: settings.askpassHelperRequirement)"),
+                      "the helper must be resolved from what the user approved")
+
+        let resolver = try body(of: "private static func askpassHelper(")
+        XCTAssertTrue(resolver.contains("DispatchQueue.global(qos: .userInitiated).async"),
+                      "a code signature read must not run on the main thread")
+        XCTAssertTrue(resolver.contains("AskpassSetup.usableHelperPath(recorded: recorded)"),
+                      "the decision belongs to the tested core, not to this call site")
+    }
+
+    /// Both launch shapes carry the helper: the wrapper's plan (\(sudo -A\) in one
+    /// script), and the agent path's warm-up (the variable in one child's
+    /// environment, never a password in argv).
+    func testBothLaunchShapesAreToldAboutTheHelper() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+
+        let plan = try XCTUnwrap(code.range(of: "OpenConnectCommand.launchPlan("))
+        XCTAssertTrue(code[plan.lowerBound...].prefix(900).contains("askpassHelper: askpass"),
+                      "the wrapper's plan must be given the helper so its script uses `sudo -A`")
+
+        let agent = try body(of: "private func prepareAgentLaunch(")
+        XCTAssertTrue(agent.contains("askpass: askpass,"),
+                      "the agent path's warm-up must be given the helper")
+    }
+
+    /// The warm-up and the launch have to agree about the door, and the plan's
+    /// strategy is never overwritten by the helper: `askpass` is passed alongside
+    /// it. The environment carries the helper's *path* — the password is printed
+    /// by that program, so it is not in the child's environment either.
+    func testTheWarmupUsesTheSameDoorAsTheLaunch() throws {
+        let warm = try body(of: "private func warmElevation(")
+        XCTAssertTrue(warm.contains("SudoPasswordDelivery.resolve(strategy: strategy, askpassHelper: askpass)"),
+                      "the warm-up must resolve the delivery the same way the plan does")
+        XCTAssertTrue(warm.contains("delivery: delivery == .askpass ? .askpass : .standardInput"),
+                      "the askpass door must be the one the plan will use")
+        XCTAssertTrue(warm.contains("TunnelAgentChannel.Launch.askpassEnvironment(helperPath: askpass)"),
+                      "the helper's path is the only thing this child is given")
+        XCTAssertTrue(warm.contains("environment: environment"),
+                      "an environment built and not passed is a helper that never runs")
+        XCTAssertTrue(warm.contains("return .askpassRefused"),
+                      "a helper that supplied nothing is its own cause, not a failed password")
+        XCTAssertTrue(warm.contains("if delivery == .askpass, let askpass {"),
+                      "the helper's path is the only thing an askpass child is given")
+        XCTAssertTrue(warm.contains("environment = [:]"),
+                      "every other route inherits the environment untouched")
+    }
+
+    /// A disconnect elevates through the same door the connect used, and it may
+    /// not fall back to a dialog on a path where none can be answered.
+    func testTheTeardownElevatesThroughTheSameHelper() throws {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        let teardown = try body(of: "private func terminateWithElevation(")
+        XCTAssertTrue(teardown.contains("askpass: askpass"),
+                      "a teardown that forgets the helper fails on a Mac with `pam_tid`")
+        XCTAssertTrue(code.contains("private var askpass: String?"),
+                      "the helper has to be remembered for the teardown to reuse it")
+    }
+
+    /// The log may not claim the app sent a password the helper is the one
+    /// reading, and it may not fall silent about a credential that did move.
+    func testTheLogNamesWhichProgramSuppliesTheAdministratorPassword() throws {
+        let logging = try body(of: "private static func logAdminPassword(")
+        XCTAssertTrue(logging.contains("case .askpass:"))
+        XCTAssertTrue(logging.contains("supplied by the askpass helper"))
+        XCTAssertTrue(logging.contains("case .standardInput?:"))
+        XCTAssertTrue(logging.contains("log.logSend(\"Admin password (for sudo)\", value: password)"))
+        XCTAssertTrue(logging.contains("case nil:"))
+        // The value itself is never logged on the helper's route: that process
+        // read the Keychain, this one never had the password.
+        let askpassCase = try XCTUnwrap(logging.range(of: "case .askpass:"))
+        let nextCase = try XCTUnwrap(logging.range(of: "case .standardInput?:",
+                                                 range: askpassCase.upperBound..<logging.endIndex))
+        XCTAssertFalse(logging[askpassCase.lowerBound..<nextCase.lowerBound].contains("value: password"),
+                       "the askpass log line must not carry the value")
     }
 
     /// The named failure has to win over the generic one, and the user has to be
@@ -186,6 +281,19 @@ final class ElevationWiringTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// The text of one function, from its declaration to the next declaration at
+    /// the same indentation. The nearest one, not the first pattern that matches.
+    private func body(of function: String) throws -> Substring {
+        let code = try strippedCode(at: "VPNConnect/VPNManager.swift")
+        let start = try XCTUnwrap(code.range(of: function), "\(function) not found")
+        let rest = code[start.upperBound...]
+        let anchors = ["\n    func ", "\n    private func ", "\n    private static func ",
+                       "\n    static func ", "\n    public func "]
+        let ends = anchors.compactMap { rest.range(of: $0)?.lowerBound }
+        guard let end = ends.min() else { return rest }
+        return rest[..<end]
+    }
 
     private func strippedCode(at path: String) throws -> String {
         let text = try String(contentsOf: repoRoot.appendingPathComponent(path), encoding: .utf8)

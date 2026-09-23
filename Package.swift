@@ -154,6 +154,7 @@ let package = Package(
                 "Rules/RuleMatcher.swift",
                 "System/AppIdentity.swift",
                 "System/AskpassProgram.swift",
+                "System/AskpassSetup.swift",
                 "System/BoundedProcess.swift",
                 "System/ConnectSignals.swift",
                 "System/ElevationPolicy.swift",
