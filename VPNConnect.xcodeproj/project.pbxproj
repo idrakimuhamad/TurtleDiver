@@ -75,7 +75,37 @@
 		1A2B3C721234567890ABCDEF /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C6B1234567890ABCDEF /* main.swift */; };
 		1A2B3C741234567890ABCDEF /* ToggleableSecureTextField.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C731234567890ABCDEF /* ToggleableSecureTextField.swift */; };
 		1A2B3C761234567890ABCDEF /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C751234567890ABCDEF /* KeychainHelper.swift */; };
+		7D0A00000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000011 /* main.swift */; };
+		7D0A00000000000000000002 /* AskpassProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000012 /* AskpassProgram.swift */; };
+		7D0A00000000000000000003 /* StoredSecret.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000013 /* StoredSecret.swift */; };
+		7D0A00000000000000000004 /* AppIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE30000000000000014 /* AppIdentity.swift */; };
+		7D0A00000000000000000006 /* AskpassProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000012 /* AskpassProgram.swift */; };
+		7D0A00000000000000000007 /* StoredSecret.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000013 /* StoredSecret.swift */; };
+		7D0A00000000000000000005 /* turtlediver-askpass in Embed Helper */ = {isa = PBXBuildFile; fileRef = 7D0A00000000000000000014 /* turtlediver-askpass */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		7D0A00000000000000000042 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A2B3C411234567890ABCDEF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7D0A00000000000000000031;
+			remoteInfo = turtlediver-askpass;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		7D0A00000000000000000021 /* Embed Helper */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Library/HelperTools;
+			dstSubfolderSpec = 1;
+			files = (
+				7D0A00000000000000000005 /* turtlediver-askpass in Embed Helper */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		7C0FFEE20000000000000011 /* ProxyEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyEngine.swift; sourceTree = "<group>"; };
@@ -149,10 +179,21 @@
 		1A2B3C701234567890ABCDEF /* VPNManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNManager.swift; sourceTree = "<group>"; };
 		1A2B3C731234567890ABCDEF /* ToggleableSecureTextField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToggleableSecureTextField.swift; sourceTree = "<group>"; };
 		1A2B3C751234567890ABCDEF /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
+		7D0A00000000000000000011 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		7D0A00000000000000000012 /* AskpassProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskpassProgram.swift; sourceTree = "<group>"; };
+		7D0A00000000000000000013 /* StoredSecret.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoredSecret.swift; sourceTree = "<group>"; };
+		7D0A00000000000000000014 /* turtlediver-askpass */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = "turtlediver-askpass"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		1A2B3C461234567890ABCDEF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7D0A00000000000000000023 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -167,6 +208,7 @@
 			children = (
 				1A2B3C4B1234567890ABCDEF /* VPNConnect */,
 				1A2B3C4A1234567890ABCDEF /* Products */,
+				7D0A00000000000000000051 /* Askpass */,
 			);
 			sourceTree = "<group>";
 		};
@@ -174,6 +216,7 @@
 			isa = PBXGroup;
 			children = (
 				1A2B3C491234567890ABCDEF /* VPNConnect.app */,
+				7D0A00000000000000000014 /* turtlediver-askpass */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -251,6 +294,8 @@
 				7C0FFEE30000000000000011 /* SystemProxyManager.swift */,
 				7C0FFEE30000000000000013 /* OpenConnectLaunch.swift */,
 				7C0FFEE30000000000000014 /* AppIdentity.swift */,
+				7D0A00000000000000000012 /* AskpassProgram.swift */,
+				7D0A00000000000000000013 /* StoredSecret.swift */,
 				7C0FFEEA0000000000000013 /* ToolResolver.swift */,
 				7C0FFEEA0000000000000014 /* ToolProcess.swift */,
 				7C0FFEEA0000000000000015 /* ElevationPolicy.swift */,
@@ -294,6 +339,14 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
+		7D0A00000000000000000051 /* Askpass */ = {
+			isa = PBXGroup;
+			children = (
+				7D0A00000000000000000011 /* main.swift */,
+			);
+			path = Askpass;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -304,15 +357,33 @@
 				1A2B3C451234567890ABCDEF /* Sources */,
 				1A2B3C461234567890ABCDEF /* Frameworks */,
 				1A2B3C471234567890ABCDEF /* Resources */,
+				7D0A00000000000000000021 /* Embed Helper */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				7D0A00000000000000000041 /* PBXTargetDependency */,
 			);
 			name = VPNConnect;
 			productName = VPNConnect;
 			productReference = 1A2B3C491234567890ABCDEF /* VPNConnect.app */;
 			productType = "com.apple.product-type.application";
+		};
+		7D0A00000000000000000031 /* turtlediver-askpass */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7D0A00000000000000000032 /* Build configuration list for PBXNativeTarget "turtlediver-askpass" */;
+			buildPhases = (
+				7D0A00000000000000000022 /* Sources */,
+				7D0A00000000000000000023 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = turtlediver-askpass;
+			productName = turtlediver-askpass;
+			productReference = 7D0A00000000000000000014 /* turtlediver-askpass */;
+			productType = "com.apple.product-type.tool";
 		};
 /* End PBXNativeTarget section */
 
@@ -325,6 +396,9 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					1A2B3C481234567890ABCDEF = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					7D0A00000000000000000031 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -343,6 +417,7 @@
 			projectRoot = "";
 			targets = (
 				1A2B3C481234567890ABCDEF /* VPNConnect */,
+				7D0A00000000000000000031 /* turtlediver-askpass */,
 			);
 		};
 /* End PBXProject section */
@@ -430,12 +505,33 @@
 				7C0FFEE80000000000000001 /* RuleSet.swift in Sources */,
 				7C0FFEE80000000000000002 /* RuleSetStore.swift in Sources */,
 				7C0FFEE80000000000000003 /* RuleSetsView.swift in Sources */,
+				7D0A00000000000000000006 /* AskpassProgram.swift in Sources */,
+				7D0A00000000000000000007 /* StoredSecret.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7D0A00000000000000000022 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7D0A00000000000000000001 /* main.swift in Sources */,
+				7D0A00000000000000000002 /* AskpassProgram.swift in Sources */,
+				7D0A00000000000000000003 /* StoredSecret.swift in Sources */,
+				7D0A00000000000000000004 /* AppIdentity.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 
+
+/* Begin PBXTargetDependency section */
+		7D0A00000000000000000041 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7D0A00000000000000000031 /* turtlediver-askpass */;
+			targetProxy = 7D0A00000000000000000042 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		1A2B3C5A1234567890ABCDEF /* Debug */ = {
@@ -616,6 +712,28 @@
 			};
 			name = Release;
 		};
+		7D0A00000000000000000033 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KT7QU923S8;
+				ENABLE_HARDENED_RUNTIME = YES;
+				PRODUCT_NAME = "turtlediver-askpass";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		7D0A00000000000000000034 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KT7QU923S8;
+				ENABLE_HARDENED_RUNTIME = YES;
+				PRODUCT_NAME = "turtlediver-askpass";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -633,6 +751,15 @@
 			buildConfigurations = (
 				1A2B3C5D1234567890ABCDEF /* Debug */,
 				1A2B3C5E1234567890ABCDEF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7D0A00000000000000000032 /* Build configuration list for PBXNativeTarget "turtlediver-askpass" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7D0A00000000000000000033 /* Debug */,
+				7D0A00000000000000000034 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

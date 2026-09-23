@@ -451,6 +451,54 @@ Three things changed:
 Both paths produce the same name, `Failed - Tunnel Ended`, with the tunnel's own
 last line behind it, and the attempt is recorded either way.
 
+### 11. Why the askpass helper may live in the bundle, and the agent may not
+
+The app ships an executable of its own — `turtlediver-askpass`, inside
+`Contents/Library/HelperTools` — while §10 keeps the tunnel agent out of the
+bundle and in `/usr/local/libexec`. The two look alike and are opposites, and
+the difference is which user runs them.
+
+- **The agent runs as root.** It is started through `sudo`, so its bytes decide
+  what root executes. A payload inside the app bundle sits in a directory the
+  logged-in user can write to, which makes "replace a file, get root" a two-step
+  operation; the package therefore installs it into a root-owned directory and
+  `publish.sh` signs it under its own identifier and asserts that identifier
+  afterwards.
+- **The helper runs as the logged-in user.** `sudo -A` starts it as the invoking
+  user and reads its standard output; it never has privilege of its own. Its
+  whole capability is one Keychain item that the user's own account already owns,
+  and the grant that lets it read that item is a per-program decision the user
+  makes once. There is nothing for it to escalate to.
+
+It has to be *this app's* copy rather than the command line tool's, because the
+Keychain grant belongs to the program. A user who installed only the app has no
+`/usr/local/bin/turtlediver`, and pointing at the tool's copy would raise a
+second consent dialog for a program the user may not even have. Both copies obey
+one protocol (`AskpassProgram`, `StoredSecret`), so "one program, two copies"
+stays true of the rules even though it is not true of the bytes.
+
+The helper is built by Xcode as a nested target of the project and placed by a
+Copy Files phase with `CodeSignOnCopy`, rather than copied in by a script after
+the build. That is not a preference: `publish.sh` verifies the finished bundle
+with `codesign --verify --deep --strict`, and anything written into a signed
+bundle afterwards breaks the seal it is checking. Built this way the helper is
+signed by the same identity as the app, on both the local build (`Apple
+Development`, ad-hoc team) and a Developer ID release, and the bundle stays
+verifiable as a whole.
+
+Two consequences worth stating plainly:
+
+- **The consent dialog is per program, not per app.** A Developer ID release has
+  a stable designated requirement (identifier plus team), so a grant the user
+  gave once survives app updates. An ad-hoc development build does not: its
+  requirement embeds the code hash, so every rebuild is a new program to the
+  Keychain and the dialog comes back. That is a property of ad-hoc signing
+  (`docs/DISTRIBUTION.md` §3), not of this design.
+- **What the helper is approved as, a person can see.** `Keychain Access` names
+  the program on the item's Access Control list as `turtlediver-askpass`, and
+  `codesign -dv --verbose=4` on it prints the identifier and team — so the grant
+  is a named, revocable thing rather than "whatever ran a script".
+
 ## Non-goals
 
 These are deliberate and should not be "fixed" later:
@@ -539,6 +587,19 @@ expire:
 
     # leftover privileged processes — names only, never argv
     pgrep -x sudo; pgrep -x openconnect
+
+    # the app's own askpass helper, and what it is signed as (§11)
+    ls -l /Applications/TurtleDiver.app/Contents/Library/HelperTools/
+    codesign -dv --verbose=4 \
+      /Applications/TurtleDiver.app/Contents/Library/HelperTools/turtlediver-askpass
+
+Running that helper by hand is not a check worth making: under its installed
+name it will try to read the administrator password and the Keychain will ask
+for consent — the dialog an unattended connect has to raise, and the one a
+person should answer deliberately rather than while debugging something else.
+Run it under any *other* name (a copy in `/tmp`) and it refuses with a usage
+sentence and `EX_USAGE` (64) instead, which is the part that costs nothing to
+verify.
 
 `~/Library/Logs/TurtleDiver/launch.log` shows the sweep (`Step 0c`) and what it
 decided. `~/Library/Logs/TurtleDiver/vpn.log` shows the chosen strategy for each
