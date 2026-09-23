@@ -41,6 +41,13 @@ AGENT_INSTALL_NAME="turtlediver-agent"
 CLI_PRODUCT="turtlediver"
 CLI_INSTALL_DIR="usr/local/bin"
 CLI_INSTALL_NAME="turtlediver"
+# The second name the same binary is installed under, because `sudo -A` has to be
+# given a *program* to run and that program is the one thing allowed to print the
+# stored administrator password. A symlink rather than a copy: one file, one
+# signature, one Keychain grant, and `ps` cannot show two programs where there is
+# one. Asked for by name wherever the route is described, so the two places
+# cannot drift apart.
+CLI_ASKPASS_NAME="turtlediver-askpass"
 
 MAKE_DMG=1
 MAKE_PKG=1
@@ -450,7 +457,10 @@ make_pkg() {
     ditto "$cli_bin" "$pkgroot/$CLI_INSTALL_DIR/$CLI_INSTALL_NAME" \
         || die "could not stage the command line tool"
     chmod 0755 "$pkgroot/$CLI_INSTALL_DIR/$CLI_INSTALL_NAME"
+    ln -s "$CLI_INSTALL_NAME" "$pkgroot/$CLI_INSTALL_DIR/$CLI_ASKPASS_NAME" \
+        || die "could not link the askpass helper beside the command line tool"
     ok "the command line tool installs to /$CLI_INSTALL_DIR/$CLI_INSTALL_NAME, team $cli_team"
+    ok "/$CLI_INSTALL_DIR/$CLI_ASKPASS_NAME is the same binary, which is what sudo -A runs"
     sed "s/@VERSION@/$VERSION/g" "$PACKAGING_DIR/README_INSTALL.txt" > "$resources/README_INSTALL.txt"
 
     rm -f "$component"
@@ -603,6 +613,24 @@ verify_pkg() {
             ok "the packaged command line tool runs"
         else
             bad "the packaged command line tool did not run"; rc=1
+        fi
+        # And the askpass helper has to arrive with it, as a *link* — the whole
+        # reason the helper is this binary rather than a copy of it is that the
+        # Keychain grant belongs to one program, so a package that shipped a
+        # second file, or nothing at all, would silently send every unattended
+        # connect to exit 7.
+        cli_askpass="$(dirname "$cli_installed")/$CLI_ASKPASS_NAME"
+        if [ -L "$cli_askpass" ] && [ "$(readlink "$cli_askpass")" = "$CLI_INSTALL_NAME" ]; then
+            # Deliberately *not* run. Under that name the binary is the helper — it
+            # decides from `argv[0]` — so running it here would read an
+            # administrator password out of the packaging machine's Keychain and
+            # print it. What can be checked is that the link resolves to the file
+            # above, which has already verified and run under its own name.
+            ok "installs $CLI_ASKPASS_NAME as a link to $CLI_INSTALL_NAME, into the verified binary"
+        elif [ -e "$cli_askpass" ]; then
+            bad "$CLI_ASKPASS_NAME is packaged as something other than a link to $CLI_INSTALL_NAME"; rc=1
+        else
+            bad "the package would not install $CLI_ASKPASS_NAME beside the command line tool, so no password can arrive on a pam_tid machine"; rc=1
         fi
     else
         bad "the package would not install the command line tool to /$CLI_INSTALL_DIR/$CLI_INSTALL_NAME"

@@ -338,12 +338,35 @@ public enum TunnelAgentChannel {
         ///   the measured failure this branch exists to avoid: `pam_tid` never
         ///   reads the pipe, and the `sudo` blocks in the dialog forever.
         /// * `.neverPrompt` asks nobody and fails if the timestamp is cold.
-        public static func warmupArguments(_ strategy: ElevationStrategy) -> [String] {
+        ///
+        /// `delivery` overrides the pipe for the one door that does not use one:
+        /// `.askpass` runs `sudo -A`, which starts the program named in
+        /// `SUDO_ASKPASS` and reads the password from its standard output. That is
+        /// how a password can reach a Mac whose `pam_tid` would swallow a pipe —
+        /// the module stands its own dialog down in askpass mode — and the caller
+        /// has to have a helper to point at, which is why the path travels with
+        /// the arguments rather than being spelled here.
+        public static func warmupArguments(
+            _ strategy: ElevationStrategy,
+            delivery: SudoPasswordDelivery = .standardInput
+        ) -> [String] {
+            if delivery == .askpass { return ["-A", "-v"] }
             switch strategy {
             case .storedPassword: return ["-S", "-v"]
             case .systemPrompt: return ["-v"]
             case .neverPrompt: return ["-n", "-v"]
             }
+        }
+
+        /// The variable `sudo` reads the askpass program's path from.
+        public static let askpassVariable = "SUDO_ASKPASS"
+
+        /// The environment for a child that authenticates through the askpass
+        /// helper: the helper's *path*, and nothing else. The password is printed
+        /// by the helper, so it is not in this child's environment either — a
+        /// value there is readable by any process of this user (`ps -E`).
+        public static func askpassEnvironment(helperPath: String) -> [String: String] {
+            [askpassVariable: helperPath]
         }
 
         /// The bytes for the warm-up's standard input. Empty means the caller
@@ -461,10 +484,22 @@ public enum TunnelAgentChannel {
             self.executable = executable
         }
 
-        public func run(arguments: [String], stdin: Data?, timeout: TimeInterval) -> Result {
+        public func run(
+            arguments: [String],
+            stdin: Data?,
+            timeout: TimeInterval,
+            environment: [String: String] = [:]
+        ) -> Result {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
+            // Merged, never replaced: `sudo` is being given one extra fact (the
+            // askpass helper's path) and must keep everything else it inherited,
+            // `PATH` and the rest of `sudo`'s own inputs among them.
+            if !environment.isEmpty {
+                process.environment = ProcessInfo.processInfo.environment
+                    .merging(environment) { _, added in added }
+            }
 
             let err = Pipe()
             process.standardError = err

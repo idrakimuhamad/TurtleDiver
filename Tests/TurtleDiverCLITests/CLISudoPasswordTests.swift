@@ -398,40 +398,274 @@ final class CLISudoPasswordTests: XCTestCase {
     func testNoSourceIsNeverRefused() {
         // The option is opt-in: without it nothing about the machine's stack
         // changes what the connect does.
-        XCTAssertNil(ElevationRoute.refusal(for: nil, on: .systemPrompt))
+        XCTAssertNil(ElevationRoute.refusal(for: nil, on: .systemPrompt, askpassHelper: nil))
+        XCTAssertNil(ElevationRoute.refusal(
+            for: nil,
+            on: .systemPrompt,
+            askpassHelper: "/usr/local/bin/turtlediver-askpass"
+        ))
     }
 
     func testASourceOnAMachineThatCanReadItIsAccepted() {
         for source in SudoPasswordSource.allCases {
-            XCTAssertNil(ElevationRoute.refusal(for: source, on: .storedPassword))
+            XCTAssertNil(ElevationRoute.refusal(for: source, on: .storedPassword, askpassHelper: nil))
         }
     }
 
-    func testASourceOnATouchIDMachineIsRefusedWithItsRemedies() throws {
+    // MARK: - Which door the password takes
+
+    func testTheMachinePicksTheDoor() {
+        // No source, no door: nothing is delivered and nothing is checked.
+        XCTAssertNil(ElevationRoute.delivery(for: nil, on: .systemPrompt))
+        XCTAssertNil(ElevationRoute.delivery(for: nil, on: .storedPassword))
+        // A stack that reads a pipe gets the pipe: one process fewer, and no
+        // helper has to be installed for it.
         for source in SudoPasswordSource.allCases {
+            XCTAssertEqual(ElevationRoute.delivery(for: source, on: .storedPassword), .standardInput)
+        }
+        // pam_tid swallows the pipe and stands its dialog down for askpass, so
+        // this is the door that works there — and it is the *only* one that does.
+        for source in SudoPasswordSource.allCases {
+            XCTAssertEqual(ElevationRoute.delivery(for: source, on: .systemPrompt), .askpass)
+        }
+    }
+
+    func testOnlyThePipeDoorWritesThePasswordToStandardInput() {
+        // The property the app's credential block reads: on the askpass route the
+        // child's standard input is left to the tunnel's credentials alone.
+        XCTAssertTrue(SudoPasswordDelivery.standardInput.writesThePasswordToStandardInput)
+        XCTAssertFalse(SudoPasswordDelivery.askpass.writesThePasswordToStandardInput)
+    }
+
+    func testAKeychainPasswordOnATouchIDMachineGoesToTheHelper() {
+        // What the old refusal got wrong: this combination is deliverable. The
+        // helper is what makes it so, which is why it is not refused.
+        XCTAssertNil(ElevationRoute.refusal(
+            for: .keychain,
+            on: .systemPrompt,
+            askpassHelper: "/usr/local/bin/turtlediver-askpass"
+        ))
+    }
+
+    func testAKeychainPasswordWithoutTheHelperIsRefusedWithItsPath() throws {
+        let refusal = try XCTUnwrap(ElevationRoute.refusal(
+            for: .keychain,
+            on: .systemPrompt,
+            askpassHelper: nil,
+            expectedHelperPath: "/usr/local/bin/turtlediver-askpass"
+        ))
+        // A missing *program* is exit 7, not "a dialog is needed": the remedy is
+        // installing the tool that carries the helper, and there is nothing a
+        // person could answer to open that door instead.
+        XCTAssertEqual(refusal.code, .missingTool)
+        let detail = refusal.message
+        XCTAssertTrue(detail.contains("pam_tid"), detail)
+        XCTAssertTrue(detail.contains("/usr/local/bin/turtlediver-askpass"), detail)
+        XCTAssertTrue(detail.contains("nothing was started"), detail)
+        XCTAssertEqual(refusal.details["helper"], "/usr/local/bin/turtlediver-askpass")
+    }
+
+    func testAPipedPasswordOnATouchIDMachinePointsAtTheKeychain() throws {
+        for helper in [nil, "/usr/local/bin/turtlediver-askpass"] {
             let refusal = try XCTUnwrap(
-                ElevationRoute.refusal(for: source, on: .systemPrompt),
-                "\(source.rawValue) was accepted on a machine that cannot read it"
+                ElevationRoute.refusal(for: .stdin, on: .systemPrompt, askpassHelper: helper),
+                "stdin was accepted on a machine that cannot read a pipe (helper: \(helper ?? "none"))"
             )
-            // Exit 6 is "a dialog would be needed": that is exactly what this
-            // machine does, and the point is to say so before it appears.
             XCTAssertEqual(refusal.code, .needsApproval)
             let detail = refusal.message
             XCTAssertTrue(detail.contains("pam_tid"), "the refusal does not name what answers: \(detail)")
-            XCTAssertTrue(detail.contains("nothing was started"), "the refusal does not say nothing ran: \(detail)")
-            XCTAssertTrue(
-                detail.contains("without the option"),
-                "the refusal does not offer the dialog route: \(detail)"
-            )
-            // And where the machine-wide route used to be the only one named, the
-            // exemption now has to be reachable from here: it is the route that
-            // keeps Touch ID for everything else, and this message is the only
-            // thing a caller sees before they go looking.
-            XCTAssertTrue(
-                detail.contains("turtlediver help"),
-                "the refusal does not point at the recipe: \(detail)"
-            )
+            XCTAssertTrue(detail.contains("never read"), "the refusal does not say the pipe is dead: \(detail)")
+            XCTAssertTrue(detail.contains("nothing was started"), detail)
+            // The door that does work here, named — not the sudoers recipe the
+            // old message pointed at, which was never the only answer.
+            XCTAssertTrue(detail.contains("keychain"), "the refusal does not name the source: \(detail)")
+            XCTAssertTrue(detail.contains("without the option"), detail)
+            XCTAssertEqual(refusal.details["source"], "keychain")
         }
+    }
+
+    func testASourceOnAMachineThatNeverPromptsIsRefused() throws {
+        // Unreachable from `strategy()` — the probe only ever answers
+        // `.systemPrompt` or `.storedPassword` — but the step must not claim a
+        // door exists on a machine that asks nobody anything.
+        let refusal = try XCTUnwrap(ElevationRoute.refusal(
+            for: .keychain,
+            on: .neverPrompt,
+            askpassHelper: "/usr/local/bin/turtlediver-askpass"
+        ))
+        XCTAssertEqual(refusal.code, .needsApproval)
+        XCTAssertTrue(refusal.message.contains("nothing for a password to answer"), refusal.message)
+    }
+
+    func testASuppliedPasswordOnATouchIDMachineGoesThroughTheHelper() throws {
+        // The route the old refusal denied existed. `sudo -A`, the helper's path
+        // in the environment, nothing on the pipe — and no password anywhere this
+        // process can be read from.
+        let sudo = try FakeSudo()
+        let helper = "/usr/local/bin/turtlediver-askpass"
+        XCTAssertEqual(
+            ConnectCommand.warmUp(
+                hasTerminal: false,
+                strategy: .systemPrompt,
+                delivery: .askpass,
+                askpassHelper: helper,
+                runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+                timeout: 10
+            ),
+            .warmed
+        )
+        XCTAssertEqual(sudo.argv, "-A\n-v\n")
+        XCTAssertEqual(sudo.standardInput, "", "the askpass route piped something")
+        XCTAssertTrue(
+            sudo.environment.contains("SUDO_ASKPASS=\(helper)"),
+            "the helper's path never reached sudo's environment"
+        )
+    }
+
+    func testTheAskpassRoutePutsNoPasswordInTheChildsEnvironment() throws {
+        // The one value that must never be in an environment: `ps -E` reads it,
+        // and every child inherits it. The helper prints the password instead.
+        let sudo = try FakeSudo()
+        _ = ConnectCommand.warmUp(
+            hasTerminal: false,
+            strategy: .systemPrompt,
+            secret: "hunter2",
+            delivery: .askpass,
+            askpassHelper: "/usr/local/bin/turtlediver-askpass",
+            runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+            timeout: 10
+        )
+        XCTAssertFalse(sudo.environment.contains("hunter2"), "the password reached the environment")
+        XCTAssertFalse(sudo.argv.contains("hunter2"), "the password reached argv")
+        XCTAssertFalse(sudo.standardInput.contains("hunter2"), "the password reached the pipe")
+    }
+
+    func testTheAskpassRouteWithoutAHelperIsARefusalNotADowngrade() throws {
+        // A caller said "here is the password" and there is no program to print
+        // it. Falling back to a dialog would be the failure this whole path
+        // exists to avoid, so it refuses.
+        let sudo = try FakeSudo()
+        XCTAssertEqual(
+            ConnectCommand.warmUp(
+                hasTerminal: true,
+                strategy: .systemPrompt,
+                delivery: .askpass,
+                askpassHelper: nil,
+                runner: TunnelAgentChannel.SudoStepRunner(executable: sudo.executable),
+                timeout: 10
+            ),
+            .refused
+        )
+        XCTAssertEqual(sudo.argv, "", "something was run with no helper to run")
+    }
+
+    func testTheAskpassNotesNameTheHelperAndTheConsentPrompt() {
+        let lines = ConnectCommand.warmUpNotes(
+            strategy: .systemPrompt,
+            hasTerminal: true,
+            hasPassword: true,
+            delivery: .askpass
+        )
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].contains(AskpassHelper.installedName), lines[0])
+        XCTAssertTrue(lines[0].contains("askpass"), lines[0])
+        XCTAssertTrue(lines[0].contains("no Touch ID"), lines[0])
+        // The one dialog that *is* still possible, said before it appears.
+        XCTAssertTrue(lines[0].contains("macOS may ask once"), lines[0])
+    }
+
+    func testAnUnansweredHelperIsNotReportedAsABadPassword() {
+        let detail = ConnectCommand.failureDetail(
+            .timedOut,
+            strategy: .systemPrompt,
+            hasTerminal: false,
+            delivery: .askpass
+        )
+        XCTAssertTrue(detail.contains("askpass helper"), detail)
+        XCTAssertTrue(detail.contains("consent"), detail)
+        XCTAssertTrue(detail.contains("Always Allow"), detail)
+        XCTAssertFalse(detail.contains("Touch ID"), detail)
+    }
+
+    func testARefusedHelperPasswordNamesTheItem() {
+        let detail = ConnectCommand.failureDetail(
+            .passwordRefused,
+            strategy: .systemPrompt,
+            hasTerminal: false,
+            delivery: .askpass
+        )
+        XCTAssertTrue(detail.contains("askpass helper"), detail)
+        XCTAssertTrue(detail.contains("Settings ▸ Advanced"), detail)
+    }
+
+    // MARK: - Reading, or not reading, here
+
+    func testTheAskpassRouteDoesNotReadThePasswordInThisProcess() throws {
+        // The point of the route: the helper is the reader. A read here would be
+        // a secret nobody in this process uses, raised as a consent dialog in the
+        // wrong place.
+        var read = 0
+        var checked: [KeychainSecret] = []
+        let errors = Pipe()
+        let output = Output(json: false, quiet: false, out: errors.fileHandleForWriting, err: errors.fileHandleForWriting)
+
+        let secret = try TurtleDiverCLI.sudoPassword(
+            .keychain,
+            delivery: .askpass,
+            output: output,
+            isPresent: { account in checked.append(account); return true },
+            read: { _ in read += 1; return "hunter2" }
+        )
+
+        XCTAssertNil(secret, "the askpass route returned a password it should not have read")
+        XCTAssertEqual(read, 0, "the askpass route read the item in this process")
+        XCTAssertEqual(checked, [.adminPassword])
+        try errors.fileHandleForWriting.close()
+        let said = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertFalse(said.contains("hunter2"), said)
+    }
+
+    func testAMissingItemOnTheAskpassRouteIsRefusedBeforeAnythingRuns() {
+        let output = Output(json: false, quiet: false, out: .nullDevice, err: .nullDevice)
+        XCTAssertThrowsError(try TurtleDiverCLI.sudoPassword(
+            .keychain,
+            delivery: .askpass,
+            output: output,
+            isPresent: { _ in false },
+            read: { _ in XCTFail("the item was read"); return "hunter2" }
+        )) { error in
+            guard let failure = error as? CLIFailure else { return XCTFail("not a CLIFailure: \(error)") }
+            XCTAssertEqual(failure.code, .notConfigured)
+            XCTAssertTrue(failure.message.contains("Settings ▸ Advanced"), failure.message)
+        }
+    }
+
+    func testThePipeRouteStillReadsAndAnnounces() throws {
+        let errors = Pipe()
+        let output = Output(json: false, quiet: false, out: errors.fileHandleForWriting, err: errors.fileHandleForWriting)
+        let secret = try TurtleDiverCLI.sudoPassword(
+            .keychain,
+            delivery: .standardInput,
+            output: output,
+            isPresent: { _ in XCTFail("the askpass check ran on the pipe route"); return false },
+            read: { _ in "hunter2" }
+        )
+        XCTAssertEqual(secret, "hunter2")
+        try errors.fileHandleForWriting.close()
+        let said = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertTrue(said.contains("Keychain"), said)
+        XCTAssertFalse(said.contains("hunter2"), said)
+    }
+
+    func testNoSourceMeansNoReadAndNoCheck() throws {
+        let output = Output(json: false, quiet: false, out: .nullDevice, err: .nullDevice)
+        let secret = try TurtleDiverCLI.sudoPassword(
+            nil,
+            output: output,
+            isPresent: { _ in XCTFail("a presence check ran with no source"); return false },
+            read: { _ in XCTFail("a read ran with no source"); return "hunter2" }
+        )
+        XCTAssertNil(secret)
     }
 
     func testAPasswordIsNeverPipedIntoAMachineThatWouldNotReadIt() throws {

@@ -26,11 +26,22 @@ public struct ElevatedKillPlan: Equatable, Sendable {
     /// (`pam_tid` shows its dialog from inside the PAM stack, with no terminal)
     /// or it fails fast.
     public let stdin: String?
+    /// Extra environment for the child, merged over the inherited one. The only
+    /// thing this project ever puts here is the askpass helper's path
+    /// (`SUDO_ASKPASS`) — never a password, which in an environment is readable
+    /// by every process of this user (`ps -E`) and inherited by every child.
+    public let environment: [String: String]
 
-    public init(executable: URL, arguments: [String], stdin: String? = nil) {
+    public init(
+        executable: URL,
+        arguments: [String],
+        stdin: String? = nil,
+        environment: [String: String] = [:]
+    ) {
         self.executable = executable
         self.arguments = arguments
         self.stdin = stdin
+        self.environment = environment
     }
 
     /// True when this plan hands the stored password to `sudo`. Exactly one
@@ -75,18 +86,37 @@ public enum ElevatedTermination {
     ///   - adminPassword: the stored administrator password, if any.
     ///   - ownProcessGroup: this app's group, so a bogus record can never make
     ///     the app signal itself as root.
+    ///   - askpass: the path of a program that prints the stored administrator
+    ///     password, when this caller has one to offer. It only ever applies to
+    ///     `.systemPrompt`: `pam_tid` refuses to read a pipe, but it stands its
+    ///     own dialog down in askpass mode, so `sudo -A` is the form that can
+    ///     carry a password there. Nil means "this caller has no such helper",
+    ///     which is the behaviour this app has always had.
     public static func plan(
         pid: Int32,
         isProcessGroup: Bool,
         signal: ElevatedSignal,
         strategy: ElevationStrategy,
         adminPassword: String?,
-        ownProcessGroup: Int32
+        ownProcessGroup: Int32,
+        askpass: String? = nil
     ) -> ElevatedKillPlan? {
         guard pid > 1 else { return nil }
         if isProcessGroup, pid == ownProcessGroup { return nil }
         let target = isProcessGroup ? "-\(pid)" : "\(pid)"
         let password = adminPassword ?? ""
+
+        // Before the switch, because this is a second way to be `.systemPrompt`
+        // rather than a fourth strategy: the same machine, with a helper it can
+        // be handed. Whether the helper finds a password is its own question and
+        // its own failure — it reads the item and exits nonzero when it cannot.
+        if strategy.waitsForTheSystem, let askpass {
+            return ElevatedKillPlan(
+                executable: sudo,
+                arguments: ["-A", kill.path, signal.rawValue, target],
+                environment: TunnelAgentChannel.Launch.askpassEnvironment(helperPath: askpass)
+            )
+        }
 
         switch strategy {
         case .neverPrompt:
@@ -185,6 +215,12 @@ public struct SystemElevatedCommandRunner: ElevatedCommandRunning {
         let process = Process()
         process.executableURL = plan.executable
         process.arguments = plan.arguments
+        // Merged, never replaced: the child keeps everything it inherited, and
+        // gains only what the plan adds (the askpass helper's path).
+        if !plan.environment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment
+                .merging(plan.environment) { _, added in added }
+        }
 
         let out = Pipe()
         let err = Pipe()
@@ -324,12 +360,17 @@ public struct ElevatedTerminator: Sendable {
     ///   - adminPassword: the stored administrator password, if any.
     ///   - mayPrompt: false on the quit path, where a dialog would hold the quit
     ///     open. Such a caller may only use `sudo -n` or a piped password.
+    ///   - askpass: the path of a program that prints the stored administrator
+    ///     password, when the caller has one to offer. It is the only route that
+    ///     works on a Mac whose `sudo` answers with `pam_tid` and where nobody is
+    ///     at the machine to answer the dialog.
     public func end(
         _ target: Target,
         openConnectPid: Int32,
         strategy: ElevationStrategy,
         adminPassword: String?,
-        mayPrompt: Bool
+        mayPrompt: Bool,
+        askpass: String? = nil
     ) -> Outcome {
         guard openConnectPid > 1 else {
             return .refused("the recorded pid (\(openConnectPid)) is not a process")
@@ -370,7 +411,8 @@ public struct ElevatedTerminator: Sendable {
             target: target,
             strategy: strategy,
             adminPassword: adminPassword,
-            mayPrompt: mayPrompt
+            mayPrompt: mayPrompt,
+            askpass: askpass
         ), pid: openConnectPid)
         sent += terminate.sent
         failures += terminate.failures
@@ -383,7 +425,8 @@ public struct ElevatedTerminator: Sendable {
             target: target,
             strategy: strategy,
             adminPassword: adminPassword,
-            mayPrompt: mayPrompt
+            mayPrompt: mayPrompt,
+            askpass: askpass
         ), pid: openConnectPid)
         sent += escalated.sent
         failures += escalated.failures
@@ -418,7 +461,8 @@ public struct ElevatedTerminator: Sendable {
         target: Target,
         strategy: ElevationStrategy,
         adminPassword: String?,
-        mayPrompt: Bool
+        mayPrompt: Bool,
+        askpass: String?
     ) -> [ElevatedKillPlan] {
         var plans: [ElevatedKillPlan] = []
         if let silent = ElevatedTermination.plan(
@@ -437,7 +481,8 @@ public struct ElevatedTerminator: Sendable {
             signal: signal,
             strategy: strategy,
             adminPassword: adminPassword,
-            ownProcessGroup: ownProcessGroup
+            ownProcessGroup: ownProcessGroup,
+            askpass: askpass
         ), asking != plans.first {
             plans.append(asking)
         }

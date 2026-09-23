@@ -25,27 +25,89 @@ public enum ElevationRoute {
         ElevationProbe.live(readFile: readFile).strategy
     }
 
-    /// Refuses `--sudo-password` where the password would never be read.
+    /// Which door a supplied password goes through on this machine, or nil when
+    /// the caller supplied none.
     ///
-    /// Refusing is the only honest answer available. Continuing would raise the
-    /// very dialog the caller asked to avoid and then blame the password for the
-    /// timeout; taking the password and quietly running the no-password route
-    /// would ignore what the caller said. Both are worse than naming what this
-    /// machine does and what the caller can do about it.
-    public static func refusal(
+    /// Two doors, and the machine picks between them. Where nothing precedes the
+    /// module that reads a pipe, `sudo -S` is used: it is one process fewer and
+    /// no helper has to be installed. Where `pam_tid` answers, the pipe is dead —
+    /// the module raises its own dialog ahead of the reader — and `sudo -A` is
+    /// the door that works, because `pam_tid` stands that dialog down in askpass
+    /// mode. `--sudo-password` therefore goes on working on a Mac with Touch ID
+    /// for `sudo`; it just travels a different way.
+    ///
+    /// `.neverPrompt` is not a machine this can be called on — `strategy()`
+    /// never returns it — and `refusal` rejects it before this is consulted.
+    public static func delivery(
         for source: SudoPasswordSource?,
         on strategy: ElevationStrategy
+    ) -> SudoPasswordDelivery? {
+        guard source != nil else { return nil }
+        return strategy.pipesTheStoredPassword ? .standardInput : .askpass
+    }
+
+    /// Refuses a source this machine cannot deliver, naming the door that can.
+    ///
+    /// Refusing is the only honest answer available for a combination that
+    /// cannot work. Continuing would raise the very dialog the caller asked to
+    /// avoid and then blame the password for the timeout; taking the password and
+    /// quietly running the no-password route would ignore what the caller said.
+    /// Both are worse than naming what this machine does and what to do about it
+    /// — and the second is worse than the first, because a caller that believes
+    /// its password was used has no reason to look again.
+    ///
+    /// The two refusals are the two ways a named source can miss: `stdin` on a
+    /// Mac where a pipe is never read, and `keychain` on one where the helper
+    /// that could carry it is not installed. Neither falls back to the other.
+    public static func refusal(
+        for source: SudoPasswordSource?,
+        on strategy: ElevationStrategy,
+        askpassHelper: String?,
+        expectedHelperPath: String = AskpassHelper.expectedPath()
     ) -> CLIFailure? {
-        guard source != nil, !strategy.pipesTheStoredPassword else { return nil }
-        return CLIFailure(
-            .needsApproval,
-            "\(ElevationProbe.touchIDModuleName) answers sudo on this Mac, so its own Touch ID or"
-                + " administrator-password dialog appears before anything can read a piped password,"
-                + " and --sudo-password cannot skip it; nothing was started."
-                + " Run the same command without the option and answer the prompt, or run"
-                + " `turtlediver help` and read Unattended connects for the two ways to do this with"
-                + " nobody at the machine."
-        )
+        guard let source else { return nil }
+        // The pipe is read here: the source works as offered.
+        if strategy.pipesTheStoredPassword { return nil }
+
+        guard strategy.waitsForTheSystem else {
+            // Nothing is ever asked on this machine, so there is nothing for a
+            // password to answer.
+            return CLIFailure(
+                .needsApproval,
+                "this machine runs sudo without prompting, so there is nothing for a password to"
+                    + " answer; nothing was started. Run the same command without the option."
+            )
+        }
+
+        switch (source, askpassHelper) {
+        case (.keychain, .some):
+            // The one combination that works here, and the reason the old
+            // refusal is gone: --sudo-password keychain is deliverable on a Mac
+            // with Touch ID for sudo, through sudo's askpass helper.
+            return nil
+
+        case (.keychain, .none):
+            return CLIFailure(
+                .missingTool,
+                "\(ElevationProbe.touchIDModuleName) answers sudo on this Mac, so a password can only"
+                    + " arrive through sudo's askpass helper, which is not installed at"
+                    + " \(expectedHelperPath); nothing was started. Install the command line tool that"
+                    + " carries it (the .pkg installs both), or run the same command without the option"
+                    + " and answer the prompt.",
+                details: ["helper": expectedHelperPath]
+            )
+
+        case (.stdin, _):
+            return CLIFailure(
+                .needsApproval,
+                "\(ElevationProbe.touchIDModuleName) answers sudo on this Mac, so a password piped to"
+                    + " standard input is never read; nothing was started."
+                    + " \(SudoPasswordSource.keychain.syntax) is the source that works here — sudo's"
+                    + " askpass helper prints the stored password — or run the same command without the"
+                    + " option and answer the prompt.",
+                details: ["source": SudoPasswordSource.keychain.rawValue]
+            )
+        }
     }
 }
 
@@ -159,13 +221,27 @@ public enum ConnectCommand {
 
     /// What to say *before* authenticating, so a caller learns whether a dialog
     /// is coming while there is still time to answer it — the same "diagnose
-    /// before the wait" the app's own log does. Pure, so all four combinations
+    /// before the wait" the app's own log does. Pure, so all the combinations
     /// are pinned by tests instead of being discovered at a prompt.
+    ///
+    /// `delivery` is checked first because on the askpass route it is the whole
+    /// answer: the password is read by another process, and the note has to say
+    /// which one, because that is where macOS's one-time consent dialog will
+    /// appear.
     public static func warmUpNotes(
         strategy: ElevationStrategy,
         hasTerminal: Bool,
-        hasPassword: Bool
+        hasPassword: Bool,
+        delivery: SudoPasswordDelivery = .standardInput
     ) -> [String] {
+        if delivery == .askpass {
+            return [
+                "sudo: authenticating through sudo's askpass helper (\(AskpassHelper.installedName)), which"
+                    + " prints the stored administrator password; \(ElevationProbe.touchIDModuleName) stands"
+                    + " its own dialog down in askpass mode, so there is no Touch ID prompt and nothing to"
+                    + " type. macOS may ask once, the first time that helper reads the item.",
+            ]
+        }
         if hasPassword {
             return [
                 "sudo: authenticating with the supplied administrator password (sudo -S -v);"
@@ -190,16 +266,29 @@ public enum ConnectCommand {
     public static func failureDetail(
         _ outcome: WarmUpOutcome,
         strategy: ElevationStrategy,
-        hasTerminal: Bool
+        hasTerminal: Bool,
+        delivery: SudoPasswordDelivery = .standardInput
     ) -> String {
         switch outcome {
         case .warmed:
             return "sudo is authenticated"
         case .passwordRefused:
+            guard delivery != .askpass else {
+                return "sudo did not accept the password its askpass helper printed; nothing was started."
+                    + " Check the item behind --sudo-password keychain (Settings ▸ Advanced is where the app"
+                    + " stores it, and \(AskpassHelper.installedName) is what reads it), or leave the option"
+                    + " out and answer the prompt yourself."
+            }
             return "sudo did not accept the administrator password that was supplied; nothing was started."
                 + " Check the item behind --sudo-password keychain (Settings ▸ Advanced is where the app"
                 + " stores it), or leave the option out and answer the prompt yourself."
         case .timedOut:
+            if delivery == .askpass {
+                return "sudo's askpass helper did not come back within \(Int(warmUpTimeoutSeconds))s; nothing"
+                    + " was started. If macOS asked for consent to read the stored administrator password,"
+                    + " that dialog was not answered — connect again with somebody at the machine, and click"
+                    + " Always Allow so the next run needs nobody."
+            }
             guard strategy.waitsForTheSystem else {
                 return "the sudo prompt went unanswered for \(Int(warmUpTimeoutSeconds))s; nothing was started"
             }
@@ -264,13 +353,18 @@ public enum ConnectCommand {
 
     /// The one authentication at connect, as a direct child of this process.
     ///
-    /// Three routes, and offering a password is what picks between them:
+    /// Four routes, and what the caller offered is what picks between them:
     ///
-    /// * **A supplied password** (`--sudo-password`) goes into `sudo -S -v`,
-    ///   which never prompts and never waits on a dialog — on a machine whose
-    ///   PAM stack can read the pipe. `pam_tid` sits *ahead* of the module that
-    ///   reads it and raises its own dialog first, so a password may only be
-    ///   piped where `strategy.pipesTheStoredPassword` says it will be read.
+    /// * **A supplied password, askpass** (`--sudo-password keychain` on a Mac
+    ///   whose `pam_tid` answers): `sudo -A` starts the helper named in
+    ///   `SUDO_ASKPASS`, which prints the stored password. `pam_tid` stands its
+    ///   own dialog down in askpass mode, so this is the route that reaches the
+    ///   module that reads a password where nothing else can.
+    /// * **A supplied password, piped** (`--sudo-password` on a machine without
+    ///   `pam_tid`): `sudo -S -v`, which never prompts. `pam_tid` sits *ahead* of
+    ///   the module that reads the pipe and raises its own dialog first, so a
+    ///   password may only be piped where `strategy.pipesTheStoredPassword` says
+    ///   it will be read; `ElevationRoute` refuses the combination otherwise.
     /// * **No password, terminal**: `sudo -v` prompts on `/dev/tty` — its
     ///   standard input being `/dev/null` does not stop it — so Touch ID and a
     ///   typed password both work.
@@ -292,9 +386,29 @@ public enum ConnectCommand {
         hasTerminal: Bool,
         strategy: ElevationStrategy = .storedPassword,
         secret: String? = nil,
+        delivery: SudoPasswordDelivery = .standardInput,
+        askpassHelper: String? = nil,
         runner: TunnelAgentChannel.SudoStepRunner = TunnelAgentChannel.SudoStepRunner(),
         timeout: TimeInterval = ConnectCommand.warmUpTimeoutSeconds
     ) -> WarmUpOutcome {
+        // The askpass route first, and `delivery` alone is what selects it: on
+        // this door the password is printed by the helper, so this process has
+        // no `secret` to pass and `secret` is deliberately not consulted. A
+        // missing helper is a refusal rather than a quiet downgrade — the caller
+        // said *here is the password*, and a route that ignores it is the one
+        // failure this whole path exists to avoid.
+        if delivery == .askpass {
+            guard let askpassHelper else { return .refused }
+            let result = runner.run(
+                arguments: TunnelAgentChannel.Launch.warmupArguments(strategy, delivery: .askpass),
+                // Nothing is piped: `sudo` reads the password from the helper's
+                // standard output, not from this child's standard input.
+                stdin: nil,
+                timeout: timeout,
+                environment: TunnelAgentChannel.Launch.askpassEnvironment(helperPath: askpassHelper)
+            )
+            return WarmUpOutcome(result, passwordWasSupplied: true)
+        }
         if let secret, !secret.isEmpty, strategy.pipesTheStoredPassword {
             // The bytes go to the child, never into the arguments: argv is
             // readable by any process running as this user (`ps`, `pgrep -f`),
@@ -618,6 +732,8 @@ public enum DisconnectCommand {
         mayPrompt: Bool,
         strategy: ElevationStrategy,
         adminPassword: String? = nil,
+        delivery: SudoPasswordDelivery? = nil,
+        askpassHelper: String? = nil,
         terminator: ElevatedTerminator = ElevatedTerminator(),
         elevationRecord: URL = ElevationRecord.path
     ) throws -> Result {
@@ -636,13 +752,20 @@ public enum DisconnectCommand {
             target = .group(pgid)
         }
 
-        let chosen = elevation(strategy: strategy, hasTerminal: mayPrompt, adminPassword: adminPassword)
+        let chosen = elevation(
+            strategy: strategy,
+            hasTerminal: mayPrompt,
+            adminPassword: adminPassword,
+            delivery: delivery,
+            askpassHelper: askpassHelper
+        )
         let outcome = terminator.end(
             target,
             openConnectPid: pid,
             strategy: chosen.strategy,
             adminPassword: chosen.adminPassword,
-            mayPrompt: chosen.mayPrompt
+            mayPrompt: chosen.mayPrompt,
+            askpass: chosen.askpass
         )
 
         switch outcome {
@@ -660,27 +783,42 @@ public enum DisconnectCommand {
         }
     }
 
-    /// The strategy, the prompt permission and the password a teardown runs
-    /// with, resolved in one place so the command holds no opinion of its own.
+    /// The strategy, the prompt permission, the password and the askpass helper a
+    /// teardown runs with, resolved in one place so the command holds no opinion
+    /// of its own.
     ///
     /// With a password offered, the teardown authenticates the way the connect's
-    /// warm-up did — `sudo -S` with those bytes — so the two halves of a scripted
-    /// session agree instead of one of them raising a dialog the other avoided.
+    /// warm-up did, so the two halves of a scripted session agree instead of one
+    /// of them raising a dialog the other avoided: `sudo -S` with those bytes on a
+    /// machine that reads the pipe, and `sudo -A` with the helper on one whose
+    /// `pam_tid` would swallow it.
     ///
     /// `mayPrompt` is then true, which needs saying out loud: that is not a claim
     /// that a dialog may appear, it is what lets the strategy's own plan onto
-    /// `ElevatedTerminator`'s list at all. `.storedPassword` asks nobody — the
-    /// password is already on the pipe — so nothing is raised. The `sudo -n`
-    /// attempt still comes first in every case, so a tunnel connected moments ago
-    /// is signalled without the password being fed to `sudo` at all.
+    /// `ElevatedTerminator`'s list at all. Neither password route asks a person
+    /// anything — the password is on a pipe, or printed by the helper — so nothing
+    /// is raised. The `sudo -n` attempt still comes first in every case, so a
+    /// tunnel connected moments ago is signalled without a password being fed to
+    /// `sudo` at all.
+    ///
+    /// On the askpass route `adminPassword` stays nil deliberately: the helper
+    /// reads the item itself, so the only thing this process contributes is the
+    /// helper's path. `.systemPrompt` is kept as the strategy for the same reason
+    /// — it is what this machine does, and the askpass plan is the one form of it
+    /// that can carry a password.
     public static func elevation(
         strategy: ElevationStrategy,
         hasTerminal: Bool,
-        adminPassword: String? = nil
-    ) -> (strategy: ElevationStrategy, mayPrompt: Bool, adminPassword: String?) {
-        guard let adminPassword, !adminPassword.isEmpty else {
-            return (strategy, hasTerminal, nil)
+        adminPassword: String? = nil,
+        delivery: SudoPasswordDelivery? = nil,
+        askpassHelper: String? = nil
+    ) -> (strategy: ElevationStrategy, mayPrompt: Bool, adminPassword: String?, askpass: String?) {
+        if delivery == .askpass, let askpassHelper {
+            return (strategy, true, nil, askpassHelper)
         }
-        return (.storedPassword, true, adminPassword)
+        guard let adminPassword, !adminPassword.isEmpty else {
+            return (strategy, hasTerminal, nil, nil)
+        }
+        return (.storedPassword, true, adminPassword, nil)
     }
 }

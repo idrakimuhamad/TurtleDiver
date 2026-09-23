@@ -78,11 +78,18 @@ The disk image does not carry it — drag-to-Applications installs only the app.
 It reads the settings the app already has and never writes them, and it never
 stores your administrator password: by default it authenticates through sudo's
 own prompt, and it can be handed one for a single run with `--sudo-password
-keychain|stdin` (never on the command line). A connect that has to run with
-nobody at the machine needs one setup you install yourself: either a sudoers
-rule exempting /usr/local/libexec/turtlediver-agent from authentication, or
-dropping the pam_tid line from /etc/pam.d/sudo_local. Both are written up under
-"Unattended connects" in docs/CLI.md.
+keychain|stdin` (never on the command line).
+
+On a Mac where Touch ID answers sudo, the keychain source is delivered through
+sudo's askpass helper rather than a pipe: the package also installs
+`/usr/local/bin/turtlediver-askpass`, the same binary under a second name, whose
+only job is printing that one stored password when sudo asks for it. The first
+run asks once for the Keychain item — click Always Allow and later runs need
+nobody, and Touch ID stays in charge of every other use of sudo. A caller that
+would rather store no password at all can instead exempt
+/usr/local/libexec/turtlediver-agent from authentication in sudoers, which is
+the blunter instrument: it is passwordless root for anything running as you.
+Both routes are written up under "Unattended connects" in docs/CLI.md.
 See docs/CLI.md in the source for the full command set and exit codes.
 
 WHERE THINGS LIVE
@@ -92,6 +99,7 @@ WHERE THINGS LIVE
     ~/Library/Logs/TurtleDiver/vpn.log                    connection log
     ~/Library/Logs/TurtleDiver/launch.log                 launch log
     /usr/local/bin/turtlediver                            the command line tool
+    /usr/local/bin/turtlediver-askpass                    sudo's askpass helper
     /usr/local/libexec/turtlediver-agent                  the tunnel helper
 
 Credentials live in the login Keychain, never in a preferences file.

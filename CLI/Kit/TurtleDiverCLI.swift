@@ -85,6 +85,12 @@ public enum TurtleDiverCLI {
         // supplied password can be read at all — and the answer must come before
         // a Keychain dialog or a Keychain read, not after both.
         let elevation = ElevationRoute.strategy()
+        // The helper `sudo -A` would run, if this machine needs one and it is
+        // installed. Located here, beside the strategy, because the two together
+        // are what decides whether a supplied password can be delivered: the
+        // machine says which door, and the helper is what the askpass door needs
+        // to exist.
+        let askpassHelper = AskpassHelper.path()
         // Refuse to start a second tunnel. Not a safety property — the pid file
         // and the group record tolerate two — but two openconnects on one host
         // is never what the caller meant, and saying so is cheaper than letting
@@ -112,7 +118,11 @@ public enum TurtleDiverCLI {
         // that raises its own sudo dialog would otherwise take the password and
         // hang on that dialog.
         if authentication == .required,
-           let refusal = ElevationRoute.refusal(for: passwordSource, on: elevation) {
+           let refusal = ElevationRoute.refusal(
+               for: passwordSource,
+               on: elevation,
+               askpassHelper: askpassHelper
+           ) {
             throw refusal
         }
 
@@ -140,27 +150,44 @@ public enum TurtleDiverCLI {
 
         let hasTerminal = ConnectCommand.hasTerminal()
         if authentication == .required {
+            // Which of the two doors the password travels — or none, when the
+            // caller offered none. Decided before the read, because the askpass
+            // door has no read *here*: the helper prints the password, so this
+            // process only checks that there is one to print.
+            let delivery = ElevationRoute.delivery(for: passwordSource, on: elevation)
             // The administrator password, if the caller offered one. Read after the
             // credentials above so that a missing VPN password — the more common
             // failure — is reported before anything is asked for, and read here, not
             // earlier, so it is held for as little of the command's life as possible.
-            let secret = try sudoPassword(passwordSource, output: output)
+            let secret = try sudoPassword(
+                passwordSource,
+                delivery: delivery,
+                output: output
+            )
             for line in ConnectCommand.warmUpNotes(
                 strategy: elevation,
                 hasTerminal: hasTerminal,
-                hasPassword: secret != nil
+                hasPassword: passwordSource != nil,
+                delivery: delivery ?? .standardInput
             ) {
                 output.note(line)
             }
             let warmUp = ConnectCommand.warmUp(
                 hasTerminal: hasTerminal,
                 strategy: elevation,
-                secret: secret
+                secret: secret,
+                delivery: delivery ?? .standardInput,
+                askpassHelper: askpassHelper
             )
             guard warmUp == .warmed else {
                 throw CLIFailure(
                     .needsApproval,
-                    ConnectCommand.failureDetail(warmUp, strategy: elevation, hasTerminal: hasTerminal)
+                    ConnectCommand.failureDetail(
+                        warmUp,
+                        strategy: elevation,
+                        hasTerminal: hasTerminal,
+                        delivery: delivery ?? .standardInput
+                    )
                 )
             }
         } else {
@@ -217,29 +244,45 @@ public enum TurtleDiverCLI {
         _ parsed: ParsedCommandLine,
         output: Output,
         readStatus: () -> TunnelStatus = { TunnelStatus.read() },
-        readPassword: (SudoPasswordSource) throws -> String = { try SudoPassword.read($0) }
+        readPassword: (SudoPasswordSource) throws -> String = { try SudoPassword.read($0) },
+        isStored: (KeychainSecret) -> Bool = { $0.isPresent() }
     ) throws -> CLIExitCode {
         let passwordSource = try sudoPasswordSource(parsed)
         let strategy = ElevationRoute.strategy()
+        let askpassHelper = AskpassHelper.path()
         let status = readStatus()
         // Only when there is something to stop. A password is needed to tear a
         // tunnel down, and nothing else; with nothing to do this command is
         // idempotent and says so, flag or no flag, which is the promise scripts
         // rely on when they run it unconditionally at the end.
-        if status.connected, let refusal = ElevationRoute.refusal(for: passwordSource, on: strategy) {
+        if status.connected,
+           let refusal = ElevationRoute.refusal(
+               for: passwordSource,
+               on: strategy,
+               askpassHelper: askpassHelper
+           ) {
             throw refusal
         }
+        let delivery = ElevationRoute.delivery(for: passwordSource, on: strategy)
         // Read only when it will be used, for the same reason: a no-op
         // disconnect must not raise a Keychain consent dialog for a password it
         // is about to throw away, and the caller must not have to answer one.
         let adminPassword = status.connected
-            ? try sudoPassword(passwordSource, output: output, read: readPassword)
+            ? try sudoPassword(
+                passwordSource,
+                delivery: delivery,
+                output: output,
+                isPresent: isStored,
+                read: readPassword
+            )
             : nil
         let result = try DisconnectCommand.run(
             status: status,
             mayPrompt: ConnectCommand.hasTerminal(),
             strategy: strategy,
-            adminPassword: adminPassword
+            adminPassword: adminPassword,
+            delivery: delivery,
+            askpassHelper: askpassHelper
         )
 
         var body: [String: Any] = ["ok": true, "changed": result.changed, "connected": false]
@@ -325,12 +368,31 @@ public enum TurtleDiverCLI {
     /// the Keychain read can raise macOS's own consent dialog, and a dialog with
     /// nothing above it reads as a crash. The value is returned to exactly one
     /// caller, which puts it on a pipe.
+    ///
+    /// `delivery` splits the two doors, and on the askpass door nothing is read
+    /// here at all: `sudo` starts the helper, the helper prints the password, and
+    /// a read in this process would be a secret nobody here uses — raised as a
+    /// consent dialog in the wrong process, above a spawn that is about to time
+    /// out. What this process needs is only whether there is anything for the
+    /// helper to print, and the item's *attributes* answer that without
+    /// decrypting it: `KeychainSecret.isPresent()`, never `read()`.
     static func sudoPassword(
         _ source: SudoPasswordSource?,
+        delivery: SudoPasswordDelivery? = nil,
         output: Output,
+        isPresent: (KeychainSecret) -> Bool = { $0.isPresent() },
         read: (SudoPasswordSource) throws -> String = { try SudoPassword.read($0) }
     ) throws -> String? {
         guard let source else { return nil }
+        if delivery == .askpass {
+            guard isPresent(.adminPassword) else {
+                throw CLIFailure.notConfigured(
+                    "the app has no stored administrator password; save it in the app under"
+                        + " Settings ▸ Advanced"
+                )
+            }
+            return nil
+        }
         output.note(SudoPassword.announcement(for: source))
         return try read(source)
     }
@@ -388,37 +450,38 @@ public enum TurtleDiverCLI {
       one) or `stdin` (one line on the pipe), so sudo never has to prompt. Left
       out — the default — sudo prompts on a terminal and a pipe gets `sudo -n`.
       The CLI never guesses a source and never falls back to another.
-      This only works where sudo reads a piped password: on a Mac whose PAM
-      stack runs pam_tid (Touch ID for sudo) its dialog comes first, nothing can
-      read the pipe, and the option is refused with exit 6 rather than left to
-      wait on a dialog nobody asked for. Without the option that Mac prompts as
-      usual — and where the agent command is exempt from authentication (see
-      Unattended connects) no refresh and no password are needed at all.
+      Where sudo reads a piped password the password goes to `sudo -S`. Where
+      the PAM stack runs pam_tid (Touch ID for sudo) a pipe is never read, and
+      the password goes through sudo's askpass helper — `turtlediver-askpass`,
+      installed with this tool — which pam_tid lets through by standing its own
+      dialog down. `stdin` has no such helper and is refused there, with exit 6,
+      rather than left to wait on a dialog nobody asked for.
 
     Unattended connects
       connect starts the agent with `sudo -n`, so sudo has to be authenticated
-      first. With nobody at the machine, only a stack that reads a piped password
-      can do that, which is what --sudo-password is for. Two ways to get there,
-      both of which you install yourself with the administrator password, and
-      both of which undo by deleting what you added:
+      first. With nobody at the machine, that means a password, and which door it
+      travels is the machine's:
 
-      1. Exempt the agent command, and nothing else. In
-         /etc/sudoers.d/turtlediver (write it with `sudo visudo -f`):
+      1. Touch ID for sudo: sudo's askpass helper, so `--sudo-password keychain`
+         — keychain only, because askpass runs a *program* and reads what it
+         prints, and there is no helper for a pipe. The first run asks once for
+         the Keychain item; click Always Allow and later runs need nobody. The
+         grant belongs to one signed program, is listed on the item in Keychain
+         Access, and is revoked there.
 
-           Defaults!/usr/local/libexec/turtlediver-agent !authenticate
+      2. No pam_tid: `--sudo-password keychain` (or `stdin`) pipes the password
+         to `sudo -S`.
 
-         connect notices this (`sudo -n -l`), skips the refresh and needs no
-         password at all, and Touch ID still guards every other use of sudo. The
-         cost is that anything running as you can then start a root tunnel
-         without authenticating.
-
-      2. Or drop Touch ID for sudo machine-wide, by taking the pam_tid line out
-         of /etc/pam.d/sudo_local, and keep --sudo-password keychain (or stdin)
-         as the connect's credential.
-
-      The CLI makes neither change and never relaxes sudo on its own; docs/CLI.md
-      has the full note, including the Keychain prompts an unattended connect
-      also has to get past.
+      Both keep the password out of argv, out of the environment and off disk,
+      and neither relaxes sudo for anything else. A sudoers rule that exempts the
+      agent command — `Defaults!/usr/local/libexec/turtlediver-agent !authenticate`
+      in /etc/sudoers.d/turtlediver, written with `sudo visudo -f` — also makes a
+      connect unattended: connect notices it with `sudo -n -l` and skips the
+      refresh entirely. It is the blunter instrument, though: anything running as
+      you could then start a root tunnel without authenticating. The CLI installs
+      none of these and never relaxes sudo on its own; docs/CLI.md has the full
+      note, including the Keychain prompts an unattended connect also has to get
+      past.
 
     connect runs in the foreground: the tunnel lives as long as the command does,
     and Ctrl-C ends it. `disconnect` is for a tunnel whose driver is already gone.

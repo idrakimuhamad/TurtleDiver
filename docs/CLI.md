@@ -63,8 +63,8 @@ mean something else.
 | 3 | Not configured — no host, no profile, or the agent is not installed. |
 | 4 | Already connected (`connect`). |
 | 5 | Reserved for a command that needs a tunnel and there is none. No command uses it today; `disconnect` deliberately does not. |
-| 6 | Needs approval: a dialog would be needed and no password can replace it — no terminal and none supplied, or `--sudo-password` on a machine whose `sudo` reaches a dialog first and whose agent command is not exempt from authentication. |
-| 7 | A tool is missing (`openconnect`, `stoken`, `vpn-slice`). |
+| 6 | Needs approval: a dialog would be needed and no password can replace it — no terminal and none supplied, or `--sudo-password stdin` on a machine whose `sudo` reaches a dialog before it would read the pipe. |
+| 7 | A tool is missing (`openconnect`, `stoken`, `vpn-slice`, or `turtlediver-askpass` where the askpass route needs it). |
 | 8 | The tunnel did not stop. |
 | 9 | Timed out. |
 
@@ -133,32 +133,63 @@ exit 3 and 2 respectively — and never quietly replaced by the other door. A
 caller that asked for `stdin` and got a Touch ID dialog hangs; a caller that
 asked for the Keychain and got a prompt fails somewhere it cannot see.
 
-A handed-over password also has to be *readable* by this machine's `sudo`, and
-not every Mac's is. Where Touch ID for `sudo` is enabled, `/etc/pam.d/sudo`
-includes `sudo_local`, whose `auth sufficient pam_tid.so` answers *before* the
-module that would read a piped password: the dialog appears first, the pipe is
-never read, and the connect waits on the very dialog its caller asked to avoid.
-The CLI learns this from the same two world-readable files the app's own
-`ElevationPolicy` reads — no question is put to `sudo` — and refuses the option
-on such a machine **before it starts anything**:
+A handed-over password has to reach this machine's `sudo`, and there is more than
+one door it can use. The machine picks, not the CLI, and the two doors are the
+two answers the app's own `ElevationPolicy` already reads out of the PAM stack.
 
-```console
-$ turtlediver connect --sudo-password keychain
-pam_tid answers sudo on this Mac, so its own Touch ID or administrator-password
-  dialog appears before anything can read a piped password, and --sudo-password
-  cannot skip it; nothing was started. Run the same command without the option
-  and answer the prompt, or run `turtlediver help` and read Unattended connects
-  for the two ways to do this with nobody at the machine.
-$ echo $?
-6
-```
+Where `/etc/pam.d/sudo` does **not** reach `pam_tid`, `sudo -S` reads the pipe and
+the source works as described above: one `sudo -S -v` child, the password written
+to its standard input and let go.
 
-Exit 6 in milliseconds, with nothing read and nothing run. That is the honest
-answer for a caller that cannot see a dialog, and the same code a mistyped
-source gets. The option is not silently ignored and the dialog route is not
-quietly taken in its place: either would leave the caller believing something
-happened that did not. On such a Mac an unattended connect needs one of the two
-setups in "Unattended connects" below, or a person.
+Where Touch ID for `sudo` *is* enabled, `/etc/pam.d/sudo` includes `sudo_local`
+and its `auth sufficient pam_tid.so` answers before the module that would read a
+pipe — `sudo -S` raises its own dialog with the pipe still full. But `pam_tid`
+also stands that dialog **down in askpass mode**: its own strings say so
+(`askpass-enabled`, `sudo askpass mode, not showing UI`), and it was measured on
+a Mac with the stock stack. Askpass is a door this tool can open by itself, so on
+such a machine `--sudo-password keychain` goes through `sudo -A` and the helper
+"Unattended connects" describes: `sudo` starts `turtlediver-askpass`, which reads
+the item and prints it, and no dialog appears at all. `ElevationRoute.delivery`
+is where that decision lives, and it is a decision about *delivery*, not about
+which password the caller named.
+
+Two combinations still cannot be delivered, and both are refused before anything
+is started rather than left to fail in a way the caller cannot see:
+
+* **`--sudo-password stdin` on a `pam_tid` machine — exit 6.** Askpass is the
+  only door there, and askpass runs a *program*: there is no helper that prints a
+  pipe, so this source cannot deliver, and it is not quietly replaced by the
+  dialog it was chosen to avoid. The message names the source that does work:
+
+  ```console
+  $ read -rs pw; printf '%s\n' "$pw" | turtlediver connect --sudo-password stdin
+  pam_tid answers sudo on this Mac, so a password piped to standard input is never
+    read; nothing was started. --sudo-password keychain is the source that works
+    here — sudo's askpass helper prints the stored password — or run the same
+    command without the option and answer the prompt.
+  $ echo $?
+  6
+  ```
+
+* **`--sudo-password keychain` with the helper not installed — exit 7.**
+  `missingTool`, naming the path that was looked for. This is the one thing the
+  keychain source needs and the one thing installing this tool provides:
+
+  ```console
+  $ turtlediver connect --sudo-password keychain
+  pam_tid answers sudo on this Mac, so a password can only arrive through sudo's
+    askpass helper, which is not installed at /usr/local/bin/turtlediver-askpass;
+    nothing was started. Install the command line tool that carries it (the .pkg
+    installs both), or run the same command without the option and answer the
+    prompt.
+  $ echo $?
+  7
+  ```
+
+Both answers come back in milliseconds, with nothing read and nothing run.
+Neither is the option silently ignored, and neither door is quietly taken in
+place of the one the caller named: either would leave the caller believing
+something happened that did not.
 
 The password is not remembered between commands. `disconnect` needs its own
 `--sudo-password` if it needs one at all, and where this machine reads a pipe a
@@ -182,13 +213,74 @@ them is the password:
    each item may raise a consent dialog. See "The VPN credentials, from the
    Keychain" below for what makes those durable.
 
-There are two ways past the first door. Both are machine changes the *user*
-installs, once, with the administrator password; the CLI makes neither on its own
-and never relaxes `sudo` silently.
+**Past the first door, with the password handed over: sudo's askpass helper.**
+This is the route that needs no change to the machine at all — only the helper,
+which is this same binary installed a second time under a second name:
 
-**Exempt the agent command, and nothing else** — the one that keeps Touch ID for
-sudo everywhere else. Write `/etc/sudoers.d/turtlediver` (with `sudo visudo -f`,
-which refuses to save a broken file):
+```
+/usr/local/bin/turtlediver          the CLI
+/usr/local/bin/turtlediver-askpass  the same binary, as sudo -A runs it
+```
+
+`publish.sh` installs both names (one binary, two links), and at the launch the
+CLI sets `SUDO_ASKPASS=/usr/local/bin/turtlediver-askpass` in that child's
+environment and runs `sudo -A -v`. `sudo` starts the helper **as this user** and
+reads the password from the helper's standard output. The helper itself is
+recognised by the name it was invoked under — `argv[0]`, which the kernel keeps
+even when the path is a link — and by nothing else: not an argument, not an
+environment variable. Which program is handed the administrator password is not
+a choice a caller gets to make, and no environment variable can redirect it.
+
+The helper takes no arguments, ignores any it is given (`sudo` passes its prompt
+as one), and does exactly one thing: print the stored administrator password on
+standard output, followed by a newline, and nothing else. That output *is* the
+password `sudo` reads, so a progress line or a JSON document there would become
+part of the password. Its failures go to standard error with a nonzero status,
+which `sudo` turns into its own sentence and a failed authentication.
+
+Why the helper is this binary rather than a shell script or `/usr/bin/security`:
+
+* The Keychain item's access control is granted per *program*. A dedicated
+  helper makes that grant a named, revocable thing — **Keychain Access** ▸ the
+  item ▸ **Access Control** — instead of "whatever ran a script".
+* `/usr/bin/security` is a general-purpose dispenser: anything that can run as
+  this user can call it and ask for the item. This program prints the
+  administrator password for exactly one reason and does nothing else.
+
+```sh
+nohup turtlediver connect --sudo-password keychain </dev/null >~/turtlediver.log 2>&1 &
+sleep 20; turtlediver status --json | jq -r .connected
+```
+
+```console
+$ turtlediver connect --sudo-password keychain
+sudo: authenticating through sudo's askpass helper (turtlediver-askpass), which
+  prints the stored administrator password; pam_tid stands its own dialog down in
+  askpass mode, so there is no Touch ID prompt and nothing to type. macOS may ask
+  once, the first time that helper reads the item.
+connected: openconnect pid 51043 — press Ctrl-C to end the tunnel
+```
+
+That first run with nobody watching works only if the Keychain consents have
+already been answered — including the one for the administrator password, which
+the *helper* raises, not the CLI, and which is why the note says it before the
+wait. Run it once in a terminal and click **Always Allow** on each item; a
+later run needs nobody. (On a development build there is no stable signature to
+grant, so each rebuild asks again: install it, or accept the prompts.)
+
+The exposure is stated rather than papered over: with that grant in place,
+**any process running as this user that can exec the helper can obtain the
+administrator password.** That is the same exposure as `--sudo-password
+keychain` where a pipe is read, and smaller than the sudoers rule below, which
+hands out passwordless root to any local process. The option stays opt-in: a
+caller that never passes `--sudo-password` is not affected by any of this, and
+the helper is never run on its own initiative.
+
+**Past the first door without storing anything: exempt the agent command.** A
+documented operator escape hatch, not the product answer — it is a
+passwordless-root primitive, and the CLI neither installs it nor recommends it.
+Write `/etc/sudoers.d/turtlediver` (with `sudo visudo -f`, which refuses to save
+a broken file):
 
 ```
 Defaults!/usr/local/libexec/turtlediver-agent !authenticate
@@ -234,13 +326,12 @@ connected: openconnect pid 51043 — press Ctrl-C to end the tunnel
 
 The cost is worth stating plainly: with that rule in place, **anything running as
 this user can start a root tunnel without authenticating**. That is what
-"unattended" means, and it is the same property the app has when it stores the
-administrator password. Scope the rule to one user (`Defaults:someone!…`) or drop
+"unattended" means. Scope the rule to one user (`Defaults:someone!…`) or drop
 the file to undo it.
 
-**Or take Touch ID out of `sudo` machine-wide** — comment the line out of
-`/etc/pam.d/sudo_local`, the file macOS provides for local edits, and keep
-`--sudo-password` as the connect's credential:
+**Past the first door, the worst trade: take Touch ID out of `sudo`
+machine-wide.** Comment the line out of `/etc/pam.d/sudo_local`, the file macOS
+provides for local edits, and keep `--sudo-password` as the connect's credential:
 
 ```sh
 read -rs pw; printf '%s\n' "$pw" | turtlediver connect --sudo-password stdin
@@ -266,14 +357,22 @@ rather than implied, and tested in `CLISudoPasswordTests`:
    any other, and `pgrep -f` and crash reports copy it elsewhere. The option
    takes a *source*, never a password.
 2. **Never in the environment.** `ps -E` shows it, and every child inherits it.
-3. **Down the child's standard input, once, then dropped.** The refresh is
-   `sudo -S -v` run as a *direct child of the CLI*, and the password is written
-   to that child's pipe and let go. The agent's own launch stays `sudo -n`,
-   unchanged: the agent's standard input carries the tunnel's two credential
-   lines, and an `-S` there would eat the PIN as its own password — the trap
-   `OpenConnectLaunch` documents at length.
+3. **Into one short-lived child, never a long-lived one.** On a machine that
+   reads a pipe, the refresh is `sudo -S -v` run as a *direct child of the CLI*,
+   and the password is written to that child's pipe and let go. On a machine
+   whose `pam_tid` answers first, the password never enters this process at all:
+   `sudo -A` starts the helper, the helper reads the item and prints it, and the
+   only thing the CLI contributes is the helper's **path** in `SUDO_ASKPASS`.
+   The agent's own launch stays `sudo -n` either way, unchanged: the agent's
+   standard input carries the tunnel's two credential lines, and an `-S` there
+   would eat the PIN as its own password — the trap `OpenConnectLaunch`
+   documents at length.
 4. **Never printed.** Not in `--json`, not in a note, not in `details`, not in a
-   Keychain-read announcement. The announcement says which door was used.
+   Keychain-read announcement. The announcement says which door was used, and on
+   the askpass route the CLI cannot print the password even by mistake, because
+   it never holds it. The one place in the program that writes a password
+   anywhere is `AskpassHelper.run`, whose standard output `sudo` reads *as* the
+   password.
 
 `--sudo-password stdin` is safe precisely because this CLI reads nothing else
 from its own standard input (`isatty` is the only thing it ever asks of it):
@@ -299,8 +398,21 @@ once-per-binary.
 
 There are two of these on a `connect` — the account password, and the passcode
 half of the PIN — because the app keeps them in two items. One dialog per item
-is macOS's rule, not this tool's; `--sudo-password` would have been a third, and
-on a machine where it is refused it is now never read at all.
+is macOS's rule, not this tool's.
+
+A third item, the administrator password, is the one most routes never touch: not
+a `connect` without `--sudo-password`, and not a machine that exempts the agent
+command, where a password that was handed over is deliberately not read. On the
+askpass route it is read — but not by this process, and the dialog belongs to the
+*helper*. macOS names the program rather than the link it was invoked through, so
+that dialog reads `turtlediver`, not `turtlediver-askpass`:
+
+> `turtlediver` wants to use your confidential information stored in
+> `com.xvii.kurakura.vpn` in your keychain.
+
+**Always Allow** is the click to make either way. The grant is recorded against
+the helper, and **Keychain Access** ▸ the item ▸ **Access Control** is where to
+see it, or take it back.
 
 The prompt returning on *every* run is usually the binary rather than the item. A
 `swift build` product is ad-hoc signed, and its identifier is derived from the
@@ -348,6 +460,12 @@ products.
 * **No `--json` on the connect *stream*.** `--json` prints one line when the
   tunnel is up; the tunnel's own output goes to stderr. A stream of JSON events
   is a bigger interface than anyone has asked for yet.
+* **No bound on a Keychain read.** `--timeout` covers the wait for the tunnel to
+  come up, and nothing else. A credential read — or, on the askpass route, the
+  helper's read of the administrator password — waits at a consent dialog until
+  somebody answers it, and a caller with nobody at the machine should have the
+  grants in place first (see Unattended connects) rather than find this out by
+  watching a `connect` sit there.
 
 ## Installing it
 

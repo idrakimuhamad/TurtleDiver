@@ -18,6 +18,37 @@ public enum SudoAuthenticationMode: Equatable, Sendable {
     case storedPassword
 }
 
+/// How a supplied administrator password reaches `sudo`.
+///
+/// A second axis, deliberately separate from `ElevationStrategy`. The strategy
+/// says what this Mac *asks for* — a system dialog, or a password nobody can be
+/// asked for — and the delivery says which door a password goes through. They
+/// were one thing until `sudo -A` was measured: `pam_tid` raises its dialog from
+/// inside the PAM stack, which is why a piped password is never read, but its own
+/// strings (`askpass-enabled`, `sudo askpass mode, not showing UI`) say it stands
+/// that dialog down in askpass mode. So a Mac with Touch ID for `sudo` can take a
+/// password after all — down the askpass door, not the pipe — and "the machine
+/// prompts" no longer settles how a password can travel, or whether it can.
+public enum SudoPasswordDelivery: Equatable, Sendable, CaseIterable {
+    /// `sudo -S`: the password is the first line of the child's standard input.
+    /// The door for a machine whose PAM stack reads that pipe, and the one the
+    /// app has used since the unattended route existed.
+    case standardInput
+    /// `sudo -A`: `sudo` runs the program named by `SUDO_ASKPASS` and reads the
+    /// password from *that program's* standard output. The password therefore
+    /// never enters the calling process at all — the helper is a separate
+    /// process, started by `sudo` as the invoking user.
+    case askpass
+
+    /// True when the password travels inside the child's own standard input.
+    ///
+    /// The one property the app's credential block depends on: a plan whose
+    /// standard input carries the tunnel's credentials may add an administrator
+    /// password line only on this route, and on the askpass route the same pipe
+    /// is left to the agent's credentials alone.
+    public var writesThePasswordToStandardInput: Bool { self == .standardInput }
+}
+
 /// What the connect path does about elevation, decided before anything runs.
 ///
 /// One strategy per connect, chosen from the machine's state. There is

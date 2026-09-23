@@ -76,11 +76,13 @@ one click (`brew install`, run as you, no password).
 app already has and never writes them. It never *stores* your administrator
 password: by default it authenticates through `sudo`'s own prompt, and a
 scripted caller with no terminal can hand it one with
-`--sudo-password keychain|stdin` for the single run that needs it. A connect
-that has to run with nobody at the machine is a setup you install once — a
-sudoers rule exempting `/usr/local/libexec/turtlediver-agent` from
-authentication, or dropping the `pam_tid` line from `/etc/pam.d/sudo_local`;
-both recipes are under **Unattended connects** in
+`--sudo-password keychain|stdin` for the single run that needs it. On a Mac
+where Touch ID answers `sudo`, the `keychain` source is delivered through
+`sudo`'s askpass helper — `/usr/local/bin/turtlediver-askpass`, the same binary
+under a second name, installed with the package — so a connect runs with nobody
+at the machine without relaxing `sudo` at all. A caller that would rather store
+no password can instead exempt `/usr/local/libexec/turtlediver-agent` from
+authentication in `sudoers`; both routes are under **Unattended connects** in
 [`docs/CLI.md`](docs/CLI.md).
 
 ## Requirements
@@ -384,11 +386,14 @@ would end the tunnel the moment the command looked like it had worked. It never
 stores your administrator password; it uses `sudo`'s own prompt on the terminal
 it is running in, and with no terminal it exits `6` rather than raising a dialog
 nothing can answer — unless the agent command is exempt from authentication, in
-which case the refresh is skipped and no password is read at all. Where the
-machine's PAM stack can read a pipe it can also be *handed* one for a single run
-with `--sudo-password keychain|stdin`. [`docs/CLI.md`](docs/CLI.md) is the full
-contract, including the two setups that let a connect run with nobody at the
-machine.
+which case the refresh is skipped and no password is read at all. It can also be
+*handed* one for a single run with `--sudo-password keychain|stdin`, never on
+the command line: on a machine whose PAM stack reads a pipe the password travels
+that way, and on one where `pam_tid` answers `sudo` first it travels through
+`sudo -A` and `/usr/local/bin/turtlediver-askpass` — the same binary under a
+second name, installed by the package — instead of raising the dialog a caller
+with nobody at the keyboard cannot answer. [`docs/CLI.md`](docs/CLI.md) is the
+full contract, including the routes that let a connect run unattended.
 
 ## How it is built
 

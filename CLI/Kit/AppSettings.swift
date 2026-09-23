@@ -184,6 +184,36 @@ public enum KeychainSecret: String, CaseIterable {
         return lastStatus == errSecItemNotFound ? .missing : .refused(lastStatus)
     }
 
+    /// The item's presence, read without its data.
+    ///
+    /// Attributes are not what an item's access control protects: a query that
+    /// asks for them and not for `kSecReturnData` answers without raising the
+    /// consent dialog and without decrypting anything. The askpass route needs
+    /// exactly this much and no more — the password itself is printed by the
+    /// helper, a separate process `sudo` starts, so this process must not read
+    /// it — but it still has to tell "the app has never stored one", where the
+    /// remedy is a pane in the app, apart from "`sudo` would not take the one
+    /// that was printed", where the remedy is the value itself.
+    ///
+    /// Presence and not validity: an item whose value is empty reads as present
+    /// here and as missing to `read()`. That case is already broken for the
+    /// `sudo -S` route, and the helper — which does use `read()` — fails on it
+    /// with the sentence that names the item.
+    public func isPresent() -> Bool {
+        for service in AppIdentity.keychainServiceChain {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: rawValue,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var item: CFTypeRef?
+            if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess { return true }
+        }
+        return false
+    }
+
     /// The value, or nil for either failure. For callers that already know which
     /// sentence they will print.
     public var value: String? {

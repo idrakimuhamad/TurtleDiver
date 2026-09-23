@@ -288,13 +288,24 @@ and blocking), and elevation by `sudo`'s own prompt plus exit code 6 when there
 is no terminal. The state question in idea 13 turned out to need no channel to
 the app at all: a pid file and the agent's line protocol were already enough, so
 the CLI works with the app closed. Elevation got its own two answers later:
-`--sudo-password keychain|stdin` for a caller with no terminal, refused with
-exit 6 where `pam_tid` answers `sudo` first and never quietly replaced by another
-door; and, for a connect with nobody at the machine, a sudoers exemption naming
-the installed agent — detected with `sudo -n -l`, after which the refresh and the
-password read are both skipped. What has **not** been picked up from this
-card: `profile use`, `policy set` and `requests --json` are absent, because they
-are writes and the CLI is deliberately read-only apart from the tunnel.
+`--sudo-password keychain|stdin` for a caller with no terminal, never quietly
+replaced by another door; and, for a connect with nobody at the machine, a
+sudoers exemption naming the installed agent — detected with `sudo -n -l`, after
+which the refresh and the password read are both skipped. The `pam_tid` refusal
+that first shipped with the option was **wrong** and has been retired: `pam_tid`
+closes the pipe, not the door, and stands its own dialog down in askpass mode, so
+the same `keychain` source is delivered through `sudo -A` and
+`/usr/local/bin/turtlediver-askpass` — the CLI binary under a second name, so the
+Keychain grant belongs to one revocable program instead of `/usr/bin/security`.
+Only `stdin` is still refused there (exit 6, pointing at the keychain source),
+and a missing helper is exit 7 naming its path. The route was then walked for
+real on a machine whose `pam_tid` answers first: a `connect --sudo-password
+keychain` with nobody at the keyboard reached a live tunnel and printed its one
+JSON document, and `disconnect --sudo-password keychain` took it down through the
+same helper, both exit 0. What has **not** been picked up
+from this card: `profile use`, `policy set` and `requests --json` are absent,
+because they are writes and the CLI is deliberately read-only apart from the
+tunnel.
 
 ### 15. Outbound protocol breadth
 

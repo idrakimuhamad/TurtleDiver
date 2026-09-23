@@ -146,6 +146,53 @@ authenticated. There is one cleanup path, and it is that one; the app-side
 - The `/etc/hosts` bound in §5's table went with it. The plan's own `sudo -n -v`
 is bounded by the connect's 90 s, like every other step of the plan.
 
+### 1b. The door `pam_tid` does not close: askpass
+
+§1's table has `.systemPrompt` as the only strategy for a `pam_tid` machine, and
+for a long time the note beside it said the same thing two ways: with Touch ID
+answering `auth`, nothing else can authenticate `sudo` for an unattended caller —
+a piped password is never read, so the way past is a person or a sudoers
+exemption. The first half of that is true. The conclusion was wrong.
+
+`pam_tid` closes the **pipe**, not the door. Its own strings say what it does with
+the other one:
+
+```console
+$ strings /usr/lib/pam/pam_tid.so.2 | grep -i askpass
+askpass-enabled
+sudo askpass mode, not showing UI
+```
+
+`sudo -A` is that mode. Instead of prompting, `sudo` runs the program named by
+`SUDO_ASKPASS` **as the invoking user** and reads the password from its standard
+output, and `pam_tid` sees askpass mode and stands its dialog down. Measured on
+this Mac against a helper that reads the app's own Keychain item:
+
+| Command | Result |
+|---|---|
+| `SUDO_ASKPASS=<helper> sudo -A -v` | exit 0 in well under a second — no dialog, no Touch ID, no output |
+| `SUDO_ASKPASS=<helper-that-prints-nothing> sudo -A -v` | exit 1, `sudo: no password was provided`, and still no dialog |
+| `sudo -A -v; sudo -n true` in the same parent | both exit 0 — the timestamp is warm for that parent, exactly as §1a requires |
+
+So there is a third way for an unattended caller, and unlike the two recipes this
+document has always carried, it changes nothing about how the machine
+authenticates anything: hand `sudo` a program that prints the stored password and
+`sudo` never asks. The CLI does exactly that (`docs/CLI.md`, "Unattended
+connects"), with the helper being its own binary under a second installed name:
+the Keychain grant then belongs to one named, revocable program rather than to
+`/usr/bin/security`, which any process running as this user could call.
+
+Two things stay true and are worth not forgetting:
+
+* the pipe really is dead on such a machine. `sudo -S` raises the module's own
+dialog with the pipe still full, so `--sudo-password stdin` is refused there
+rather than left to wait — the CLI's own rule that a named source which cannot
+deliver is never quietly replaced.
+* this is `pam_tid`'s behaviour, not a documented contract of `sudo`, so it is
+evidence rather than a guarantee. It was measured on this machine's version; a
+cheap probe after a macOS update is `SUDO_ASKPASS=/usr/bin/false sudo -A -v`,
+and a dialog appearing means the door has closed again.
+
 ### 2. Fail loud, and name the cause
 
 The script writes one line to stderr before it exits, and the app matches that
