@@ -227,6 +227,12 @@ public struct RelayMetrics: Equatable, Sendable {
 /// - The relay closes both fds in `finish` (not in a read source's cancel
 ///   handler) because a source cancelled at EOF keeps its fd — the peer that
 ///   stopped sending may still be receiving.
+/// - A read source suspended by backpressure is resumed before its last
+///   reference is dropped (`finish`, `stopReading`, `deinit`): releasing the
+///   last reference to a *suspended* libdispatch object aborts the process
+///   ("Release of a suspended object" trap in `_dispatch_queue_xref_dispose`),
+///   and a disconnect force-closes relays that are routinely paused
+///   mid-backpressure.
 ///
 /// All socket state mutates on the serial `queue`; only `metrics` is shared
 /// with other threads (guarded by `stateLock`).
@@ -582,16 +588,39 @@ public final class RelayConnection: @unchecked Sendable {
         if clientSide {
             guard !clientEOF else { return }
             clientEOF = true
+            // Capture the pause flag BEFORE clearing it, so the release below
+            // is balanced even if the invariant that a firing handler cannot
+            // be paused ever changes.
+            let paused = clientReadPaused
+            clientReadPaused = false
             let source = clientReadSource
             clientReadSource = nil
-            source?.cancel()
+            tearDownReadSource(source, paused: paused)
         } else {
             guard !outboundEOF else { return }
             outboundEOF = true
+            let paused = outboundReadPaused
+            outboundReadPaused = false
             let source = outboundReadSource
             outboundReadSource = nil
-            source?.cancel()
+            tearDownReadSource(source, paused: paused)
         }
+    }
+
+    /// Cancels a read source, balancing any backpressure suspend first.
+    ///
+    /// Releasing the last reference to a *suspended* libdispatch object aborts
+    /// the process: `_dispatch_queue_xref_dispose` traps with "Release of a
+    /// suspended object" (a source's own xref dispose runs that check on the
+    /// source's state). `pauseRead` suspends a read source while the opposite
+    /// buffer is above the pause watermark, and a `finish` — notably the
+    /// engine's `closeAll` on a disconnect — can land exactly in that state,
+    /// so the suspend count is balanced before the reference is dropped. An
+    /// unpaused source is left alone: resuming a running source would
+    /// over-balance the count and trap the next real suspend.
+    private func tearDownReadSource(_ source: DispatchSourceRead?, paused: Bool) {
+        if paused { source?.resume() }
+        source?.cancel()
     }
 
     private func pauseRead(clientSide: Bool) {
@@ -752,9 +781,12 @@ public final class RelayConnection: @unchecked Sendable {
                 // so nothing can be reading or writing them in between. The
                 // close is here rather than in a cancel handler because a read
                 // source cancelled at EOF deliberately leaves its fd open.
-                self.clientReadSource?.cancel()
+                // `tearDownReadSource` resumes any backpressure-paused source
+                // first: this is the disconnect shape that used to abort the
+                // process on a suspended source's last reference.
+                self.tearDownReadSource(self.clientReadSource, paused: self.clientReadPaused)
                 self.clientReadSource = nil
-                self.outboundReadSource?.cancel()
+                self.tearDownReadSource(self.outboundReadSource, paused: self.outboundReadPaused)
                 self.outboundReadSource = nil
                 self.disarmWriteSource(clientSide: true)
                 self.disarmWriteSource(clientSide: false)
@@ -775,5 +807,18 @@ public final class RelayConnection: @unchecked Sendable {
             self.lifecycleLock.unlock()
             self.onFinished?(snapshot, err)
         }
+    }
+
+    /// `finish`'s teardown normally clears every source on the queue before
+    /// the last reference can drop. This is the last-resort balance for the
+    /// day that ordering changes: dropping the last reference to a *suspended*
+    /// source aborts the process (libdispatch's "Release of a suspended
+    /// object" trap), so backpressure-paused read sources are resumed first
+    /// and the write sources — never suspended — are cancelled.
+    deinit {
+        tearDownReadSource(clientReadSource, paused: clientReadPaused)
+        tearDownReadSource(outboundReadSource, paused: outboundReadPaused)
+        clientWriteSource?.cancel()
+        outboundWriteSource?.cancel()
     }
 }

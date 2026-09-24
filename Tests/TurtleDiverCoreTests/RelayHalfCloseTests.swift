@@ -58,8 +58,10 @@ final class RelayHalfCloseTests: XCTestCase {
 
     /// Closes a descriptor at most once. Tests both close explicitly (to drive
     /// the relay's second EOF) and clean up in `defer`; a second `close` could
-    /// close a descriptor the kernel has already recycled.
-    private final class CloseOnce {
+    /// close a descriptor the kernel has already recycled. Internal (not
+    /// private) so the backpressure-teardown regression tests reuse the same
+    /// discipline.
+    final class CloseOnce {
         private var fd: Int32
         init(_ fd: Int32) { self.fd = fd }
         var descriptor: Int32 { fd }
@@ -76,7 +78,11 @@ final class RelayHalfCloseTests: XCTestCase {
     /// socket: the relay only reads, sends, shuts down and closes it, all of
     /// which a socketpair supports. The relay owns `relayEnd` and closes it
     /// exactly once in `finish`, so the test must not close it too.
-    private func startRelay(
+    ///
+    /// Internal so the backpressure-teardown regression tests drive the same
+    /// shape (real relay, real socketpair client leg, loopback origin the
+    /// test accepts but is free never to read).
+    func startRelay(
         queueLabel: String
     ) -> (
         relay: RelayConnection, client: CloseOnce, origin: CloseOnce, listener: CloseOnce,
