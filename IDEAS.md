@@ -57,6 +57,8 @@ or decided before the work is worth starting.
 | 19 | A root `sudo` that waits through part of every connect | S | An hour with the process table |
 | 20 | Notarization | S | An Apple Developer Program enrolment |
 | 21 | Route another device's network through the engine | M | Revising the "serves this machine only" anti-goal, and an auth story for a non-loopback listener |
+| 22 | A `stoken` invocation with no bound on it | S | Deciding whether to bound the wait or detect the loop |
+| 23 | The tokencode pair can straddle a 60-second boundary | S | Whether a rare retryable failure is worth a parser in two places |
 
 ## Small and contained
 
@@ -487,6 +489,77 @@ Worth deciding at the same time: whether a non-notarized artifact should be
 something `publish.sh` can produce without being asked for it explicitly. It is a
 deliberate `--local` today, and the release that carries it says so — but
 nothing stops the next person from publishing one by accident.
+
+## Found while shipping 2.1.4
+
+Same rule as the section above: measured first, unexplained second, and the
+context kept, because it is the expensive part.
+
+### 22. A `stoken` invocation with no bound on it
+
+`VPNManager.runProcess` has no timeout, and the token step is the one caller that
+passes no `input` — so the child does not get a pipe of its own, it *inherits*
+the app's descriptors. Two consequences, and the second is worse than the first.
+
+The smaller one: a `stoken` that stops making progress hangs the connect with no
+line in the log saying so. There is a 90-second timeout on the tunnel itself, but
+nothing above token generation.
+
+The larger one: `stoken` does not fail when it cannot read its token. A bare
+`stoken tokencode` with no `--file`, reaching a token it wants a decryption
+password for, prints its prompt *again on every read* once input ends — about
+2.4 MB/s, ~10 MB in four seconds, measured — and never exits. So a machine where
+the token file is missing or unreadable does not get an error the app can report;
+it gets a `stoken` writing into the pipe `readabilityHandler`s until the app is
+killed. A `~/.stokenrc` on its own does this today, which is the path taken when
+no token file is set.
+
+Found while shipping 2.1.4, from an attempt to pin a tokencode to a time window:
+the probe looked like a hang, and it was this rather than the flag.
+
+What a fix has to decide:
+
+- **Bound the wait.** A timeout on the token step turns both cases into a
+  reportable failure, and it is the difference between "connecting" and
+  "connecting failed: the token could not be read".
+- **Never inherit stdin.** Passing an empty `input` gives the child a closed pipe
+  instead of the app's descriptors. Necessary, not sufficient — the loop still
+  loops, it just has nowhere to read from.
+- **Detect the loop instead of waiting it out.** The prompt repeating is a
+  signature an explicit reader could stop on: fails in milliseconds, and can say
+  what was wrong.
+- **Say which token file was used.** "No token" and "the wrong token" look
+  identical from outside today.
+
+This is also the step where the single-invocation version in idea 23 would land.
+
+### 23. The tokencode pair can straddle a 60-second boundary
+
+A challenged connect sends three credential lines, and lines 1 and 3 are two
+separate `stoken` invocations: line 1 is the current tokencode, line 3 is
+`--next`. Each run takes a few milliseconds, so the two agree unless a 60-second
+interval boundary falls between them — order of 0.1% of connects, from the
+interval length against the two runs' wall time.
+
+When it happens the pair is wrong in a specific way: line 1 is the code for
+interval *n* and line 3 the code for *n+2*, while the host, having accepted
+line 1, wants *n+1*. The connect fails rather than hangs, and a retry succeeds,
+so it is a rare retry and not a stall — but it is the one case in the challenge
+path that fails for a reason the user cannot see.
+
+`stoken --both` returns both codes from one invocation (`Current tokencode: …` /
+`Next tokencode: …`, 52 bytes, exit 0 — verified), which removes the window. It
+costs a parser and a fallback on both sides, because the app and the CLI generate
+tokens independently and share no code: if the output shape ever differs, the
+two-invocation version has to remain as the fallback.
+
+`--use-time` is not the answer: `stoken` refuses it together with `--next`
+("`--use-time` and `--next` are mutually exclusive"), which is exactly the
+combination a pinned pair would need.
+
+Worth deciding: whether a rare, visible, retryable failure is worth a second code
+path in two places — or whether the limit should just be said out loud where the
+pair is generated.
 
 ## Unsorted
 
