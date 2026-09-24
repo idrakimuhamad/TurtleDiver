@@ -822,6 +822,24 @@ class VPNManager: ObservableObject {
         // So we manually combine: passcode + token.
         let pin = settings.vpnPasscode + token
 
+        // The code RSA asks for *after* accepting `pin`, when the token has been
+        // put into Next Tokencode Mode — which happens when too many passcodes are
+        // refused in a row, most easily by retrying inside the same 60-second
+        // window, where `stoken` produces the very same tokencode again. The
+        // second form's prompt is `Token Code:` and it wants the bare tokencode,
+        // with no PIN. It is generated now rather than on demand because there is
+        // nowhere to put it later: both launch shapes hand openconnect one fixed
+        // block of lines, and a line the server never asks for is simply never
+        // read, so pre-sending it is what makes an unpredictable second form
+        // answerable.
+        let nextToken = await generateToken(passcode: settings.vpnPasscode, isNext: true)
+        if nextToken.isEmpty {
+            await MainActor.run {
+                self.debugOutput += "WARN: stoken produced no next tokencode; "
+                    + "a server asking for one will not get it\n"
+            }
+        }
+
         // Build the command: options first, then host
         // Auto-reconnect for up to 7 days when the server disconnects
         // (e.g. idle timeout, network interruption). openconnect caches the
@@ -891,13 +909,14 @@ class VPNManager: ObservableObject {
                 openconnectPath: openconnectPath,
                 arguments: arguments,
                 pin: pin,
+                nextToken: nextToken,
                 settings: settings,
                 log: log
             ) else { return }
             launch = agentLaunch
         case .notInstalled:
             launch = wrapperLaunch(openconnectPath: openconnectPath, arguments: arguments,
-                                   pin: pin, settings: settings, log: log)
+                                   pin: pin, nextToken: nextToken, settings: settings, log: log)
         case .refused(let why):
             // Something is installed where the agent lives and the app will not
             // run it as root. That is worth saying out loud: silently falling
@@ -905,7 +924,7 @@ class VPNManager: ObservableObject {
             log.write("Agent not used: \(why)")
             await MainActor.run { self.debugOutput += "WARN: \(why)\n" }
             launch = wrapperLaunch(openconnectPath: openconnectPath, arguments: arguments,
-                                   pin: pin, settings: settings, log: log)
+                                   pin: pin, nextToken: nextToken, settings: settings, log: log)
         }
 
         DispatchQueue.main.async {
@@ -1193,6 +1212,7 @@ class VPNManager: ObservableObject {
         openconnectPath: String,
         arguments: [String],
         pin: String,
+        nextToken: String,
         settings: SettingsManager,
         log: VpnConnectionLogger
     ) -> TunnelLaunch {
@@ -1202,6 +1222,7 @@ class VPNManager: ObservableObject {
             adminPassword: settings.adminPassword,
             pin: pin,
             vpnPassword: settings.vpnPassword,
+            nextToken: nextToken,
             elevation: elevation,
             askpassHelper: askpass
         )
@@ -1224,6 +1245,7 @@ class VPNManager: ObservableObject {
         )
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
+        log.logSend("Next tokencode (if the server asks)", value: nextToken)
         log.flush()
         return .wrapper(plan)
     }
@@ -1237,6 +1259,7 @@ class VPNManager: ObservableObject {
         openconnectPath: String,
         arguments: [String],
         pin: String,
+        nextToken: String,
         settings: SettingsManager,
         log: VpnConnectionLogger
     ) async -> TunnelLaunch? {
@@ -1250,7 +1273,8 @@ class VPNManager: ObservableObject {
         // credential the connect has no use for.
         let credentials = TunnelAgentChannel.Launch.credentialBlock(
             pin: pin,
-            vpnPassword: settings.vpnPassword
+            vpnPassword: settings.vpnPassword,
+            nextToken: nextToken
         )
 
         log.write("Agent: \(TunnelAgent.installedPath) (root-owned, signed for this team)")
@@ -1268,6 +1292,7 @@ class VPNManager: ObservableObject {
         )
         log.logSend("PIN (passcode+tokencode)", value: pin)
         log.logSend("VPN password", value: settings.vpnPassword)
+        log.logSend("Next tokencode (if the server asks)", value: nextToken)
         log.flush()
 
         await MainActor.run {

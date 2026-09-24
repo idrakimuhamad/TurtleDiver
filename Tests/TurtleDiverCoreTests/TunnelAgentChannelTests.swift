@@ -206,7 +206,7 @@ final class TunnelAgentChannelTests: XCTestCase {
         )
         XCTAssertEqual(arguments, [
             "/usr/local/libexec/turtlediver-agent",
-            "--credential-lines", "2",
+            "--credential-lines", "3",
             "--path", "/opt/homebrew/bin:/usr/bin",
             "/opt/homebrew/bin/openconnect"
         ] + tunnel)
@@ -235,21 +235,47 @@ final class TunnelAgentChannelTests: XCTestCase {
             searchPath: "/usr/bin"
         )
         let arguments = TunnelAgentChannel.Launch.sudoArguments(agentArguments: agentArguments)
-        XCTAssertEqual(arguments, ["-n", "/usr/local/libexec/turtlediver-agent", "--credential-lines", "2",
+        XCTAssertEqual(arguments, ["-n", "/usr/local/libexec/turtlediver-agent", "--credential-lines", "3",
                                    "--path", "/usr/bin", "/opt/homebrew/bin/openconnect"])
         XCTAssertFalse(arguments.contains("-S"))
         XCTAssertFalse(arguments.contains("-"), "no `-` — that would read a password from a terminal")
     }
 
-    /// The channel carries exactly two lines, and the second is the account
-    /// password. The administrator password is not on this path at all.
-    func testTheCredentialBlockIsThePinAndTheAccountPassword() {
-        let block = TunnelAgentChannel.Launch.credentialBlock(pin: "123456", vpnPassword: "hunter2")
-        XCTAssertEqual(String(decoding: block, as: UTF8.self), "123456\nhunter2\n")
+    /// The channel carries exactly three lines, none of which is the
+    /// administrator password: the PIN, the account password, and the next
+    /// tokencode. The administrator password is not on this path at all.
+    ///
+    /// The third line is the one that answers RSA's Next Tokencode Mode, and the
+    /// order is not free: openconnect consumes one stdin line per prompt, so the
+    /// account password must come before the next tokencode exactly as
+    /// `Password:` comes before `Token Code:`.
+    func testTheCredentialBlockIsThePinTheAccountPasswordAndTheNextTokencode() {
+        let block = TunnelAgentChannel.Launch.credentialBlock(
+            pin: "123456",
+            vpnPassword: "hunter2",
+            nextToken: "654321"
+        )
+        XCTAssertEqual(String(decoding: block, as: UTF8.self), "123456\nhunter2\n654321\n")
         XCTAssertEqual(block.split(separator: 0x0A).count, TunnelAgentChannel.Launch.credentialLineCount)
-        XCTAssertEqual(TunnelAgentChannel.Launch.credentialLineCount, 2)
+        XCTAssertEqual(TunnelAgentChannel.Launch.credentialLineCount, 3)
         // The agent must accept what the app sends: the protocol's own range.
         XCTAssertNoThrow(try TunnelAgentSession(credentialLines: TunnelAgentChannel.Launch.credentialLineCount))
+    }
+
+    /// An empty answer is still an answer: the line is kept even when `stoken`
+    /// produced nothing, because the *count* is what the agent is told to expect
+    /// and the session starts only once that many lines have arrived. Dropping the
+    /// line would hold the tunnel at "connecting" for want of a credential the
+    /// server may never have wanted.
+    func testAnEmptyNextTokencodeStillOccupiesItsLine() {
+        let block = TunnelAgentChannel.Launch.credentialBlock(
+            pin: "123456",
+            vpnPassword: "hunter2",
+            nextToken: ""
+        )
+        XCTAssertEqual(String(decoding: block, as: UTF8.self), "123456\nhunter2\n\n")
+        XCTAssertEqual(block.split(separator: 0x0A, omittingEmptySubsequences: false).count - 1,
+                       TunnelAgentChannel.Launch.credentialLineCount)
     }
 
     /// The one command the app writes after the credentials. The agent matches

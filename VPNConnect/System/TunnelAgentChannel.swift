@@ -238,12 +238,13 @@ public enum TunnelAgentChannel {
     /// connect belongs to the app itself — and the agent it starts stays root for
     /// as long as the tunnel lasts.
     public enum Launch {
-        /// What the agent forwards to openconnect's standard input. The PIN and
-        /// the account password — the same two lines openconnect has always been
-        /// given. The administrator password is *not* among them any more: on
-        /// this path there is no `sudo -S` for openconnect to sit behind, so the
-        /// connect stops carrying a credential it has no use for.
-        public static let credentialLineCount = 2
+        /// What the agent forwards to openconnect's standard input. The PIN, the
+        /// account password and the next tokencode — the three lines the server's
+        /// two forms consume, in the order they are presented. The administrator
+        /// password is *not* among them any more: on this path there is no
+        /// `sudo -S` for openconnect to sit behind, so the connect stops carrying
+        /// a credential it has no use for.
+        public static let credentialLineCount = 3
 
         /// The agent, its own arguments, and then the tunnel's command line.
         ///
@@ -275,12 +276,22 @@ public enum TunnelAgentChannel {
         }
 
         /// The credential block the app writes down the channel, and the only
-        /// thing it ever writes: the PIN and the account password, and no
-        /// administrator password. That is what makes the channel safe to keep
-        /// open for the life of a tunnel, and it is pinned by a test rather than
-        /// by this comment.
-        public static func credentialBlock(pin: String, vpnPassword: String) -> Data {
-            Data((pin + "\n" + vpnPassword + "\n").utf8)
+        /// thing it ever writes: the PIN, the account password and the next
+        /// tokencode, and no administrator password. That is what makes the
+        /// channel safe to keep open for the life of a tunnel, and it is pinned
+        /// by a test rather than by this comment.
+        ///
+        /// The next tokencode goes last because that is the order the server asks
+        /// for things: `PASSCODE:`, `Password:`, then — only when RSA has put the
+        /// token into Next Tokencode Mode — `Token Code:`. openconnect reads one
+        /// stdin line per prompt, so a line that is present but never asked for
+        /// is never read, and a line that is asked for but absent kills the
+        /// connect (it reads to end of input and exits). Sending it up front is
+        /// what lets a three-line pipe answer a second form nobody could have
+        /// predicted; see `OpenConnectCommand.launchPlan` for the same decision on
+        /// the wrapper path.
+        public static func credentialBlock(pin: String, vpnPassword: String, nextToken: String) -> Data {
+            Data((pin + "\n" + vpnPassword + "\n" + nextToken + "\n").utf8)
         }
 
         /// The one command the app ever writes after the credentials: the verb

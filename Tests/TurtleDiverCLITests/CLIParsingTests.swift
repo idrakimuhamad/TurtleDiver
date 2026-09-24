@@ -133,7 +133,7 @@ final class CLIParsingTests: XCTestCase {
         ])
         // Two, not three: on the agent path the administrator password is not on
         // the pipe at all. A third line would be read as openconnect's password.
-        XCTAssertEqual(invocation.credentialLineCount, 2)
+        XCTAssertEqual(invocation.credentialLineCount, 3)
         XCTAssertEqual(invocation.credentialLineCount, TunnelAgentChannel.Launch.credentialLineCount)
     }
 
@@ -226,6 +226,38 @@ final class CLIParsingTests: XCTestCase {
             passcode: ""
         ))
         XCTAssertEqual(command.environment, ["STOKEN_RC": "/Users/x/.stokenrc"])
+    }
+
+    /// `--next` is what makes the server's *second* form answerable: RSA's Next
+    /// Tokencode Mode (`Token Code:` / "Enter the next card code…") wants the code
+    /// after the one just used, bare — no passcode — because the passcode was
+    /// already accepted on the first form. It has to be fetched before the
+    /// connect: openconnect is handed one fixed block of stdin, so there is no
+    /// moment later at which a line could be added.
+    func testTokenCommandCanAskForTheNextTokencode() {
+        let command = TokenGenerator.command(for: .init(
+            stokenPath: "/opt/homebrew/bin/stoken",
+            tokenFilePath: "/Users/x/.stoken",
+            rcPath: "",
+            homeRCPath: "",
+            passcode: "1234",
+            next: true
+        ))
+        XCTAssertEqual(command.arguments, ["tokencode", "--next", "--file", "/Users/x/.stoken", "-p", "1234"])
+    }
+
+    /// The default is the current code, not the next one: an ordinary login must
+    /// not silently start asking for codes one step ahead of the server's clock.
+    func testTokenCommandAsksForTheCurrentCodeUnlessToldOtherwise() {
+        let command = TokenGenerator.command(for: .init(
+            stokenPath: "/opt/homebrew/bin/stoken",
+            tokenFilePath: "",
+            rcPath: "",
+            homeRCPath: "",
+            passcode: "1234"
+        ))
+        XCTAssertEqual(command.arguments, ["tokencode", "-p", "1234"])
+        XCTAssertFalse(command.arguments.contains("--next"))
     }
 
     func testPinIsPasscodeThenCode() {

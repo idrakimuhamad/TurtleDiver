@@ -162,12 +162,13 @@ final class TunnelAgentProcessTests: XCTestCase {
         // argv[0] from the executable URL — the same way the app's own launch
         // gives `sudo` its `-n` as argv[1].
         let agent = try AgentDriver(agent: agentURL, arguments: Array(built.dropFirst()))
-        // The same two lines the app's credential block carries, because the
+        // The same three lines the app's credential block carries, because the
         // agent reads them before it starts anything: a block that ends early
-        // starts nothing, and a test that sent one line would be measuring that
+        // starts nothing, and a test that sent two lines would be measuring that
         // instead of the arguments.
         agent.send("PIN-placeholder")
         agent.send("account-password-placeholder")
+        agent.send("next-tokencode-placeholder")
 
         startedChild = agent.supervisedPid(within: 5)
         if startedChild == nil {
@@ -324,6 +325,82 @@ final class TunnelAgentProcessTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(agent.awaitLine(within: 10)), TunnelAgentWord.finished)
         XCTAssertEqual(agent.awaitExit(within: 10), TunnelAgent.ExitCode.ok.rawValue)
         XCTAssertFalse(childIsAlive(pid), "the tunnel outlived the end of the channel")
+    }
+
+    /// The agent forwards every credential line to openconnect's standard input,
+    /// in the order the app wrote them — and then gives it an end of input.
+    ///
+    /// This is the challenge case, end to end. RSA puts a token into Next
+    /// Tokencode Mode after too many refused passcodes, and openconnect answers by
+    /// presenting a *second* form (`Token Code:` / "Enter the next card code to
+    /// complete authentication.") and reading one more line from stdin. The app
+    /// cannot wait to be asked, so it appends the answer up front; this test is
+    /// what proves the appended line really arrives, third and last, at the
+    /// program that will ask for it.
+    ///
+    /// The `<END-OF-INPUT>` marker is the other half, and it is the half that
+    /// used to fail: it means the tunnel reached a read with no data left and saw
+    /// the end of its block instead of blocking. `posix_spawn` leaves unnamed
+    /// descriptors open, so before `AgentRuntime` closed `writeEnd` in the child,
+    /// the child held a writer for its own stdin pipeline — and at a prompt the
+    /// block did not cover, it waited on itself forever. That is what turned a
+    /// server asking for a next tokencode into a connect stuck at "connecting"
+    /// until the app's 90-second timeout, rather than a fast, reportable failure.
+    func testEveryCredentialLineReachesTheTunnelInOrderAndThenEnds() throws {
+        let record = scratch.appendingPathComponent("openconnect-stdin.txt")
+        let standIn = try makeRecordingStandIn(in: scratch, recordingTo: record)
+        let built = TunnelAgentChannel.Launch.agentArguments(
+            agentPath: agentURL.path,
+            openconnectPath: standIn.path,
+            tunnelArguments: ["180"],
+            searchPath: TunnelAgentChannel.Launch.searchPath(inherited: nil)
+        )
+        let agent = try AgentDriver(agent: agentURL, arguments: Array(built.dropFirst()))
+
+        // Written as the app writes them: the block, and nothing else.
+        agent.send(TunnelAgentChannel.Launch.credentialBlock(
+            pin: "PIN-placeholder",
+            vpnPassword: "VPN-pw-placeholder",
+            nextToken: "NEXT-tokencode-placeholder"
+        ))
+
+        startedChild = try XCTUnwrap(agent.supervisedPid(within: 5))
+        XCTAssertTrue(agent.awaitError(containing: "<END-OF-INPUT>", within: 5),
+                      "the tunnel never saw the end of its credential block — something still "
+                      + "holds a write end of its stdin pipe open. stderr: \(agent.errors)")
+        XCTAssertFalse(agent.errors.contains("<EXTRA:"),
+                       "the tunnel was fed more than the block: \(agent.errors)")
+        XCTAssertEqual(try String(contentsOf: record, encoding: .utf8),
+                       "PIN-placeholder\nVPN-pw-placeholder\nNEXT-tokencode-placeholder\n",
+                       "the tunnel must be fed the PIN, then the account password, then the "
+                       + "answer to the server's second form")
+
+        agent.closeInput()
+        _ = agent.awaitExit(within: 15)
+    }
+
+    /// A stand-in for openconnect that keeps what it was fed, reports whether the
+    /// block ended, and then stays alive to be supervised.
+    ///
+    /// `head -n 3` rather than `cat`: `cat` reads to end of input before printing
+    /// anything, which would make the record empty until the very moment the
+    /// question under test is answered, and so unable to distinguish "wrong bytes"
+    /// from "no bytes yet".
+    private func makeRecordingStandIn(in directory: URL, recordingTo record: URL) throws -> URL {
+        let url = directory.appendingPathComponent("openconnect")
+        try """
+        #!/bin/sh
+        /usr/bin/head -n 3 > '\(record.path)'
+        if IFS= read -r extra; then
+          echo "<EXTRA:$extra>" >&2
+        else
+          echo "<END-OF-INPUT>" >&2
+        fi
+        /usr/bin/sleep 180
+        """
+        .write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
     }
 
     func testACredentialBlockThatEndsEarlyStartsNothing() throws {
@@ -516,6 +593,13 @@ private final class AgentDriver {
 
     func send(_ line: String) {
         input.fileHandleForWriting.write(Data((line + "\n").utf8))
+    }
+
+    /// Writes bytes as they are, for a caller that already has its line endings.
+    /// The credential block the app builds is one such blob, and re-terminating it
+    /// here would measure this helper instead of the block.
+    func send(_ data: Data) {
+        input.fileHandleForWriting.write(data)
     }
 
     func closeInput() {

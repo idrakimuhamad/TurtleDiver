@@ -89,19 +89,29 @@ public struct TokenGenerator {
         /// there is none to fall back to.
         public let homeRCPath: String
         public let passcode: String
+        /// Ask for the code *after* the current one (`--next`).
+        ///
+        /// Wanted only for the second form the server may present: RSA's Next
+        /// Tokencode Mode, whose prompt is `Token Code:` and whose answer is the
+        /// following tokencode, bare — no passcode prepended. It is fetched
+        /// before the connect rather than on demand because both launch shapes
+        /// hand openconnect one fixed block of lines.
+        public let next: Bool
 
         public init(
             stokenPath: String?,
             tokenFilePath: String,
             rcPath: String,
             homeRCPath: String,
-            passcode: String
+            passcode: String,
+            next: Bool = false
         ) {
             self.stokenPath = stokenPath
             self.tokenFilePath = tokenFilePath
             self.rcPath = rcPath
             self.homeRCPath = homeRCPath
             self.passcode = passcode
+            self.next = next
         }
     }
 
@@ -123,6 +133,9 @@ public struct TokenGenerator {
     /// produces a code that is merely incorrect rather than obviously broken.
     public static func command(for plan: Plan) -> Command {
         var arguments = plan.stokenPath != nil ? ["tokencode"] : ["stoken", "tokencode"]
+        if plan.next {
+            arguments.append("--next")
+        }
         if !plan.tokenFilePath.isEmpty {
             arguments.append(contentsOf: ["--file", plan.tokenFilePath])
         }

@@ -36,10 +36,13 @@ public enum OpenConnectCommand {
     public static let adminVariable = "oc_admin"
     public static let pinVariable = "oc_pin"
     public static let passwordVariable = "oc_pass"
+    /// The answer to the server's *second* form, when it asks for one.
+    public static let nextVariable = "oc_next"
 
     /// How many credential lines the connect plan's stdin carries, in order:
-    /// admin (sudo), PIN (passcode + tokencode), account password.
-    public static let credentialLineCount = 3
+    /// admin (sudo), PIN (passcode + tokencode), account password, next
+    /// tokencode.
+    public static let credentialLineCount = 4
 
     /// The default `openconnect` lookup path, prepended so a Homebrew install
     /// wins over anything else on the login shell's `PATH`.
@@ -60,6 +63,20 @@ public enum OpenConnectCommand {
     /// is never read, and the connect then waits for a dialog nobody can answer
     /// while a root-owned `sudo` sits blocked.
     ///
+    /// The last line is the **next tokencode**, and it is sent before anyone
+    /// knows whether it is wanted. openconnect reads every authentication
+    /// prompt from standard input, one line per prompt, in the order the server
+    /// presents them: `PASSCODE:`, `Password:`, and — when RSA has put the
+    /// token into Next Tokencode Mode — `Token Code:`. There is no way to know
+    /// in advance whether that third form will appear, and on this path there is
+    /// no way to add a line later either: the script reads its lines and then
+    /// hands openconnect a pipe. So the answer is written up front and simply
+    /// goes unread when the server never asks, which costs nothing — an unread
+    /// line is not a credential that was consumed. It is deliberately the bare
+    /// tokencode and not a passcode: RSA's Next Tokencode form wants the code
+    /// *after* the one just used, without the PIN (see `VPNManager`, which
+    /// generates both from the same `stoken` invocation).
+    ///
     /// `askpassHelper` is the way out of that wait without a person: when it is
     /// given *and* the strategy is one that would otherwise ask, every `sudo` in
     /// the plan becomes `sudo -A` and the script exports `SUDO_ASKPASS` pointing
@@ -78,6 +95,7 @@ public enum OpenConnectCommand {
         adminPassword: String,
         pin: String,
         vpnPassword: String,
+        nextToken: String,
         searchPath: String = defaultSearchPath,
         elevation: ElevationStrategy = .storedPassword,
         askpassHelper: String? = nil,
@@ -93,7 +111,7 @@ public enum OpenConnectCommand {
             // stderr would otherwise be parsed as an error burst. The still-warm
             // check above runs first, so nothing it reports is lost here.
             hostsCleanupStep(elevation, askpass: askpass) + " 2>/dev/null",
-            "printf '%s\\n%s\\n' \"$\(pinVariable)\" \"$\(passwordVariable)\""
+            "printf '%s\\n%s\\n%s\\n' \"$\(pinVariable)\" \"$\(passwordVariable)\" \"$\(nextVariable)\""
                 + " | \(launchInvocation(elevation, askpass: askpass != nil)) \(shellEscape(openconnectPath)) \(escapedArguments)"
         ].compactMap { $0 }.joined(separator: "; ")
 
@@ -102,7 +120,8 @@ public enum OpenConnectCommand {
             script: script(searchPath: searchPath, variables: variables, askpass: askpass,
                           body: groupedWrapper(body: body, variables: variables, pgidFile: pgidFile)),
             standardInput: credentialLines(credentialValues(elevation, adminPassword: adminPassword,
-                                                            pin: pin, vpnPassword: vpnPassword))
+                                                            pin: pin, vpnPassword: vpnPassword,
+                                                            nextToken: nextToken))
         )
     }
 
@@ -138,19 +157,26 @@ public enum OpenConnectCommand {
 
     /// The credential lines the connect script reads, in the order the pipe
     /// carries them. Only the mode that feeds `sudo -S` reads the admin line.
+    ///
+    /// The order is openconnect's, not a choice: it consumes one line per prompt
+    /// as the server presents them, so the account password must precede the
+    /// next tokencode exactly as `Password:` precedes `Token Code:`.
     public static func credentialVariables(_ elevation: ElevationStrategy) -> [String] {
         elevation.pipesTheStoredPassword
-            ? [adminVariable, pinVariable, passwordVariable]
-            : [pinVariable, passwordVariable]
+            ? [adminVariable, pinVariable, passwordVariable, nextVariable]
+            : [pinVariable, passwordVariable, nextVariable]
     }
 
     private static func credentialValues(
         _ elevation: ElevationStrategy,
         adminPassword: String,
         pin: String,
-        vpnPassword: String
+        vpnPassword: String,
+        nextToken: String
     ) -> [String] {
-        elevation.pipesTheStoredPassword ? [adminPassword, pin, vpnPassword] : [pin, vpnPassword]
+        elevation.pipesTheStoredPassword
+            ? [adminPassword, pin, vpnPassword, nextToken]
+            : [pin, vpnPassword, nextToken]
     }
 
     /// Refreshes sudo's timestamp without a dialog whenever the timestamp is

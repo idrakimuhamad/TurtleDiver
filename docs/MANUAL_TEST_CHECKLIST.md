@@ -476,9 +476,20 @@ credential-shaped token, the log recorded `Credential stdin: 43 bytes, 3 lines`
 — a byte count, not the values — and an argv-free `Pipeline:` line, and
 vpn-slice went on to resolve its host list.
 
+The line count is one higher since the next tokencode was added (4 on the
+`sudo -S` route, 3 on the agent's): the extra line is the answer to RSA's Next
+Tokencode Mode prompt, and a login that never sees that prompt simply leaves it
+unread.
+
 - [ ] Connect the VPN from the app → the tunnel comes up exactly as before
-      (the shell now `read`s the three credentials from stdin, and openconnect
-      still gets `PIN\npassword` on its own stdin).
+      (the shell now `read`s the four credentials from stdin, and openconnect
+      still gets `PIN\npassword\nnext-tokencode` on its own stdin, with the
+      third line unread on any login the server asks nothing more of).
+- [ ] If the log reaches `Enter the next card code to complete authentication.`
+      / `Token Code:` → the connect completes without waiting for a person, and
+      no "connecting" timeout follows. This is the case the third line exists
+      for; it cannot be provoked on demand, so a connect that hits it is worth
+      recording here with the date.
 - [ ] `pgrep -x openconnect` → take the PID, then check the command line
       **without printing it**:
       `ps -p <pid> -o command= | tr ' ' '\n' | grep -cE '^(<admin>|<pin>|<password>)'`

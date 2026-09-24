@@ -148,6 +148,22 @@ public enum TurtleDiverCLI {
         ))
         let pin = TokenGenerator.combine(passcode: passcode, code: token)
 
+        // The answer to the server's *second* form, should it present one: RSA's
+        // Next Tokencode Mode asks for the code after the one just used, and its
+        // prompt (`Token Code:`) takes the bare tokencode, with no passcode. A
+        // second `stoken` run rather than a parse of `--both`, because the two
+        // codes must come from the same 60-second interval and `--next` on its own
+        // is the interface that is already documented and tested here.
+        let nextToken = try TokenGenerator().generate(for: TokenGenerator.Plan(
+            stokenPath: ToolResolver.locate("stoken"),
+            tokenFilePath: settings.stokenTokenFilePath,
+            rcPath: settings.stokenRCPath,
+            homeRCPath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".stokenrc").path,
+            passcode: passcode,
+            next: true
+        ))
+
         let hasTerminal = ConnectCommand.hasTerminal()
         if authentication == .required {
             // Which of the two doors the password travels — or none, when the
@@ -211,7 +227,11 @@ public enum TurtleDiverCLI {
             tunnelArguments: resolution.invocation.arguments,
             searchPath: resolution.invocation.searchPath,
             credentialLines: resolution.invocation.credentialLineCount,
-            credentialBlock: TunnelAgentChannel.Launch.credentialBlock(pin: pin, vpnPassword: vpnPassword),
+            credentialBlock: TunnelAgentChannel.Launch.credentialBlock(
+                pin: pin,
+                vpnPassword: vpnPassword,
+                nextToken: nextToken
+            ),
             waitUntilUp: timeout,
             onUp: { pid in
                 announced = true

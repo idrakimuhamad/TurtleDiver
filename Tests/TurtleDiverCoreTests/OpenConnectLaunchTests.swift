@@ -24,6 +24,11 @@ final class OpenConnectLaunchTests: XCTestCase {
     private let admin = "ADMIN-pw-placeholder"
     private let pin = "PIN-placeholder"
     private let password = "VPN-pw-placeholder"
+    /// The answer to the server's second form. It is not a secret of the same
+    /// kind as the others — it expires within the minute and the server only reads
+    /// it when it decides to ask — but it travels on the same pipe and is held to
+    /// the same rule about argv.
+    private let nextToken = "NEXT-tokencode-placeholder"
 
     private func makePlan(host: String = "vpn.example.com",
                           arguments: [String]? = nil,
@@ -31,6 +36,7 @@ final class OpenConnectLaunchTests: XCTestCase {
                           searchPath: String = OpenConnectCommand.defaultSearchPath,
                           elevation: ElevationStrategy = .storedPassword,
                           askpassHelper: String? = nil,
+                          nextToken: String? = nil,
                           pgidFile: String = "/tmp/turtlediver-test-elevation.pgid") -> OpenConnectLaunchPlan {
         OpenConnectCommand.launchPlan(
             openconnectPath: openconnectPath,
@@ -38,6 +44,7 @@ final class OpenConnectLaunchTests: XCTestCase {
             adminPassword: admin,
             pin: pin,
             vpnPassword: password,
+            nextToken: nextToken ?? self.nextToken,
             searchPath: searchPath,
             elevation: elevation,
             askpassHelper: askpassHelper,
@@ -50,7 +57,7 @@ final class OpenConnectLaunchTests: XCTestCase {
     func testNoCredentialAppearsInTheScript() {
         let script = makePlan().script
 
-        for secret in [admin, pin, password] {
+        for secret in [admin, pin, password, nextToken] {
             XCTAssertFalse(script.contains(secret), "\(secret.prefix(6))… leaked into the command line")
         }
     }
@@ -61,12 +68,13 @@ final class OpenConnectLaunchTests: XCTestCase {
         let first = OpenConnectCommand.launchPlan(
             openconnectPath: "/opt/homebrew/bin/openconnect",
             arguments: ["vpn.example.com"],
-            adminPassword: "one", pin: "two", vpnPassword: "three"
+            adminPassword: "one", pin: "two", vpnPassword: "three", nextToken: "four"
         )
         let second = OpenConnectCommand.launchPlan(
             openconnectPath: "/opt/homebrew/bin/openconnect",
             arguments: ["vpn.example.com"],
-            adminPassword: "different", pin: "also different", vpnPassword: "and this"
+            adminPassword: "different", pin: "also different", vpnPassword: "and this",
+            nextToken: "and so is this"
         )
 
         XCTAssertEqual(first.script, second.script)
@@ -78,7 +86,7 @@ final class OpenConnectLaunchTests: XCTestCase {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .dropLast()
 
-        XCTAssertEqual(lines.map(String.init), [admin, pin, password])
+        XCTAssertEqual(lines.map(String.init), [admin, pin, password, nextToken])
         XCTAssertEqual(lines.count, OpenConnectCommand.credentialLineCount)
     }
 
@@ -90,6 +98,7 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(script.contains("read -r \(OpenConnectCommand.adminVariable)"))
         XCTAssertTrue(script.contains("read -r \(OpenConnectCommand.pinVariable)"))
         XCTAssertTrue(script.contains("read -r \(OpenConnectCommand.passwordVariable)"))
+        XCTAssertTrue(script.contains("read -r \(OpenConnectCommand.nextVariable)"))
         // A failed read must not continue into a pipeline with an empty secret.
         XCTAssertTrue(script.contains("|| exit 1"))
     }
@@ -121,12 +130,17 @@ final class OpenConnectLaunchTests: XCTestCase {
         let plan = OpenConnectCommand.launchPlan(
             openconnectPath: "/opt/homebrew/bin/openconnect",
             arguments: ["vpn.example.com"],
-            adminPassword: nasty, pin: "123456", vpnPassword: "pw"
+            adminPassword: nasty, pin: "123456", vpnPassword: "pw", nextToken: nasty
         )
 
         XCTAssertFalse(plan.script.contains("pwned"))
         XCTAssertFalse(plan.script.contains("/tmp/pwned"))
-        XCTAssertTrue(String(decoding: plan.standardInput, as: UTF8.self).hasPrefix(nasty + "\n"))
+        let lines = String(decoding: plan.standardInput, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        XCTAssertEqual(lines.first, nasty)
+        XCTAssertEqual(lines.dropLast().last, nasty,
+                       "the next tokencode must be as inert as the admin password")
     }
 
     // MARK: - The non-secret half still has to be escaped
@@ -162,7 +176,7 @@ final class OpenConnectLaunchTests: XCTestCase {
         let plan = OpenConnectCommand.launchPlan(
             openconnectPath: "openconnect",
             arguments: ["vpn.example.com"],
-            adminPassword: "-n \\c", pin: "1", vpnPassword: "2"
+            adminPassword: "-n \\c", pin: "1", vpnPassword: "2", nextToken: "3"
         )
 
         XCTAssertFalse(plan.script.contains("echo "))
@@ -245,10 +259,11 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertTrue(plan.script.contains("sudo -v </dev/null"),
                       "sudo must be free to ask the system, with no pipe in the way")
         XCTAssertFalse(plan.script.contains("printf '%s\\n' \"$\(OpenConnectCommand.adminVariable)\""))
-        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 2)
+        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 3)
 
         let lines = String(decoding: plan.standardInput, as: UTF8.self)
-        XCTAssertEqual(lines, "\(pin)\n\(password)\n", "the admin password must not be on the pipe at all")
+        XCTAssertEqual(lines, "\(pin)\n\(password)\n\(nextToken)\n",
+                       "the admin password must not be on the pipe at all")
         XCTAssertFalse(lines.contains(admin))
     }
 
@@ -262,7 +277,7 @@ final class OpenConnectLaunchTests: XCTestCase {
         XCTAssertFalse(plan.script.contains("sudo -v"))
         XCTAssertTrue(plan.script.contains("exit 1"), "a cold timestamp must end the script, not wait")
         XCTAssertTrue(plan.script.contains(ElevationBlockReason.timestampExpired.markerLine))
-        XCTAssertEqual(String(decoding: plan.standardInput, as: UTF8.self), "\(pin)\n\(password)\n")
+        XCTAssertEqual(String(decoding: plan.standardInput, as: UTF8.self), "\(pin)\n\(password)\n\(nextToken)\n")
     }
 
     /// The invariant the plain `sudo` launch relies on: by the time openconnect
@@ -297,17 +312,18 @@ final class OpenConnectLaunchTests: XCTestCase {
     }
 
     /// The helper replaces the *password*, not the pipe: openconnect still gets
-    /// its PIN and account password, and the administrator password is nowhere —
-    /// not in the script, not in the pipe, not in any variable the script reads.
+    /// its PIN, account password and next tokencode, and the administrator password
+    /// is nowhere — not in the script, not in the pipe, not in any variable the
+    /// script reads.
     func testTheAskpassPlanKeepsTheAdministratorPasswordOutOfEverything() {
         let plan = makePlan(elevation: .systemPrompt, askpassHelper: "/tmp/helper")
 
         XCTAssertFalse(plan.script.contains(admin))
         XCTAssertFalse(plan.script.contains(OpenConnectCommand.adminVariable))
-        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 2)
+        XCTAssertEqual(plan.script.components(separatedBy: "IFS= read -r ").count - 1, 3)
 
         let lines = String(decoding: plan.standardInput, as: UTF8.self)
-        XCTAssertEqual(lines, "\(pin)\n\(password)\n")
+        XCTAssertEqual(lines, "\(pin)\n\(password)\n\(nextToken)\n")
         XCTAssertFalse(lines.contains(admin))
     }
 
@@ -589,7 +605,7 @@ final class OpenConnectLaunchTests: XCTestCase {
                        "the hosts cleanup and the launch both need the helper")
         XCTAssertFalse(result.sudoCalls.contains { $0.hasPrefix("-S") },
                        "a piped password appeared on the askpass route")
-        XCTAssertEqual(result.stdin, "\(pin)\n\(password)\n")
+        XCTAssertEqual(result.stdin, "\(pin)\n\(password)\n\(nextToken)\n")
         XCTAssertTrue(result.argv.contains { $0.hasPrefix("--user=") }, "openconnect never ran")
     }
 
@@ -624,7 +640,10 @@ final class OpenConnectLaunchTests: XCTestCase {
     }
 
     /// What the old `printf '<pin>\n<password>' | sudo openconnect …` pipeline
-    /// handed openconnect. The new plan must be byte-identical.
+    /// handed openconnect. The new plan must still begin with exactly these bytes:
+    /// the next tokencode is *appended*, so an ordinary login — one where the
+    /// server never presents a second form — feeds openconnect what it always was
+    /// fed, with one extra line left unread.
     private func runLegacyPipeline() throws -> String {
         let sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("oclegacy-\(UUID().uuidString)")
@@ -643,13 +662,13 @@ final class OpenConnectLaunchTests: XCTestCase {
         return (try? String(contentsOf: recorded, encoding: .utf8)) ?? ""
     }
 
-    func testOpenconnectReceivesTheSameStdinAsTheOldPipeline() throws {
+    func testOpenconnectStdinIsTheOldPipelinesBytesPlusTheNextTokencode() throws {
         let result = try run { makePlan(openconnectPath: $0 + "/openconnect", searchPath: $0,
                                         pgidFile: $0 + "/elevation.pgid") }
 
-        XCTAssertEqual(result.stdin, "\(pin)\n\(password)\n",
-                       "openconnect's own stdin must be unchanged from the old pipeline")
-        XCTAssertEqual(result.stdin, try runLegacyPipeline())
+        XCTAssertEqual(result.stdin, "\(pin)\n\(password)\n\(nextToken)\n")
+        XCTAssertTrue(result.stdin.hasPrefix(try runLegacyPipeline()),
+                      "the first two lines must be the old pipeline's bytes exactly")
     }
 
     /// The group is the whole mechanism: a teardown signals that id, and a
@@ -688,7 +707,7 @@ final class OpenConnectLaunchTests: XCTestCase {
 
         XCTAssertTrue(result.argv.contains("vpn.example.com"))
         XCTAssertTrue(result.argv.contains("--force-dpd=10"))
-        for secret in [admin, pin, password] {
+        for secret in [admin, pin, password, nextToken] {
             XCTAssertFalse(result.argv.contains(secret))
             XCTAssertFalse(result.argv.joined(separator: " ").contains(secret))
         }

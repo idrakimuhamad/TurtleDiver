@@ -75,8 +75,11 @@ after the fix below removed its last use in a connect.
     Elevation: the refresh checks sudo non-interactively first; if that is refused, macOS asks for Touch ID or your administrator password, and the connect waits up to 90s for that dialog.
 
 The launch itself never gets `-S`, in any mode. Its stdin carries openconnect's
-PIN and account password, and an `-S` that decided it needed a password would
-consume the PIN as its own and hand openconnect half a credential.
+PIN, its account password, and the answer to the server's second form when there
+is one — the next tokencode, sent up front because the prompt cannot be predicted
+and the pipe is the only thing there is to answer it with — and an `-S` that
+decided it needed a password would consume the PIN as its own and hand
+openconnect half a credential.
 
 The CLI in `docs/CLI.md` reaches the same two refresh steps from its own side,
 and the same rule holds there: `--sudo-password` runs `sudo -S -v` as a child of
@@ -199,7 +202,8 @@ given — and only where the strategy is one that would otherwise ask — every
 privileged step in the plan becomes `sudo -A`, with `SUDO_ASKPASS` exported ahead
 of the first one, the timestamp refresh included. The password stays out of the
 script, out of argv and out of the pipe: openconnect still receives exactly its
-PIN and account password. Where the pipe *is* read the helper is ignored rather
+own credentials — the PIN, the account password and the next tokencode — and
+nothing else. Where the pipe *is* read the helper is ignored rather
 than used, because that mode already names its own door, and one function —
 `SudoPasswordDelivery.resolve(strategy:askpassHelper:)` — decides which of the
 two a connect is in, so the app and the command line cannot answer differently.

@@ -364,7 +364,7 @@ rather than implied, and tested in `CLISudoPasswordTests`:
    `sudo -A` starts the helper, the helper reads the item and prints it, and the
    only thing the CLI contributes is the helper's **path** in `SUDO_ASKPASS`.
    The agent's own launch stays `sudo -n` either way, unchanged: the agent's
-   standard input carries the tunnel's two credential lines, and an `-S` there
+   standard input carries the tunnel's three credential lines, and an `-S` there
    would eat the PIN as its own password — the trap `OpenConnectLaunch`
    documents at length.
 4. **Never printed.** Not in `--json`, not in a note, not in `details`, not in a

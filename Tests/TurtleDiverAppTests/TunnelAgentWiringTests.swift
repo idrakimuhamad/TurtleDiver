@@ -243,15 +243,18 @@ final class TunnelAgentWiringTests: XCTestCase {
         }
     }
 
-    /// The credential block carries two labels and no administrator password —
+    /// The credential block carries three labels and no administrator password —
     /// it is the only thing the app ever writes down the channel, and it stays
-    /// open for hours.
-    func testTheChannelCarriesOnlyThePinAndTheAccountPassword() throws {
+    /// open for hours. The third of the three is the answer to the server's
+    /// second form, and it is built by the same tested builder as the first two.
+    func testTheChannelCarriesOnlyTheConnectCredentials() throws {
         let prepare = try body(of: "private func prepareAgentLaunch(")
         XCTAssertTrue(prepare.contains("TunnelAgentChannel.Launch.credentialBlock("),
                       "the block must be built by the tested builder")
         XCTAssertTrue(prepare.contains("pin: pin,"))
         XCTAssertTrue(prepare.contains("vpnPassword: settings.vpnPassword"))
+        XCTAssertTrue(prepare.contains("nextToken: nextToken"),
+                      "the next tokencode must reach the block, or a second form is unanswerable")
         XCTAssertFalse(prepare.contains("Data((pin"), "the block must not be assembled inline")
     }
 

@@ -57,6 +57,17 @@ final class AgentRuntime: TunnelAgentRuntime {
         // read end is closed in the child once it has been duplicated into fd 0.
         posix_spawn_file_actions_adddup2(&fileActions, readEnd, 0)
         posix_spawn_file_actions_addclose(&fileActions, readEnd)
+        // The child must not inherit the *writing* end of the pipe that is its own
+        // standard input. `posix_spawn` leaves every descriptor not named here
+        // open, so without this the child holds its own writer: when the agent
+        // closes its copy and the child reaches a prompt the credential block did
+        // not cover, `read` finds a live writer — itself — and blocks forever
+        // instead of seeing end of input. That is a self-deadlock with no exit, and
+        // it is exactly what turned a server asking for a second tokencode into a
+        // connect stuck at "connecting" until the app's timeout. Measured with a
+        // stand-in for the child before this line existed: with the leak it never
+        // ended, with the close it ended as soon as the parent's copy went.
+        posix_spawn_file_actions_addclose(&fileActions, writeEnd)
         // The tunnel's output goes to the log stream, never to the channel.
         posix_spawn_file_actions_adddup2(&fileActions, 2, 1)
 
@@ -88,7 +99,10 @@ final class AgentRuntime: TunnelAgentRuntime {
         }
 
         // The credential block, then end of input — the same bytes, in the same
-        // order, that `printf '%s\n%s\n' … | openconnect` delivered before.
+        // order, that `printf '%s\n%s\n%s\n' … | openconnect` delivers: the PIN,
+        // the account password, and the answer to the server's second form.
+        // Closing `writeEnd` is what makes "then end of input" true, and it only is
+        // true because the child did not inherit a copy of it above.
         let payload = Array(credentials.map { $0 + "\n" }.joined().utf8)
         var written = 0
         while written < payload.count {
