@@ -44,14 +44,26 @@ struct RequestsCard: View {
             if visible.isEmpty {
                 emptyState
             } else if compactRows {
-                ForEach(visible.reversed()) { entry in
-                    StackedRequestRow(entry: entry) { selected = entry }
+                // Lazy: the log keeps up to 1000 rows in memory, and the main
+                // window's ScrollView is the only viewport — offscreen rows
+                // must not be built. An eager stack instantiates every row
+                // (~10 Text views each) and re-lays them out on every request
+                // event, which is what made scrolling the table crawl while
+                // traffic flowed. (Inside a Form section the lazy stack is
+                // eager in practice — the Form row has no viewport — which is
+                // the Settings pane's pre-existing behaviour.)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(visible.reversed()) { entry in
+                        StackedRequestRow(entry: entry) { selected = entry }
+                    }
                 }
             } else {
                 columnHeader
                 Divider().opacity(0.5)
-                ForEach(Array(visible.reversed().enumerated()), id: \.element.id) { index, entry in
-                    WideRequestRow(entry: entry, striped: !index.isMultiple(of: 2)) { selected = entry }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(visible.reversed().enumerated()), id: \.element.id) { index, entry in
+                        WideRequestRow(entry: entry, striped: !index.isMultiple(of: 2)) { selected = entry }
+                    }
                 }
             }
         }

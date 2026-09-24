@@ -343,6 +343,8 @@ final class EngineController: ObservableObject {
     // MARK: Engine → Published bridges
 
     private var logHookInstalled = false
+    /// True while a coalesced request refresh is sleeping in its window.
+    private var requestsRefreshPending = false
 
     /// Installs the request-log change hook (idempotent — survives engine
     /// restarts since RequestLog is engine-owned but persists across starts).
@@ -350,10 +352,33 @@ final class EngineController: ObservableObject {
         guard !logHookInstalled else { return }
         logHookInstalled = true
         engine.requestLog.onChange = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.requests = self.engine.requestLog.snapshot()
+            Task { @MainActor [weak self] in
+                self?.scheduleRequestRefresh()
             }
+        }
+    }
+
+    /// Coalesces the log's per-event changes into at most one snapshot refresh
+    /// every 100 ms.
+    ///
+    /// Every append/finish/attachDetail fires the hook, and a busy page load
+    /// is dozens of those a second. Each uncoalesced refresh replaces the
+    /// whole (up to 1000-row) snapshot on the main actor, and the request
+    /// table re-diffs and re-lays out its visible rows for it — left as is,
+    /// the table's layout fights the engine's event rate for the main thread,
+    /// which is what made scrolling the list crawl while traffic flowed. One
+    /// refresh per 100 ms keeps the table visibly live while bounding the
+    /// layout work; the snapshot is taken at the END of the window, so events
+    /// that arrived inside it are never lost.
+    @MainActor
+    private func scheduleRequestRefresh() {
+        guard !requestsRefreshPending else { return }
+        requestsRefreshPending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard let self else { return }
+            self.requestsRefreshPending = false
+            self.requests = self.engine.requestLog.snapshot()
         }
     }
 
