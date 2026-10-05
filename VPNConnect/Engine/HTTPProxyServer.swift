@@ -358,7 +358,7 @@ final class HTTPProxyServer: @unchecked Sendable {
             let observer = RelayStreamObserver()
             if capture {
                 let base = requestDetail
-                observer.onClientPrefix = { [weak self] bytes in
+                observer.onClientPrefix = { [weak self, weak observer] bytes in
                     switch TLSClientHello.probe(bytes) {
                     case .incomplete:
                         return false
@@ -369,7 +369,7 @@ final class HTTPProxyServer: @unchecked Sendable {
                         merged.serverName = summary.serverName
                         merged.tlsVersion = summary.version
                         merged.alpn = summary.alpn
-                        merged.resolvedAddress = observer.peerAddress
+                        merged.resolvedAddress = observer?.peerAddress
                         self?.requestLog.attachDetail(id: entry.id, detail: merged)
                         return true
                     }
@@ -378,9 +378,9 @@ final class HTTPProxyServer: @unchecked Sendable {
             // Establish first so we can report success/failure honestly.
             let relay = RelayConnection(clientFD: clientFD, queue: relayRegistry.queue)
             relayRegistry.retain(relay)
-            relay.onFinished = { [weak self] metrics, error in
+            relay.onFinished = { [weak self, weak relay] metrics, error in
                 self?.requestLog.finish(id: entry.id, bytesToDestination: metrics.bytesToDestination, bytesToClient: metrics.bytesToClient, error: error?.localizedDescription)
-                self?.relayRegistry.release(relay)
+                if let relay { self?.relayRegistry.release(relay) }
             }
             relay.start(
                 decision: decision, destination: destination,
@@ -423,7 +423,7 @@ final class HTTPProxyServer: @unchecked Sendable {
         let observer = RelayStreamObserver()
         if capture {
             let base = requestDetail
-            observer.onServerPrefix = { [weak self] bytes in
+            observer.onServerPrefix = { [weak self, weak observer] bytes in
                 switch HTTPResponseHead.probe(bytes) {
                 case .incomplete:
                     return false
@@ -433,7 +433,7 @@ final class HTTPProxyServer: @unchecked Sendable {
                     var merged = base
                     merged.statusLine = statusLine
                     merged.captureResponseHeaders(headers, revealSensitive: reveal)
-                    merged.resolvedAddress = observer.peerAddress
+                    merged.resolvedAddress = observer?.peerAddress
                     self?.requestLog.attachDetail(id: entry.id, detail: merged)
                     return true
                 }
@@ -442,9 +442,9 @@ final class HTTPProxyServer: @unchecked Sendable {
 
         let relay = RelayConnection(clientFD: clientFD, queue: relayRegistry.queue)
         relayRegistry.retain(relay)
-        relay.onFinished = { [weak self] metrics, error in
+        relay.onFinished = { [weak self, weak relay] metrics, error in
             self?.requestLog.finish(id: entry.id, bytesToDestination: metrics.bytesToDestination, bytesToClient: metrics.bytesToClient, error: error?.localizedDescription)
-            self?.relayRegistry.release(relay)
+            if let relay { self?.relayRegistry.release(relay) }
         }
         relay.start(
             decision: decision, destination: destination,

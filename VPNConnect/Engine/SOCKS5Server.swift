@@ -228,7 +228,7 @@ final class SOCKS5Server: @unchecked Sendable {
         let capture = requestLog.capturesDetails
         let observer = RelayStreamObserver()
         if capture {
-            observer.onClientPrefix = { [weak self] bytes in
+            observer.onClientPrefix = { [weak self, weak observer] bytes in
                 switch TLSClientHello.probe(bytes) {
                 case .incomplete:
                     return false
@@ -239,7 +239,7 @@ final class SOCKS5Server: @unchecked Sendable {
                     detail.serverName = summary.serverName
                     detail.tlsVersion = summary.version
                     detail.alpn = summary.alpn
-                    detail.resolvedAddress = observer.peerAddress
+                    detail.resolvedAddress = observer?.peerAddress
                     self?.requestLog.attachDetail(id: entry.id, detail: detail)
                     return true
                 }
@@ -255,14 +255,14 @@ final class SOCKS5Server: @unchecked Sendable {
         // --- Relay ---
         let relay = RelayConnection(clientFD: clientFD, queue: relayRegistry.queue)
         relayRegistry.retain(relay)
-        relay.onFinished = { [weak self] metrics, error in
+        relay.onFinished = { [weak self, weak relay] metrics, error in
             self?.requestLog.finish(
                 id: entry.id,
                 bytesToDestination: metrics.bytesToDestination,
                 bytesToClient: metrics.bytesToClient,
                 error: error?.localizedDescription
             )
-            self?.relayRegistry.release(relay)
+            if let relay { self?.relayRegistry.release(relay) }
         }
         relay.start(
             decision: decision, destination: destination,
