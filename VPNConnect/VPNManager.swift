@@ -17,6 +17,41 @@ final class SendableDataBuffer: @unchecked Sendable {
     func append(_ other: Data) { data.append(other) }
 }
 
+/// Tail-trims a growing log so it cannot grow without bound, keeping whole
+/// lines and marking where text was dropped.
+///
+/// Two places accumulate a tunnel's output: the live debug log (`debugOutput`)
+/// and the copy of it that every connection-history row persists to
+/// UserDefaults. Both are bounded here — a tunnel that runs for days, with
+/// openconnect reconnecting every so often, must not turn either into an
+/// unbounded string (or an unbounded plist).
+enum BoundedLog {
+
+    /// What replaces the dropped prefix. Its own length is counted against the
+    /// budget, so a trimmed value always fits.
+    static let truncationMarker = "… (earlier output dropped)\n"
+
+    /// Returns `text` unchanged when it already fits, otherwise its last
+    /// `maxBytes` (rounded out to a Character boundary and started at the next
+    /// line) behind the truncation marker.
+    static func tail(_ text: String, maxBytes: Int) -> String {
+        guard maxBytes > 0, text.utf8.count > maxBytes else { return text }
+        let keep = maxBytes - truncationMarker.utf8.count
+        guard keep > 0 else { return truncationMarker }
+        // `keep` counts bytes, so the cut can land inside a multi-byte scalar;
+        // walk forward to a real Character boundary before slicing.
+        var index = text.utf8.index(text.utf8.endIndex, offsetBy: -keep)
+        while index < text.utf8.endIndex, String.Index(index, within: text) == nil {
+            index = text.utf8.index(after: index)
+        }
+        var slice = String(text[index...])
+        if let newline = slice.firstIndex(of: "\n") {
+            slice = String(slice[slice.index(after: newline)...])
+        }
+        return truncationMarker + slice
+    }
+}
+
 /// Failure of an `openconnect`/`stoken` subprocess.
 enum ProcessError: LocalizedError {
     case exitStatus(Int32, String)
@@ -120,13 +155,19 @@ struct ConnectionAttempt: Codable, Identifiable {
     let duration: TimeInterval?
     let logOutput: String
     
+    /// A history row is persisted to UserDefaults (at most 100 of them), each
+    /// carrying a copy of the log at the moment the attempt ended. The live
+    /// log's own cap would still let a full history reach tens of megabytes, so
+    /// each row keeps only a small tail.
+    static let logOutputByteLimit = 64 * 1024
+
     init(id: UUID = UUID(), timestamp: Date = Date(), host: String, status: String, duration: TimeInterval? = nil, logOutput: String) {
         self.id = id
         self.timestamp = timestamp
         self.host = host
         self.status = status
         self.duration = duration
-        self.logOutput = logOutput
+        self.logOutput = BoundedLog.tail(logOutput, maxBytes: Self.logOutputByteLimit)
     }
 }
 
@@ -235,7 +276,18 @@ class VPNManager: ObservableObject {
     }
     
     @Published var status: VPNStatus = .disconnected
-    @Published var debugOutput: String = ""
+    /// The live debug log. Appended to on every line the tunnel emits, so it
+    /// keeps only its tail: a long-lived tunnel must not grow it without bound.
+    /// The same bound is what keeps `ConnectionAttempt.logOutput` (a copy of
+    /// this) small when it is written to UserDefaults.
+    static let debugOutputByteLimit = 512 * 1024
+
+    @Published var debugOutput: String = "" {
+        didSet {
+            guard debugOutput.utf8.count > Self.debugOutputByteLimit else { return }
+            debugOutput = BoundedLog.tail(debugOutput, maxBytes: Self.debugOutputByteLimit)
+        }
+    }
     @Published var durationString: String = "00:00:00"
     
     var onChallenge: ((String, @escaping (String) -> Void) -> Void)?
