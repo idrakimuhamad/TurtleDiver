@@ -8,16 +8,152 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject private var controller = EngineController.shared
     @ObservedObject private var settings = SettingsManager.shared
+    @State private var revealSharePassword = false
+    @State private var confirmPasswordReset = false
+    @State private var showSetupSteps = false
 
     var body: some View {
         Form {
             engineSection
+            shareSection
             policySection
             detailSection
             requestSection
         }
         .formStyle(.grouped)
         .onAppear { controller.refreshRequests() }
+    }
+
+    // MARK: Share with a device
+
+    private var shareSection: some View {
+        Section {
+            Toggle("Share with a device", isOn: $settings.shareWithDevice)
+                .padding(.vertical, 4)
+
+            if settings.shareWithDevice {
+                Label(shareStatus, systemImage: shareStatusSymbol)
+                    .font(.system(size: 11))
+                    .foregroundStyle(shareStatusColor)
+
+                if case let .active(host, port) = controller.shareState {
+                    LabeledContent("Server") { shareCopyValue(host) }
+                    LabeledContent("Port") { shareCopyValue(String(port)) }
+                    LabeledContent("Username") {
+                        Text(controller.shareUsername).font(.system(size: 11, design: .monospaced))
+                    }
+                    LabeledContent("Password") {
+                        if let password = controller.sharePassword {
+                            HStack(spacing: 6) {
+                                Text(revealSharePassword ? password : String(repeating: "•", count: 10))
+                                    .font(.system(size: 11, design: .monospaced))
+                                Button { revealSharePassword.toggle() } label: {
+                                    Image(systemName: revealSharePassword ? "eye.slash" : "eye")
+                                }.help(revealSharePassword ? "Hide password" : "Show password")
+                                Button { copyShareValue(password) } label: {
+                                    Image(systemName: "doc.on.doc")
+                                }.help("Copy password")
+                                Button("Regenerate…") { confirmPasswordReset = true }
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.system(size: 10))
+                        } else {
+                            Label(controller.sharePasswordError ?? "Password unavailable.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    if controller.sharePassword != nil, let error = controller.sharePasswordError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                    }
+
+                    DisclosureGroup("Setup instructions", isExpanded: $showSetupSteps) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("iPhone / iPad: Settings › Wi-Fi › ⓘ › Configure Proxy › Manual. Enter the server and port, turn on Authentication, and enter the username and password.")
+                            Text("Android: Settings › Wi-Fi › your network › Edit › Proxy › Manual. Enter the server as the hostname, and the port. Android has no password field, so open any site on the phone, then allow it below.")
+                        }
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 5)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+
+                    if !controller.shareRefusedClients.isEmpty {
+                        Text("NEEDS APPROVAL").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                        ForEach(controller.shareRefusedClients, id: \.address) { client in
+                            HStack(spacing: 7) {
+                                Text(client.address).font(.system(size: 10, design: .monospaced))
+                                Text("· \(client.attempts) \(client.attempts == 1 ? "attempt" : "attempts") · \(client.lastAttempt, style: .relative) ago")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                                Spacer(minLength: 4)
+                                Button("Allow") { controller.allowShareClient(client.address) }.controlSize(.small)
+                            }
+                        }
+                    }
+                    if !settings.shareAllowedClients.isEmpty {
+                        Text("ALLOWED DEVICES").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                        ForEach(settings.shareAllowedClients, id: \.self) { address in
+                            HStack {
+                                Text(address).font(.system(size: 10, design: .monospaced))
+                                Spacer()
+                                Button("Remove") { controller.removeShareClient(address) }
+                                    .controlSize(.small).buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                    Text("Only traffic that uses the Wi-Fi proxy is routed. Browsers and most apps do; some games and apps ignore it.")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } header: {
+            Text("Share with a device").font(.system(size: 12, weight: .regular)).textCase(.uppercase)
+        }
+        .alert("Regenerate the share password?", isPresented: $confirmPasswordReset) {
+            Button("Cancel", role: .cancel) {}
+            Button("Regenerate", role: .destructive) { controller.regenerateSharePassword() }
+        } message: {
+            Text("Devices using the current credentials must be updated with the new password.")
+        }
+    }
+
+    private var shareStatus: String {
+        switch controller.shareState {
+        case .off: return "Starting…"
+        case .waitingForEngine: return "Waiting for the proxy engine"
+        case .waitingForTunnel: return "Waiting for VPN connection"
+        case .noNetwork: return "No Wi-Fi or Ethernet address found"
+        case .active: return "Ready on your local network"
+        case .failed(let message): return "Sharing failed: \(message)"
+        }
+    }
+
+    private var shareStatusSymbol: String {
+        if case .active = controller.shareState { return "checkmark.circle.fill" }
+        if case .failed = controller.shareState { return "exclamationmark.triangle.fill" }
+        return "hourglass"
+    }
+
+    private var shareStatusColor: Color {
+        if case .active = controller.shareState { return .green }
+        if case .failed = controller.shareState { return .orange }
+        return .secondary
+    }
+
+    private func shareCopyValue(_ value: String) -> some View {
+        HStack(spacing: 5) {
+            Text(value).font(.system(size: 11, design: .monospaced))
+            Button { copyShareValue(value) } label: { Image(systemName: "doc.on.doc") }
+                .buttonStyle(.borderless).help("Copy")
+        }
+    }
+
+    private func copyShareValue(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
     // MARK: Engine controls

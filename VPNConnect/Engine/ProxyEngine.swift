@@ -34,6 +34,10 @@ public struct RequestEntry: Identifiable, Equatable, Sendable {
     public var bytesToDestination: Int
     public var bytesToClient: Int
     public let transport: RequestTransport
+    /// The LAN client's IPv4 address when this request arrived on the shared
+    /// listener (`startSharing`); `nil` for the loopback listener, whose peer is
+    /// always this Mac. In-memory only, like the rest of the log.
+    public let client: String?
     /// Error text when the relay finished abnormally.
     public var error: String?
     public var endedAt: Date?
@@ -55,6 +59,7 @@ public struct RequestEntry: Identifiable, Equatable, Sendable {
         bytesToDestination: Int,
         bytesToClient: Int,
         transport: RequestTransport,
+        client: String? = nil,
         error: String?,
         detail: RequestDetail? = nil
     ) {
@@ -67,6 +72,7 @@ public struct RequestEntry: Identifiable, Equatable, Sendable {
         self.bytesToDestination = bytesToDestination
         self.bytesToClient = bytesToClient
         self.transport = transport
+        self.client = client
         self.error = error
         self.endedAt = nil
         self.detail = detail
@@ -254,6 +260,37 @@ public final class RelayRegistry: @unchecked Sendable {
     }
 }
 
+// MARK: - Sharing
+
+/// How the LAN ("share with a device") listener is set up: which address to
+/// bind, and the credential/allow-list that admits a phone on the same Wi-Fi.
+public struct ShareConfiguration: Equatable, Sendable {
+    /// LAN IPv4 to bind, e.g. "192.168.1.20".
+    public var host: String
+    /// Same number as the loopback HTTP port (the phone is configured to it).
+    public var port: Int
+    public var username: String
+    public var password: String
+    /// IPv4 addresses admitted without credentials, e.g. the phone itself.
+    public var allowedClients: Set<String>
+
+    public init(host: String, port: Int, username: String, password: String, allowedClients: Set<String>) {
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.allowedClients = allowedClients
+    }
+}
+
+/// A client the shared listener turned away for want of valid credentials.
+/// In-memory bookkeeping (most recent refusal first), never persisted.
+public struct RefusedClient: Equatable, Sendable {
+    public let address: String
+    public let lastAttempt: Date
+    public let attempts: Int
+}
+
 // MARK: - ProxyEngine
 
 /// Lifecycle owner for the local proxy listeners:
@@ -281,6 +318,19 @@ public final class ProxyEngine: @unchecked Sendable {
     private var running = false
     private var httpPort: Int?
     private var socksPort: Int?
+
+    /// Live shared (LAN) listener, if sharing is on.
+    private var shareServer: HTTPProxyServer?
+    private var shareConfig: ShareConfiguration?
+    /// Refused shared clients, most recent first (cap ~20).
+    private var refusedStorage: [RefusedClient] = []
+
+    /// Fired (on any queue) when a shared client is refused for want of valid
+    /// credentials — on a first refusal and on every repeat. Set by the UI to
+    /// surface a notice; kept separate from the internal recording.
+    public var onRefusedClient: (@Sendable (String) -> Void)?
+
+    private static let refusedCapacity = 20
 
     // MARK: Init
 
@@ -330,6 +380,109 @@ public final class ProxyEngine: @unchecked Sendable {
     /// Bound ports after a successful start (nil = not listening).
     public var listeningPorts: (http: Int?, socks5: Int?) {
         lock.withLock { (httpPort, socksPort) }
+    }
+
+    // MARK: Sharing
+
+    /// Starts (or replaces) the shared LAN listener: a second HTTP listener at
+    /// `config.host:config.port` that shares this engine's matcher, policy
+    /// store, relay registry and request log, but demands credentials (or an
+    /// allow-listed client address) before serving a request.
+    ///
+    /// Throws if the address cannot be bound; any previous share is torn down
+    /// first, since a replacement almost always reuses the same port.
+    public func startSharing(_ config: ShareConfiguration) throws {
+        stopSharing()
+        let server = HTTPProxyServer(
+            matcher: matcher,
+            policyStore: policyStore,
+            requestLog: requestLog,
+            relayRegistry: relayRegistry,
+            acceptQueue: DispatchQueue(label: "com.turtlediver.engine.http.share.accept", qos: .userInitiated),
+            accessPolicy: ProxyAccessPolicy(
+                username: config.username,
+                password: config.password,
+                allowedClients: config.allowedClients
+            ),
+            onRefusedClient: { [weak self] address in self?.recordRefusal(address) }
+        )
+        try server.start(host: config.host, port: config.port)
+        lock.lock()
+        shareServer = server
+        shareConfig = config
+        lock.unlock()
+    }
+
+    /// Hot-swaps the shared listener's credentials and allow-list without
+    /// rebinding; in-flight relays are untouched.
+    public func updateShareAccess(username: String, password: String, allowedClients: Set<String>) {
+        lock.lock()
+        if var config = shareConfig {
+            config.username = username
+            config.password = password
+            config.allowedClients = allowedClients
+            shareConfig = config
+        }
+        let server = shareServer
+        lock.unlock()
+        server?.updateAccessPolicy(ProxyAccessPolicy(
+            username: username, password: password, allowedClients: allowedClients
+        ))
+    }
+
+    /// Closes the shared LAN listener and every relay that originated from it.
+    /// Loopback relays are untouched. The refused-client record is kept.
+    public func stopSharing() {
+        lock.lock()
+        let server = shareServer
+        shareServer = nil
+        shareConfig = nil
+        lock.unlock()
+        // The server's own teardown fences admission, wakes pre-relay
+        // connections and finishes its relays — including any request accepted
+        // just before the fence.
+        server?.stop()
+    }
+
+    /// The shared listener's bound address, or nil when sharing is off.
+    public var sharingAddress: (host: String, port: Int)? {
+        lock.withLock { shareConfig.map { ($0.host, $0.port) } }
+    }
+
+    /// Clients the shared listener refused, most recent first.
+    public var refusedClients: [RefusedClient] {
+        lock.withLock { refusedStorage }
+    }
+
+    /// Drops one address from the refused-client record.
+    public func forgetRefusedClient(_ address: String) {
+        lock.withLock { refusedStorage.removeAll { $0.address == address } }
+    }
+
+    /// Connections the shared listener has accepted but not yet turned into a
+    /// relay. Internal: it exists so a test can prove `stopSharing()` fences a
+    /// half-sent request instead of racing the accept loop.
+    var sharedPendingConnectionCount: Int {
+        lock.withLock { shareServer?.pendingConnectionCount ?? 0 }
+    }
+
+    /// Records a refusal, bumping the attempt count for a repeat, and notifies
+    /// the observer. Capped at the most recent ``refusedCapacity`` addresses.
+    private func recordRefusal(_ address: String) {
+        let now = Date()
+        lock.lock()
+        if let index = refusedStorage.firstIndex(where: { $0.address == address }) {
+            let attempts = refusedStorage[index].attempts + 1
+            refusedStorage.remove(at: index)
+            refusedStorage.insert(RefusedClient(address: address, lastAttempt: now, attempts: attempts), at: 0)
+        } else {
+            refusedStorage.insert(RefusedClient(address: address, lastAttempt: now, attempts: 1), at: 0)
+            if refusedStorage.count > Self.refusedCapacity {
+                refusedStorage.removeLast(refusedStorage.count - Self.refusedCapacity)
+            }
+        }
+        lock.unlock()
+        onRefusedClient?(address)
     }
 
     // MARK: Lifecycle
@@ -385,6 +538,7 @@ public final class ProxyEngine: @unchecked Sendable {
     }
 
     public func stop() {
+        stopSharing()
         lock.lock()
         running = false
         httpPort = nil

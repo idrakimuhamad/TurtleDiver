@@ -11,9 +11,16 @@ with or without a tunnel.
 |---|---|---|
 | HTTP proxy | `127.0.0.1:6152` | `http-listen` |
 | SOCKS5 | `127.0.0.1:6153` | `socks5-listen` |
+| HTTP proxy (shared) | `<LAN IPv4>:<HTTP port>` | — (`shareWithDevice`) |
 
 Empty `http-listen` / `socks5-listen` values disable that listener. Ports are
 Surge-compatible; do not run Surge and TurtleDiver at the same time.
+
+The shared listener binds the port the running HTTP listener actually uses, on
+the LAN address of the Mac's preferred Wi-Fi or Ethernet interface, so it only
+appears while sharing is on and the tunnel is connected (see
+[Sharing with a device](#sharing-with-a-device)); it is never a profile option
+and never replaces the loopback listener.
 
 ## Request flow
 
@@ -55,6 +62,62 @@ sheet renders.
 - **origin-form requests** (`GET /path HTTP/1.1`) — the client is treating us
   as a web server; answered with `400` and a hint.
 - Malformed heads get `400`; heads that never complete are closed after 30s.
+
+## Sharing with a device
+
+Off by default, behind the **Share with a device** switch on the Dashboard
+(`shareWithDevice`). It exists to let one phone or tablet use the tunnel the Mac
+already holds without installing a profile, a certificate or an app on the
+phone. It binds a second HTTP listener; the loopback listener is unchanged.
+
+- **Lifecycle.** The shared listener is bound only when all three hold: the
+  setting is on, the proxy engine is running, and the VPN tunnel is connected.
+  It binds the LAN IPv4 of the Mac's preferred Wi-Fi or Ethernet interface — an
+  `en*` or `bridge*` address, never a VPN or link-local interface — on the port
+  the running HTTP listener actually uses (`6152` by default). It stops when the
+  tunnel disconnects, and `NWPathMonitor` rebinds it when the LAN address
+  changes; an openconnect reconnect can leave the listener up for a moment.
+  SOCKS5 is never shared — phones have no system SOCKS setting — and there is no
+  way to enable sharing without the tunnel.
+- **What leaves the Mac.** A shared device's traffic follows this Mac's routing
+  exactly like the Mac's own traffic. A host the profile's rules send through the
+  tunnel reaches the internet over the VPN; everything else — `DIRECT` rules and,
+  under split tunneling, the targets `vpn-slice` does not route — leaves through
+  the Mac's normal connection. That is the point of the feature: the phone
+  reaches VPN-only services and keeps its ordinary internet. It is not a kill
+  switch, and it is not the gateway mode in *Out of reach*.
+- **Access.** A client is allowed either by its IPv4 being on the allowed list
+  (persisted in `UserDefaults` `shareAllowedClients`) or by presenting HTTP Basic
+  credentials in `Proxy-Authorization`: username `turtle` and a generated
+  16-character password kept in the Keychain (`sharePassword`, cleared by the
+  credential reset, with a regenerate button). Anything else is answered
+  `407 Proxy Authentication Required` with
+  `Proxy-Authenticate: Basic realm="TurtleDiver"`. **Reset All Settings** turns
+  sharing off, clears the allowed addresses and deletes the share password.
+- **Refusals show up in the UI.** A device that is refused and is not on the
+  list is remembered in memory (at most 20 addresses) and offered in the
+  dashboard with an **Allow** button — the fast path for Android, whose manual
+  proxy screen has no username or password fields, so the first request is
+  refused and then allowed from the Mac.
+- **The credential is stripped, not forwarded.** `Proxy-Authorization` is
+  removed from a forwarded plain-HTTP request on **both** listeners, so the Basic
+  value authenticates the device to this engine and never reaches an origin.
+  Plain HTTP on the shared listener serves **one request per connection**: a
+  later pipelined request on the same connection is dropped, and the client
+  retries on a new one. The loopback listener keeps its no-auth behaviour.
+- **Rules see the device, not the Mac.** The device's own IPv4 is the client
+  address during rule matching, so an `SRC-IP` rule can allow or block it —
+  `SRC-IP,192.168.1.30/32,REJECT` refuses that device while the Mac's own
+  traffic is untouched.
+- **What it records.** A request from a shared device carries the client's IPv4
+  in `RequestEntry.client`, rendered as the **Client** row in the request-detail
+  sheet. Nothing is persisted to disk — it is the same in-memory detail the other
+  rows keep. macOS may ask for **Local Network** permission the first time
+  (`NSLocalNetworkUsageDescription` in `Info.plist`).
+- **The honest limit.** Only traffic that honours a proxy is routed: games and
+  apps that ignore the system proxy do not go through the engine, and nothing in
+  the UI can say "this device is only partly routed". Basic auth travels in clear
+  on the LAN, so share only on a network you trust.
 
 ## SOCKS5 listener (RFC 1928)
 
@@ -179,6 +242,15 @@ rewriting, traffic through an upstream CONNECT proxy (and upstream 403 →
 502), SOCKS5 greeting/CONNECT/domain addressing/reject/command-and-method
 errors, 400 hardening, dead-destination 502, request-log accuracy (rule,
 policy, bytes) and ring-buffer trimming — 21 integration tests (incl. the relay backpressure regression and four end-to-end capture tests: plain-HTTP head + withheld cookie, CONNECT SNI, SOCKS5 SNI, capture-off) among the 720 core tests.
+
+`Tests/TurtleDiverCoreTests/ProxyShareTests.swift` covers the shared listener's
+access policy: the allowed-IP list, Basic auth against the Keychain password, the
+`407` + `Proxy-Authenticate` refusal an unknown device gets, and
+`Proxy-Authorization` being stripped before a request is forwarded.
+`Tests/TurtleDiverAppTests/ShareWithDeviceTests.swift` covers the app-side glue
+(`EngineController.reconcileSharing`, `ShareState`): the listener is bound only
+when the setting is on **and** the engine runs **and** the tunnel is connected,
+stopped when the tunnel disconnects, and rebound when the LAN address changes.
 
 `Tests/TurtleDiverCoreTests/RelayHalfCloseTests.swift` (4 tests) drives a real
 `RelayConnection` — a client leg on a `socketpair`, an origin leg on a real

@@ -57,7 +57,7 @@ final class SecretHygieneTests: XCTestCase {
         defaults.set("hunter2", forKey: "adminPassword")
         defaults.set("vpn-secret", forKey: "vpnPassword")
 
-        let purged = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        let purged = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertEqual(secrets.retrieve(account: "adminPassword"), "hunter2")
         XCTAssertEqual(secrets.retrieve(account: "vpnPassword"), "vpn-secret")
@@ -76,7 +76,7 @@ final class SecretHygieneTests: XCTestCase {
 
         defaults.set("stale", forKey: "adminPassword")
 
-        _ = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        _ = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertEqual(secrets.retrieve(account: "adminPassword"), "current")
         XCTAssertTrue(secrets.stored.isEmpty, "nothing should have been rewritten")
@@ -91,7 +91,7 @@ final class SecretHygieneTests: XCTestCase {
         defaults.set("", forKey: "adminPassword")
         defaults.set("   ", forKey: "vpnPasscode")
 
-        _ = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        _ = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertTrue(secrets.stored.isEmpty)
         XCTAssertNil(defaults.object(forKey: "adminPassword"))
@@ -104,7 +104,7 @@ final class SecretHygieneTests: XCTestCase {
 
         defaults.set("  spaced  ", forKey: "vpnPassword")
 
-        _ = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        _ = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertEqual(secrets.retrieve(account: "vpnPassword"), "  spaced  ",
                        "a password is stored verbatim, only blank is treated as absent")
@@ -118,7 +118,7 @@ final class SecretHygieneTests: XCTestCase {
 
         for key in SettingsManager.legacyDefaultsKeys { defaults.set("value", forKey: key) }
 
-        let purged = SettingsManager(defaults: defaults)
+        let purged = SettingsManager(preferences: .suite(suite))
             .purgeLegacyDefaults(secrets: FakeSecrets())
 
         XCTAssertEqual(Set(purged), Set(SettingsManager.legacyDefaultsKeys))
@@ -140,7 +140,7 @@ final class SecretHygieneTests: XCTestCase {
         defaults.set("2026-01-01", forKey: "VPNConnectConnectionHistory")
         defaults.set("value", forKey: "adminPassword")
 
-        _ = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: FakeSecrets())
+        _ = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: FakeSecrets())
 
         XCTAssertEqual(defaults.string(forKey: "activeProfileName"), "Main")
         XCTAssertEqual(defaults.string(forKey: "appTheme"), "dark")
@@ -157,7 +157,7 @@ final class SecretHygieneTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let secrets = FakeSecrets(items: ["adminPassword": "from-keychain"])
 
-        _ = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        _ = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         for account in KeychainHelper.credentialAccounts {
             XCTAssertNil(defaults.object(forKey: account),
@@ -174,10 +174,10 @@ final class SecretHygieneTests: XCTestCase {
 
         defaults.set("hunter2", forKey: "adminPassword")
 
-        let first = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        let first = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
         XCTAssertFalse(first.isEmpty)
 
-        let second = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        let second = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertTrue(second.isEmpty, "there is nothing left to purge")
         XCTAssertEqual(secrets.stored.count, 1, "the Keychain was written exactly once")
@@ -189,13 +189,13 @@ final class SecretHygieneTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let secrets = FakeSecrets(items: ["adminPassword": "current"])
 
-        _ = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        _ = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         // Something wrote the key again (an old build, a restored plist).
         defaults.set("old-build-value", forKey: "proxyConfigurations")
         defaults.set("old-build-value", forKey: "useProxy")
 
-        let purged = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        let purged = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertEqual(Set(purged), ["proxyConfigurations", "useProxy"])
         XCTAssertNil(defaults.object(forKey: "proxyConfigurations"))
@@ -207,7 +207,7 @@ final class SecretHygieneTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let secrets = FakeSecrets()
 
-        let purged = SettingsManager(defaults: defaults).purgeLegacyDefaults(secrets: secrets)
+        let purged = SettingsManager(preferences: .suite(suite)).purgeLegacyDefaults(secrets: secrets)
 
         XCTAssertTrue(purged.isEmpty)
         XCTAssertTrue(secrets.stored.isEmpty)

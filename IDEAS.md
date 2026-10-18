@@ -56,7 +56,7 @@ or decided before the work is worth starting.
 | 18 | Liveness without shelling out to `ps` | S | A protocol version, so an old agent can be refused by name |
 | 19 | A root `sudo` that waits through part of every connect | S | An hour with the process table |
 | 20 | Notarization | S | An Apple Developer Program enrolment |
-| 21 | Route another device's network through the engine | M | Revising the "serves this machine only" anti-goal, and an auth story for a non-loopback listener |
+| 21 | Route another device's network through the engine — **picked up** (the cheap half), `docs/PROXY_ENGINE.md` | M | Revising the "serves this machine only" anti-goal, and an auth story for a non-loopback listener |
 | 22 | A `stoken` invocation with no bound on it | S | Deciding whether to bound the wait or detect the loop |
 | 23 | The tokencode pair can straddle a 60-second boundary | S | Whether a rare retryable failure is worth a parser in two places |
 
@@ -349,57 +349,6 @@ has been proposed before and never decided, which is not a state worth staying
 in: worth its own written decision either way, because a great deal of "why not
 parity" resolves to this one card.
 
-### 21. Route another device's network through the engine
-
-A phone, tablet or second laptop points at this machine and its traffic leaves
-through the tunnel the Mac already holds. The use case that made me write it
-down: a phone uses the VPN the Mac is connected to, without a profile, a
-certificate or a password ever being installed on the phone. The phone does not
-know a VPN exists; it just reaches the internet through a host that does.
-
-**The cheap half is genuinely cheap, and for the same reason idea 14 is.** The
-engine already is what the phone needs: an HTTP listener on `127.0.0.1:6152` and
-a SOCKS5 listener on `127.0.0.1:6153` with the whole rule engine behind them. Bind
-the same listeners on one LAN address, print that address and the port in the
-window, and a device on the same network can set a manual proxy and be routed.
-No new protocol, no packet layer, no DHCP. iOS honours a Wi-Fi HTTP proxy for
-anything using `NSURLSession`; Android does the same per network.
-
-**What that costs, in the order it bites:**
-
-- **Auth.** A loopback listener trusts every caller because only this machine can
-  reach it. A LAN listener has to not. SOCKS5 already has a username/password
-  method in the grammar and the listener is hand-written, but the HTTP listener
-  has no proxy-auth path at all, and credentials need somewhere to live that is
-  not the profile file.
-- **It serves traffic, not just routes it.** The request detail the app keeps
-  (host, SNI, ALPN, sizes) suddenly describes a second device's browsing. That is
-  the data `RepoPrivacyGuardTests` exists to keep out of the tree, and it is now
-  the host's job to decide who can read it in the window.
-- **Local Network permission.** macOS asks before an app binds or is reachable on
-  the LAN; a first-run prompt at connect time is a worse place for it than Setup.
-- **Partial coverage, and it will be read as full.** A manual proxy routes what
-  honours the proxy. Games and some apps do not, and nothing in the UI today can
-  say "this device is only partly routed" without inventing per-client state.
-
-**The expensive half is the honest version of the same thing.** Full routing for
-one device means the Mac forwarding packets for it — IP forwarding, NAT, and the
-same elevated helper territory as idea 16 — or a tunnel the device joins (a
-WireGuard/"connect to my Mac" endpoint), which is a different product with a key
-management story. Both are the packet layer again. Worth refusing early: an
-iOS/Android app for this, since the entire point is that nothing gets installed
-on the phone.
-
-**It collides with a written anti-goal, and that is the real first step.**
-"Gateway mode, DHCP, Surge Ponte, built-in servers ... This app serves the machine
-it runs on" is in *Out of reach* below. This card is a deliberate proposal to
-narrow that line — one device, a proxy, an explicit switch — rather than to move
-it, but the anti-goal has to be amended in the same commit or the next person
-will correctly read this idea as closed.
-
-Depends on: a decision about the anti-goal, then the auth and Local Network
-questions. The binding itself is small.
-
 ## Out of reach, and why
 
 Not ideas — anti-goals, recorded so nobody re-proposes them expecting a surprise.
@@ -413,10 +362,14 @@ Not ideas — anti-goals, recorded so nobody re-proposes them expecting a surpri
   rule of thumb has been to stay dependency-free — the PAC importer was built
   without JavaScriptCore on purpose — and a script engine is also a permanent
   security surface in a process holding credentials.
-- **Gateway mode, DHCP, Surge Ponte, built-in servers.** These serve other
-  devices on the network. This app serves the machine it runs on. (Idea 21 asks
-  to narrow this to "one device, over a proxy we already run" — the difference is
-  deliberate and not yet decided.)
+- **Gateway mode, DHCP, Surge Ponte, built-in servers, packet forwarding.** These
+  serve other devices on the network. This app serves the machine it runs on —
+  with one deliberate exception, decided and shipped as idea 21: a single device
+  may point at the HTTP proxy the engine already runs, behind an explicit switch
+  and only while the tunnel is up. That is a proxy, not a gateway — the Mac
+  forwards no packets, hands out no addresses, and runs no server the device
+  joins. Gateway mode, DHCP, Ponte, packet forwarding and built-in servers stay
+  out, and idea 16's packet layer with them.
 - **`DEVICE-NAME`, `MAC-ADDRESS`, `CELLULAR-RADIO`, `CELLULAR-CARRIER` rules.**
   The first two describe a client that is not this machine (gateway mode); the
   last two do not exist on macOS.
@@ -576,6 +529,29 @@ pair is generated.
   (`profile use`, `policy set`) and `requests --json` (a list of the user's
   hosts). The reasoning that changed between the card and the commit is in the
   card, above.
+
+- **21. Route another device's network through the engine** — the *cheap half*,
+  shipped as **Share with a device**. It is opt-in (`shareWithDevice`, off by
+  default) and only while the tunnel is up: the engine binds a second **HTTP**
+  listener on the Mac's LAN address, on the same port as the loopback listener,
+  and one device that sets a manual proxy to that address is routed. Access is by
+  the allowed-IP list or HTTP Basic (`turtle` plus a generated 16-character
+  password in the Keychain); anything else gets `407`. Only HTTP is shared —
+  SOCKS5 stays loopback-only — and `Proxy-Authorization` is stripped from what is
+  forwarded, so a device's proxy credential never reaches an origin. It stops
+  when the tunnel disconnects (an openconnect reconnect may leave it up for a
+  moment) and rebinds when the LAN address changes. A shared device's traffic
+  follows the Mac's routing like the Mac's own — VPN-routed hosts go over the
+  tunnel, the rest leaves the ordinary way — and the device's own address is what
+  `SRC-IP` rules match, so a rule can block it. `docs/PROXY_ENGINE.md` is the
+  contract.
+  **What has not been picked up:** the expensive half is still refused — full
+  routing for the device means forwarding its packets (NAT, and the
+  elevated-helper territory of idea 16) or a tunnel the device joins, and an
+  installed iOS/Android app stays out because the whole point is that nothing is
+  installed on the phone. The other limit is coverage: a manual proxy routes only
+  what honours a proxy, and the device's Basic credential travels in clear on the
+  LAN.
 
 ## Dropped
 

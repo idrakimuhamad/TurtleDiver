@@ -203,6 +203,9 @@ public enum RequestFormat {
         }
         add("Time", time(entry.startedAt))
         add("Destination", "\(entry.host):\(entry.port)")
+        // Only a request that arrived on the shared listener has a client worth
+        // naming; the loopback peer is always this Mac.
+        if let client = entry.client { add("Client", client) }
         add("Transport", entry.transport.rawValue.uppercased())
         if let detail = entry.detail, let ip = detail.resolvedAddress, ip != entry.host {
             add("Connected to", ip)

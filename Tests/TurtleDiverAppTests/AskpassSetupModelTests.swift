@@ -43,7 +43,7 @@ final class AskpassSetupModelTests: XCTestCase {
     override func setUpWithError() throws {
         let suite = "askpass-setup-model-\(UUID().uuidString)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        settings = SettingsManager(defaults: defaults!)
+        settings = SettingsManager(preferences: .suite(suite))
         bundle = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("askpass-model-\(UUID().uuidString)/TurtleDiver.app")
         try placeHelper()

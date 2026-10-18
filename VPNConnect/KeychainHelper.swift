@@ -11,12 +11,51 @@ import TurtleDiverSystem
 
 // MARK: - Secret store
 
+/// What a `SecretStore` read found.
+enum SecretLookup: Equatable {
+    /// The stored value (which may be empty).
+    case value(String)
+    /// No item exists for that account.
+    case missing
+    /// The store refused to answer — locked keychain, denied access, a real
+    /// error. Deliberately distinct from `missing`: "I cannot tell you" must
+    /// never be answered by inventing a new secret.
+    case failed
+}
+
 /// The Keychain surface the app needs, as a protocol so tests can inject an
 /// in-memory implementation instead of touching the login keychain.
 protocol SecretStore: Sendable {
     func retrieve(account: String) -> String?
     func store(password: String, account: String)
     func delete(account: String)
+
+    /// A read that tells "no such item" apart from "the store would not say".
+    func lookup(account: String) -> SecretLookup
+    /// Stores and reports whether the write landed.
+    func storeReportingFailure(password: String, account: String) -> Bool
+    /// Deletes the account from every service this app has ever written to, not
+    /// just the current one.
+    func deleteEverywhere(account: String)
+}
+
+extension SecretStore {
+    /// A store that cannot tell the two apart reports `missing` whenever
+    /// `retrieve` answers nil — the behaviour that predates `SecretLookup`.
+    func lookup(account: String) -> SecretLookup {
+        retrieve(account: account).map(SecretLookup.value) ?? .missing
+    }
+
+    /// A store with no failure signal reports success.
+    func storeReportingFailure(password: String, account: String) -> Bool {
+        store(password: password, account: account)
+        return true
+    }
+
+    /// A store with a single service has only the one copy to delete.
+    func deleteEverywhere(account: String) {
+        delete(account: account)
+    }
 }
 
 /// The production store: the macOS Keychain via `KeychainHelper`.
@@ -24,6 +63,11 @@ struct KeychainBackedSecrets: SecretStore, Sendable {
     func retrieve(account: String) -> String? { KeychainHelper.retrieve(account: account) }
     func store(password: String, account: String) { KeychainHelper.store(password: password, account: account) }
     func delete(account: String) { KeychainHelper.delete(account: account) }
+    func lookup(account: String) -> SecretLookup { KeychainHelper.lookup(account: account) }
+    func storeReportingFailure(password: String, account: String) -> Bool {
+        KeychainHelper.storeReportingFailure(password: password, account: account)
+    }
+    func deleteEverywhere(account: String) { KeychainHelper.deleteEverywhere(account: account) }
 }
 
 // MARK: - Keychain Helper
@@ -54,10 +98,19 @@ enum KeychainHelper {
     static let adminPasswordAccount = AskpassProgram.administratorAccount
     static let vpnPasswordAccount = "vpnPassword"
     static let vpnPasscodeAccount = "vpnPasscode"
+    /// The generated password a phone authenticates with when routing through
+    /// "Share with a device". The matching username is not a secret and lives in
+    /// ``shareUsername`` rather than the Keychain.
+    static let sharePasswordAccount = "sharePassword"
+
+    /// The fixed, non-secret proxy username a shared device authenticates with.
+    /// A constant, not a credential: it is visible in the phone's proxy dialog
+    /// and says nothing about the user.
+    static let shareUsername = "turtle"
 
     /// The accounts whose names doubled as `UserDefaults` keys before the move
     /// to the Keychain, in the order a migration should attempt them.
-    static let credentialAccounts = [adminPasswordAccount, vpnPasswordAccount, vpnPasscodeAccount]
+    static let credentialAccounts = [adminPasswordAccount, vpnPasswordAccount, vpnPasscodeAccount, sharePasswordAccount]
 
     /// Logger for Keychain operations (visible in Console.app).
     private static let log = Logger(subsystem: serviceName, category: "keychain")
@@ -72,10 +125,21 @@ enum KeychainHelper {
         persist(password: password, account: account, service: serviceName)
     }
 
+    /// Stores and reports whether the item actually landed.
+    ///
+    /// `store(password:account:)` cannot say, and a caller holding a secret the
+    /// Keychain refused to persist has a problem worth surfacing: the value it
+    /// hands out would be gone after the next launch.
+    @discardableResult
+    static func storeReportingFailure(password: String, account: String) -> Bool {
+        persist(password: password, account: account, service: serviceName)
+    }
+
     /// Stores under an explicit service. Only the migration passes a service
     /// other than the app's own.
-    private static func persist(password: String, account: String, service: String) {
-        guard let data = password.data(using: .utf8) else { return }
+    @discardableResult
+    private static func persist(password: String, account: String, service: String) -> Bool {
+        guard let data = password.data(using: .utf8) else { return false }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -102,10 +166,14 @@ enum KeychainHelper {
             let status = SecItemAdd(query as CFDictionary, nil)
             if status != errSecSuccess {
                 log.error("Failed to store password for '\(account)': \(status)")
+                return false
             }
+            return true
         } else if updateStatus != errSecSuccess {
             log.error("Failed to update password for '\(account)': \(updateStatus)")
+            return false
         }
+        return true
     }
 
     /// Retrieves a password string from the Keychain.
@@ -113,6 +181,24 @@ enum KeychainHelper {
     /// - Returns: The stored password, or `nil` if no entry exists.
     static func retrieve(account: String) -> String? {
         read(account: account, service: serviceName)
+    }
+
+    /// A read that tells "no item" apart from "the Keychain refused".
+    ///
+    /// The difference matters for anything that would otherwise *recreate* a
+    /// missing secret: a locked or denied keychain would then look like an
+    /// empty one, and the app would quietly hand out a second password while the
+    /// first is still the one on file.
+    static func lookup(account: String) -> SecretLookup {
+        switch StoredSecret.read(services: [serviceName], account: account) {
+        case .value(let secret):
+            return .value(secret)
+        case .missing:
+            return .missing
+        case .refused(let status):
+            log.error("Failed to read password for '\(account)': \(status)")
+            return .failed
+        }
     }
 
     /// Reads one item from one service.
@@ -165,6 +251,39 @@ enum KeychainHelper {
         }
     }
 
+    // MARK: - Share password generation
+
+    /// The unambiguous alphabet the share password is drawn from.
+    ///
+    /// `0`/`O`, `1`/`l`/`I` are deliberately absent: the password is typed by
+    /// hand into a phone's proxy settings, off a Mac's screen.
+    static let sharePasswordAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789")
+
+    /// Length of a generated share password.
+    static let sharePasswordLength = 16
+
+    /// Draws a password by uniform sampling over ``sharePasswordAlphabet``.
+    ///
+    /// Generic over the generator so a test can pin the result with a seeded
+    /// one; production passes `SystemRandomNumberGenerator`, which is the
+    /// system's CSPRNG. The alphabet is non-empty, so each draw succeeds; the
+    /// result is exactly ``sharePasswordLength`` characters.
+    static func generateSharePassword<R: RandomNumberGenerator>(using generator: inout R) -> String {
+        var password = ""
+        password.reserveCapacity(sharePasswordLength)
+        for _ in 0..<sharePasswordLength {
+            guard let character = sharePasswordAlphabet.randomElement(using: &generator) else { break }
+            password.append(character)
+        }
+        return password
+    }
+
+    /// A fresh share password from the system's cryptographic generator.
+    static func generateSharePassword() -> String {
+        var generator = SystemRandomNumberGenerator()
+        return generateSharePassword(using: &generator)
+    }
+
     // MARK: - Migration
 
     /// Copies credentials that only exist under a pre-rename service into the
@@ -192,7 +311,7 @@ enum KeychainHelper {
             currentService: serviceName,
             read: { service, account in read(account: account, service: service) },
             write: { service, account, value in
-                persist(password: value, account: account, service: service)
+                _ = persist(password: value, account: account, service: service)
             }
         )
     }

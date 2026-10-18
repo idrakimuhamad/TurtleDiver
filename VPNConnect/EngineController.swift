@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import OSLog
+import Network
 
 // The app target compiles these files into one module; the SPM target
 // `TurtleDiverAppGlue` compiles them standalone, so the engine modules are
@@ -85,6 +86,28 @@ final class LiveTunnelStatus: TunnelStatusSource {
     func log(_ line: String) { VPNManager.shared.debugOutput += line }
 }
 
+// MARK: - Share with a device
+
+/// The lifecycle of "Share with a device", as the UI renders it.
+///
+/// `Equatable` so a view can diff it cheaply and switch on the case that is
+/// currently true. `.active` carries the address a phone should be pointed at.
+enum ShareState: Equatable {
+    /// Sharing is switched off in settings.
+    case off
+    /// Switched on, but the proxy engine is not running yet.
+    case waitingForEngine
+    /// Switched on and the engine is up, but the app does not report the VPN
+    /// tunnel as connected.
+    case waitingForTunnel
+    /// The engine and tunnel are up, but no LAN IPv4 address was found.
+    case noNetwork
+    /// Sharing a listener at `host:port`.
+    case active(host: String, port: Int)
+    /// A hard failure, with the message to show the user.
+    case failed(String)
+}
+
 // MARK: - Engine Controller
 
 /// App-side glue between the proxy engine and the rest of the app:
@@ -123,6 +146,15 @@ final class EngineController: ObservableObject {
     /// Names whose refresh is in flight right now.
     @Published private(set) var ruleSetsRefreshing: Set<String> = []
 
+    /// "Share with a device" lifecycle. See ``ShareState``.
+    @Published private(set) var shareState: ShareState = .off
+    /// Clients the engine refused because they are not in the allowed list,
+    /// newest attempt per address. The UI offers to add each one.
+    @Published private(set) var shareRefusedClients: [RefusedClient] = []
+    /// Set when the share password could not be read from or written to the
+    /// Keychain. The password and the share state are otherwise left alone.
+    @Published private(set) var sharePasswordError: String?
+
     // MARK: Collaborators
 
     let engine: ProxyEngine
@@ -135,6 +167,16 @@ final class EngineController: ObservableObject {
     /// (which adopts the machine's own tunnel — see `TunnelStatusSource`).
     private let tunnel: TunnelStatusSource
     private var cancellables = Set<AnyCancellable>()
+
+    /// Reads the machine's primary LAN IPv4 for the interface names the system
+    /// prefers (`NWPathMonitor.availableInterfaces` order). Injected so tests
+    /// can force "no network" (or a fixed address) without a real network.
+    private let lanAddress: ([String]) -> String?
+
+    /// Watches the network path so the share follows the Mac between Wi-Fi and
+    /// Ethernet (and is re-established after a drop) without a poll timer.
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "app.turtlediver.share.network-path")
 
     /// Cached remote rule lists. Injected so tests never read or write the
     /// user's cache directory.
@@ -167,12 +209,14 @@ final class EngineController: ObservableObject {
         systemProxy: SystemProxyManager? = nil,
         secrets: SecretStore = KeychainBackedSecrets(),
         ruleSets: RuleSetStore? = nil,
-        tunnel: TunnelStatusSource = LiveTunnelStatus()
+        tunnel: TunnelStatusSource = LiveTunnelStatus(),
+        lanAddress: @escaping ([String]) -> String? = { LANAddress.primaryLANIPv4(preferredNames: $0) }
     ) {
         self.profileManager = profileManager
         self.settings = settings
         self.secrets = secrets
         self.tunnel = tunnel
+        self.lanAddress = lanAddress
         self.ruleSets = ruleSets ?? RuleSetStore()
         self.systemProxy = systemProxy ?? SystemProxyManager(
             runner: SystemProxyManager.defaultRunner(adminPasswordProvider: {
@@ -199,6 +243,23 @@ final class EngineController: ObservableObject {
 
         observeProfileChanges()
         observeVPNStatus()
+        observeShareSettings()
+        observeNetworkPath()
+
+        // "Reset all settings" deletes the share password from the Keychain.
+        // The live share has to be torn down, and the cached copy dropped,
+        // *before* that happens — otherwise the engine keeps serving with a
+        // credential that no longer exists. `onResetBegan` runs synchronously,
+        // so the listener is down before the reset can suspend.
+        settings.onResetBegan = { [weak self] in
+            self?.prepareForShareReset()
+        }
+        // Belt and braces: if anything brought a share back between the reset
+        // beginning and its deletions, it is stopped here, while the credentials
+        // are still in the Keychain but about to go.
+        settings.onResetWillDeleteCredentials = { [weak self] in
+            self?.prepareForShareReset()
+        }
 
         // The sweep itself shells out to `networksetup`, so it is kept off the
         // main thread. It is one-shot (a no-op on every later launch). The
@@ -212,10 +273,17 @@ final class EngineController: ObservableObject {
         if settings.useProxyEngine {
             startEngine()
         }
+        // Establishes the initial share state (including `waitingForEngine` when
+        // the setting is on but the engine is not).
+        reconcileSharing()
 
         // Load whatever is already cached (off the main thread) so cached rule
         // sets work with no network at all, then refresh the stale ones.
         reloadRuleSets()
+    }
+
+    deinit {
+        pathMonitor.cancel()
     }
 
     // MARK: Remote rule sets
@@ -328,10 +396,13 @@ final class EngineController: ObservableObject {
 
         wireRequestLog()
         wirePolicyStore()
+        wireRefusedClients()
         // The hooks only fire on *changes*: without this pull the dashboard shows
         // "no policies in the active profile" until something happens to touch
         // the store, even though routing already works.
         refreshRequests()
+
+        reconcileSharing()
 
         if profileManager.activeProfile.general.systemProxy {
             // A profile that asks for the system proxy re-applies it on every
@@ -423,10 +494,13 @@ final class EngineController: ObservableObject {
 
     func stopEngine() {
         teardownSystemProxy()
+        engine.stopSharing()
         engine.stop()
         engineRunning = false
         httpPort = nil
         socks5Port = nil
+        // Settles `shareState` on `off` or `waitingForEngine` per the setting.
+        reconcileSharing()
     }
 
     /// User toggle entry point. The flag is persisted in `SettingsManager` so
@@ -653,6 +727,10 @@ final class EngineController: ObservableObject {
         } else if !wantsSystemProxy && systemProxyOn {
             Task { await setSystemProxyEnabled(false) }
         }
+
+        // Sharing follows the profile too: the HTTP listener sharing depends on
+        // can have been changed, and the allow-list may want re-pushing.
+        reconcileSharing()
     }
 
     // MARK: VPN tie-in
@@ -672,12 +750,16 @@ final class EngineController: ObservableObject {
     }
 
     private func handleVPNStatus(_ status: VPNStatus) {
-        guard engineRunning else { return }
-        if case .connected = status {
-            applyVPNRules()
-        } else if case .disconnected = status {
-            clearVPNRules()
+        if engineRunning {
+            if case .connected = status {
+                applyVPNRules()
+            } else if case .disconnected = status {
+                clearVPNRules()
+            }
         }
+        // The listener follows the app-reported tunnel state. Once active, its
+        // traffic follows the same VPN and DIRECT routing as the Mac.
+        reconcileSharing()
     }
 
     /// Adds DIRECT rules for vpn-slice targets on top of the user's rules so
@@ -709,6 +791,323 @@ final class EngineController: ObservableObject {
         appliedVPNRules = []
         profileManager.saveAndActivate(profile)
         engine.reload(profile: profile)
+    }
+
+    // MARK: Share with a device
+
+    /// The fixed, non-secret proxy username a shared device authenticates with.
+    var shareUsername: String { KeychainHelper.shareUsername }
+
+    /// The share password once it has been read or created, so the value the UI
+    /// shows is exactly the value the engine was given. Cleared by "Reset all
+    /// settings".
+    private var cachedSharePassword: String?
+
+    /// The share password to display, or `nil` when the Keychain could not be
+    /// read or written (see ``sharePasswordError``). Never touches the Keychain
+    /// itself — call ``ensureSharePassword()`` to load it.
+    var sharePassword: String? { cachedSharePassword }
+
+    /// Loads the share password into memory, generating and storing one the
+    /// first time it is needed.
+    ///
+    /// "No item" and "the Keychain would not say" are treated differently on
+    /// purpose: only the former earns a freshly generated password, because
+    /// replacing a password the app merely *failed to read* would leave the
+    /// phone holding one that nothing on the Mac agrees with.
+    ///
+    /// - Returns: the password, or `nil` when the Keychain refused a read or a
+    ///   write — in which case ``sharePasswordError`` says which.
+    @discardableResult
+    func ensureSharePassword() -> String? {
+        if let cachedSharePassword { return cachedSharePassword }
+        // A reset is deleting the Keychain item: reading it now could resurrect
+        // (or regenerate) exactly what is about to disappear.
+        guard !settings.isResetting else { return nil }
+
+        switch secrets.lookup(account: KeychainHelper.sharePasswordAccount) {
+        case .value(let existing) where !existing.isEmpty:
+            cachedSharePassword = existing
+        case .value, .missing:
+            // An empty item is not worth trusting: treat it as missing.
+            let generated = KeychainHelper.generateSharePassword()
+            guard secrets.storeReportingFailure(password: generated, account: KeychainHelper.sharePasswordAccount) else {
+                setSharePasswordError("Couldn't save the share password to the Keychain.")
+                return nil
+            }
+            cachedSharePassword = generated
+        case .failed:
+            setSharePasswordError("Couldn't read the share password from the Keychain.")
+            return nil
+        }
+
+        setSharePasswordError(nil)
+        return cachedSharePassword
+    }
+
+    /// Replaces the share password and hands the new value to a running share.
+    ///
+    /// A password the Keychain refuses to persist is *not* adopted: the old,
+    /// still-stored one keeps serving and the error is surfaced, so the phone's
+    /// copy and the Mac's never disagree.
+    func regenerateSharePassword() {
+        // Nothing may be written to the Keychain mid-reset.
+        guard !settings.isResetting else { return }
+        let message = "Couldn't save the new share password to the Keychain."
+        let generated = KeychainHelper.generateSharePassword()
+        guard secrets.storeReportingFailure(password: generated, account: KeychainHelper.sharePasswordAccount) else {
+            setSharePasswordError(message)
+            if !sharingActive { setShareState(.failed(message)) }
+            return
+        }
+        cachedSharePassword = generated
+        setSharePasswordError(nil)
+        pushShareAccess()
+    }
+
+    /// Approves `address`, pushes the new allowed list to the engine and tells
+    /// the engine to stop refusing that client.
+    func allowShareClient(_ address: String) {
+        let normalized = address.trimmingCharacters(in: .whitespaces)
+        guard !normalized.isEmpty, !settings.isResetting else { return }
+        var list = settings.shareAllowedClients
+        if !list.contains(normalized) {
+            list.append(normalized)
+            settings.shareAllowedClients = list
+        }
+        pushShareAccess()
+        engine.forgetRefusedClient(normalized)
+        refreshRefusedClients()
+    }
+
+    /// Removes a previously approved client.
+    func removeShareClient(_ address: String) {
+        guard !settings.isResetting else { return }
+        var list = settings.shareAllowedClients
+        list.removeAll { $0 == address }
+        settings.shareAllowedClients = list
+        pushShareAccess()
+    }
+
+    /// Hands the engine the current credentials and allow-list. A no-op when the
+    /// password cannot be resolved — ``sharePasswordError`` already says why.
+    private func pushShareAccess() {
+        guard !settings.isResetting,
+              case .active = shareState,
+              let password = ensureSharePassword() else { return }
+        engine.updateShareAccess(
+            username: shareUsername,
+            password: password,
+            allowedClients: shareAllowedClientSet
+        )
+    }
+
+    /// Pulls the engine's current refused-client list into the published state.
+    func refreshRefusedClients() {
+        let refused = engine.refusedClients
+        if refused != shareRefusedClients { shareRefusedClients = refused }
+    }
+
+    private var shareAllowedClientSet: Set<String> { Set(settings.shareAllowedClients) }
+
+    /// Brings the running share in line with the setting, the engine, the tunnel,
+    /// the network and the allowed-client list. Idempotent; every place one of
+    /// those can change calls it.
+    ///
+    /// The order of the guards is the policy:
+    /// - off in settings → `off`;
+    /// - engine down → `waitingForEngine`;
+    /// - app-reported tunnel down → `waitingForTunnel`;
+    /// - no running HTTP listener → `failed`;
+    /// - no LAN address → `noNetwork`;
+    /// - unreadable/unwritable share password → `failed`;
+    /// - otherwise start (or keep) a listener and report `active`/`failed`.
+    func reconcileSharing() {
+        // Fail-closed first, and before every other guard: a reset is deleting
+        // the credentials a share is bound to, so a reconcile that arrives
+        // mid-reset (a stale publisher event, a network tick) must not start
+        // one — and must stop any that is somehow still up.
+        guard !settings.isResetting else {
+            stopSharing()
+            setShareState(.off)
+            return
+        }
+        guard settings.shareWithDevice else {
+            stopSharing()
+            setShareState(.off)
+            return
+        }
+        guard engineRunning else {
+            stopSharing()
+            setShareState(.waitingForEngine)
+            return
+        }
+        guard vpnConnected else {
+            stopSharing()
+            setShareState(.waitingForTunnel)
+            return
+        }
+        // The port must come from the listener the engine is *actually* bound
+        // to, not from the profile: editing `http-listen` does not rebind the
+        // loopback listener (`ProxyEngine.reload` only hot-swaps rules), so
+        // reading the profile would aim the phone at a port nothing serves.
+        guard let port = engine.listeningPorts.http else {
+            stopSharing()
+            setShareState(.failed("The HTTP listener is off."))
+            return
+        }
+        guard let host = lanAddress(preferredLANInterfaceNames) else {
+            stopSharing()
+            setShareState(.noNetwork)
+            return
+        }
+        guard let password = ensureSharePassword() else {
+            stopSharing()
+            setShareState(.failed(sharePasswordError ?? "The share password is unavailable."))
+            return
+        }
+
+        // Already sharing this exact listener: keep the connections, but push a
+        // changed allowed-client list so approving a device takes effect at once.
+        if case .active(let currentHost, let currentPort) = shareState,
+           currentHost == host, currentPort == port, engine.sharingAddress != nil {
+            engine.updateShareAccess(
+                username: shareUsername,
+                password: password,
+                allowedClients: shareAllowedClientSet
+            )
+            return
+        }
+
+        do {
+            try engine.startSharing(ShareConfiguration(
+                host: host,
+                port: port,
+                username: shareUsername,
+                password: password,
+                allowedClients: shareAllowedClientSet
+            ))
+            setShareState(.active(host: host, port: port))
+            refreshRefusedClients()
+        } catch {
+            setShareState(.failed(error.localizedDescription))
+        }
+    }
+
+    /// Stops a running share and clears the refused-client list. Cheap and safe
+    /// when nothing is sharing.
+    private func stopSharing() {
+        if sharingActive { engine.stopSharing() }
+        if !shareRefusedClients.isEmpty { shareRefusedClients = [] }
+    }
+
+    /// Torn down before "Reset all settings" deletes the credentials the share
+    /// is holding: the listener goes, and so does the in-memory copy of the
+    /// password the user can still see on screen.
+    ///
+    /// Called synchronously from `SettingsManager.beginReset()` and again from
+    /// the awaited teardown hook, so a share that somehow came back between the
+    /// two is stopped before the Keychain item disappears.
+    private func prepareForShareReset() {
+        stopSharing()
+        setShareState(.off)
+        cachedSharePassword = nil
+        setSharePasswordError(nil)
+    }
+
+    private var sharingActive: Bool {
+        if case .active = shareState { return true }
+        return engine.sharingAddress != nil
+    }
+
+    /// Publishes only on a real change: `reconcileSharing()` runs on every
+    /// profile edit and network tick, and `@Published` fires its observers on
+    /// every assignment whether or not the value moved.
+    private func setShareState(_ state: ShareState) {
+        if shareState != state { shareState = state }
+    }
+
+    private func setSharePasswordError(_ message: String?) {
+        if sharePasswordError != message { sharePasswordError = message }
+    }
+
+    /// Interface names the system currently prefers for reaching the network,
+    /// restricted to the kinds a phone on the same network can reach.
+    private var preferredLANInterfaceNames: [String] {
+        let pathInterfaces = pathMonitor.currentPath.availableInterfaces.map { interface in
+            LANAddress.PathInterface(name: interface.name, kind: Self.kind(of: interface.type))
+        }
+        return LANAddress.preferredNames(from: pathInterfaces)
+    }
+
+    private static func kind(of type: NWInterface.InterfaceType) -> LANAddress.InterfaceKind {
+        switch type {
+        case .wifi: return .wifi
+        case .wiredEthernet: return .wiredEthernet
+        default: return .other
+        }
+    }
+
+    private var refusedClientsHookInstalled = false
+
+    /// Installs the engine's refused-client hook (idempotent — survives engine
+    /// restarts). The hook may fire off the main thread, so it hops back.
+    private func wireRefusedClients() {
+        guard !refusedClientsHookInstalled else { return }
+        refusedClientsHookInstalled = true
+        engine.onRefusedClient = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshRefusedClients()
+            }
+        }
+    }
+
+    private func observeShareSettings() {
+        settings.$shareWithDevice
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // Read the *current* settings, never the event's payload: a
+                // value captured before "Reset all settings" began can still be
+                // delivered mid-reset, and acting on it would recreate the very
+                // password the reset is deleting.
+                if self.settings.shareWithDevice && !self.settings.isResetting {
+                    // Load (or create) the password as soon as the user asks for
+                    // sharing, so the phone can be set up before the tunnel is up.
+                    self.ensureSharePassword()
+                }
+                self.reconcileSharing()
+            }
+            .store(in: &cancellables)
+        settings.$shareAllowedClients
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.reconcileSharing() }
+            .store(in: &cancellables)
+        // The end of a reset is the one moment a reconcile is *supposed* to run
+        // again, and the intent is already off by then, so it settles on `.off`.
+        settings.$isResetting
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] resetting in
+                guard let self, !resetting else { return }
+                self.reconcileSharing()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func observeNetworkPath() {
+        pathMonitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                // Re-read the LAN address; reconcileSharing() restarts the
+                // share only when the address it is bound to changed. The gates
+                // are read here, at handling time, not when the update arrived.
+                guard let self,
+                      self.settings.shareWithDevice,
+                      !self.settings.isResetting else { return }
+                self.reconcileSharing()
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
     }
 
     // MARK: Shutdown

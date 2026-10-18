@@ -78,7 +78,7 @@ final class RuleSetControllerTests: XCTestCase {
             snapshotURL: tempDir.appendingPathComponent("proxy-snapshot.json")
         )
         // Auto-refresh off: a test must never be able to reach the network.
-        let settings = SettingsManager(defaults: defaults)
+        let settings = SettingsManager(preferences: .suite(suiteName))
         settings.ruleSetAutoRefresh = false
 
         let controller = EngineController(

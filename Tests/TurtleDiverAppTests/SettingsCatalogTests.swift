@@ -130,13 +130,13 @@ final class SettingsCatalogTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let manager = SettingsManager(defaults: defaults)
+        let manager = SettingsManager(preferences: .suite(suiteName))
         XCTAssertEqual(manager.settingsPane, SettingsCatalog.defaultRoute.rawValue,
                        "a fresh install starts on the default pane")
 
         manager.settingsPane = SettingsRoute.advanced.rawValue
 
-        let reopened = SettingsManager(defaults: defaults)
+        let reopened = SettingsManager(preferences: .suite(suiteName))
         XCTAssertEqual(SettingsCatalog.route(forStoredValue: reopened.settingsPane), .advanced)
     }
 
@@ -193,7 +193,7 @@ final class RequestDetailSettingsTests: XCTestCase {
     /// Capture on, reveal off. An install that has never seen these keys must
     /// get the feature working but must not print anyone's cookies.
     func testDefaultsAreCaptureOnAndRevealOff() {
-        let settings = SettingsManager(defaults: defaults)
+        let settings = SettingsManager(preferences: .suite(suiteName))
         XCTAssertTrue(settings.recordRequestDetails)
         XCTAssertFalse(settings.revealSensitiveHeaders)
     }
@@ -204,17 +204,17 @@ final class RequestDetailSettingsTests: XCTestCase {
         defaults.set(false, forKey: "recordRequestDetails")
         defaults.set(true, forKey: "revealSensitiveHeaders")
 
-        let settings = SettingsManager(defaults: defaults)
+        let settings = SettingsManager(preferences: .suite(suiteName))
         XCTAssertFalse(settings.recordRequestDetails)
         XCTAssertTrue(settings.revealSensitiveHeaders)
     }
 
     func testBothSwitchesPersist() {
-        let first = SettingsManager(defaults: defaults)
+        let first = SettingsManager(preferences: .suite(suiteName))
         first.recordRequestDetails = false
         first.revealSensitiveHeaders = true
 
-        let second = SettingsManager(defaults: defaults)
+        let second = SettingsManager(preferences: .suite(suiteName))
         XCTAssertFalse(second.recordRequestDetails)
         XCTAssertTrue(second.revealSensitiveHeaders)
     }

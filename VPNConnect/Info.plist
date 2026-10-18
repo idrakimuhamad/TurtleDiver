@@ -26,5 +26,9 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
+	<!-- Shown when "Share with a device" starts a LAN listener: macOS asks the
+	     user before an app accepts local-network connections. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>TurtleDiver shares its proxy with a phone or tablet on your network when you turn on Share with a device.</string>
 </dict>
 </plist>

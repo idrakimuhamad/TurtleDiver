@@ -39,6 +39,16 @@ matching (`DOMAIN`, `DOMAIN-SUFFIX`, `IP-CIDR`, `PROCESS-NAME`, `RULE-SET`,
 a tunnel — and outbound connections go through a bounded pool, so one
 unreachable upstream costs a slot and its own timeout rather than the engine.
 
+**Share with a device.** Off by default. While it is on and the VPN tunnel is
+up, a second HTTP listener opens on this Mac's LAN address so **one** phone or
+tablet can point its Wi-Fi proxy at it and reach the internet through the Mac —
+no profile, certificate or app installed on the phone. The device's traffic
+follows the Mac's routing like the Mac's own: hosts the rules send through the
+tunnel go over the VPN, everything else leaves the ordinary way. The listener
+stops when the tunnel disconnects, SOCKS5 is never shared, and each device is
+admitted by address or HTTP Basic auth. See
+[Share with a device](#share-with-a-device).
+
 **Rules and routing.** The **Routing** pane is the everyday screen: assign a
 policy per domain, domain-suffix or IP-CIDR, in a list you can quick-add, edit
 inline and reorder. An **Import PAC** wizard converts an existing
@@ -219,6 +229,8 @@ typing `log`, `stoken` or `listener` filters it by title, subtitle and keywords.
   files, the profiles folder, whether each credential is in the Keychain
   (presence only, never the value), and hosts the destructive **Reset All
   Settings** — profiles on disk are left alone.
+- **Dashboard** hosts the engine toggle and the **Share with a device** setting
+  (off by default) — see [Share with a device](#share-with-a-device).
 
 Settings uses the same visual language as the dashboard: 10 pt cards,
 hairline-separated rows, one shared right edge for controls, monospaced paths
@@ -272,7 +284,9 @@ Click any row in the dashboard's request table (Settings ▸ **Dashboard**) to
 open a sheet with what was sent and what came back:
 
 - **General** — the row itself: host, port, rule, policy, size, duration, the
-  address the relay actually connected to, and any capture note.
+  address the relay actually connected to, and any capture note. A request that
+  came in from a shared device also names that client's address (the **Client**
+  row).
 - **Request** — the request line and the request headers. For `http://` this is
   the whole head; for `CONNECT` it is the CONNECT line plus its own headers.
 - **Response** — status line and response headers, captured on the plain-HTTP
@@ -344,7 +358,9 @@ on `127.0.0.1:6152` (HTTP) and `127.0.0.1:6153` (SOCKS5) and routes every
 request through the active profile's rules. The engine is independent of the
 VPN: it can run with or without a tunnel, and when split tunneling is active,
 `vpn-slice` targets are added as `DIRECT` rules so corporate traffic always
-flows through the tunnel.
+flows through the tunnel. With **Share with a device** on and the tunnel up, a
+second HTTP listener is bound on this Mac's LAN address, on the port the HTTP
+listener uses — see [Share with a device](#share-with-a-device) below.
 
 - [`docs/PROXY_ENGINE.md`](docs/PROXY_ENGINE.md) — listeners, routing, request log
 - [`docs/PROFILES.md`](docs/PROFILES.md) — profile syntax (`[General]`,
@@ -357,6 +373,40 @@ flows through the tunnel.
   codes, and why `connect` stays in the foreground
 - [`docs/SETTINGS_LAYOUT.md`](docs/SETTINGS_LAYOUT.md) — why the sidebar is
   172 pt wide, and the titlebar height contract
+
+### Share with a device
+
+**Dashboard ▸ Share with a device** (off by default) lets one phone or tablet
+use the tunnel the Mac already holds. It only binds while the engine is running
+and the VPN is connected, and it stops when the tunnel disconnects (an
+openconnect reconnect can leave it up for a moment).
+
+On the Mac, turn the switch on and note the LAN address shown underneath (and a
+password, if you want the auth path). Then, on the phone:
+
+- **iOS** — Settings ▸ Wi-Fi ▸ (i) next to the network ▸ **Configure Proxy** ▸
+  **Manual**: *Server* the Mac's LAN address (for example `192.168.1.20`),
+  *Port* `6152`, **Authentication** on, username `turtle` and the password from
+  the Mac.
+- **Android** — Settings ▸ Wi-Fi ▸ the network ▸ **Edit** ▸ *Advanced options* ▸
+  **Proxy** ▸ **Manual**: *Hostname* the Mac's LAN address, *Port* `6152`.
+  Android has no proxy-auth fields, so open a page once; the Mac lists the
+  device as refused with an **Allow** button, and allowing it lets it through.
+
+Three things to know before you share:
+
+- **The device is routed like this Mac.** A host the rules send through the
+  tunnel reaches the internet over the VPN; everything else — `DIRECT` rules,
+  and under split tunneling whatever `vpn-slice` does not route — leaves through
+  the Mac's normal connection. It is not a kill switch.
+- **Only proxy-aware traffic is routed.** A manual proxy covers what honours it
+  — Safari, Chrome, most apps — but games and some apps ignore it and go out
+  directly. Nothing here makes the device *fully* routed; that would need the
+  packet layer this app deliberately does not have.
+- **The password is Basic auth over plain HTTP**, so it travels in clear on the
+  LAN. Share only on a network you trust, and regenerate the password — or turn
+  the switch off — when you are done. macOS may ask for **Local Network**
+  permission the first time.
 
 ### The command line
 

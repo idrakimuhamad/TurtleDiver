@@ -22,20 +22,64 @@ enum AppTheme: String, CaseIterable {
     }
 }
 
+/// Where a `SettingsManager` keeps its preferences — and therefore exactly
+/// which `UserDefaults` domain "Reset all settings" wipes.
+///
+/// The store and the domain are **one value** on purpose. When they were two
+/// (an injected `UserDefaults` instance beside a hard-coded
+/// `AppIdentity.bundleIdentifier`), any test built on a disposable suite still
+/// deleted the *real* preferences of whoever ran the suite: the injected
+/// instance said "throwaway suite", the reset said "the app's domain", and
+/// nothing could notice the disagreement. With a single spec, a manager reading
+/// a disposable suite cannot be made to wipe anything else.
+enum PreferenceStore: Equatable, Sendable {
+    /// The application's own domain (`AppIdentity.bundleIdentifier`).
+    case application
+    /// A disposable suite, named by the caller. Tests only.
+    case suite(String)
+
+    /// The `UserDefaults` domain this store reads, writes and resets.
+    var domain: String {
+        switch self {
+        case .application: return AppIdentity.bundleIdentifier
+        case .suite(let name): return name
+        }
+    }
+
+    /// A `UserDefaults` bound to ``domain``.
+    var defaults: UserDefaults {
+        switch self {
+        case .application:
+            return .standard
+        case .suite(let name):
+            guard let suite = UserDefaults(suiteName: name) else {
+                preconditionFailure("\(name) is not a usable UserDefaults suite")
+            }
+            return suite
+        }
+    }
+}
+
 /// `@unchecked Sendable`: every stored property is either an immutable
 /// reference or a thread-safe store (`UserDefaults`, the Keychain), and the
 /// launch-time hygiene pass below is the only thing that touches it off the
 /// main thread — it never mutates `@Published` state.
 class SettingsManager: ObservableObject, @unchecked Sendable {
-    static let shared = SettingsManager()
+    static let shared = SettingsManager(preferences: .application)
     
-    private let defaults: UserDefaults    
+    /// The store this manager reads, writes and — on reset — wipes. One value,
+    /// so the two can never disagree (see ``PreferenceStore``).
+    private let preferences: PreferenceStore
+    private let defaults: UserDefaults
+    /// Where ``resetAllSettings()`` deletes credentials from. The real Keychain
+    /// in production.
+    private let secrets: SecretStore
     @Published var theme: AppTheme {
         didSet {
             defaults.set(theme.rawValue, forKey: "appTheme")
         }
     }
-    
+
     private enum Keys {
         static let vpnHost = "vpnHost"
         static let vpnID = "vpnID"
@@ -54,6 +98,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let settingsPane = "settingsPane"
         static let ruleSetAutoRefresh = "ruleSetAutoRefresh"
         static let updatesCheckEnabled = "updatesCheckEnabled"
+        static let shareWithDevice = "shareWithDevice"
+        static let shareAllowedClients = "shareAllowedClients"
         static let askpassHelperRequirement = AskpassSetup.defaultsKey
     }
 
@@ -96,18 +142,80 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         return purged
     }
     
+    /// Whether "Reset all settings" is in progress.
+    ///
+    /// While true the app is failing closed: the sharing intent is already off,
+    /// any live share is already stopped, and nothing may read, create or store
+    /// the share password until it ends. Published so observers can gate on the
+    /// *current* value rather than on a publisher event that may have been
+    /// queued before the reset began.
+    @Published private(set) var isResetting = false
+
+    /// Invoked **synchronously** by ``beginReset()``, while the main actor is
+    /// still held, so whatever is serving a credential can be stopped before
+    /// anything suspends. Main-actor isolated on purpose: a hook that has to
+    /// reach the app's state must not be able to run anywhere else.
+    var onResetBegan: (@MainActor () -> Void)?
+
+    /// Invoked (and awaited) after the sharing intent is off and the share is
+    /// down, before the credentials are deleted. A teardown that genuinely needs
+    /// to run asynchronously belongs here — never in ``onResetBegan``.
+    var onResetWillDeleteCredentials: (@MainActor () async -> Void)?
+
+    /// The fail-closed half of a reset, and the only part that must be
+    /// synchronous: mark the reset in progress, switch the sharing intent off,
+    /// and let whoever is holding a credential stop using it — all before the
+    /// first suspension point.
+    ///
+    /// Order matters: `isResetting` goes up first so any observer that runs as a
+    /// side effect of `shareWithDevice` changing already sees the gate closed.
+    @MainActor
+    func beginReset() {
+        isResetting = true
+        shareWithDevice = false
+        shareAllowedClients = []
+        onResetBegan?()
+    }
+
+    /// Wipes every stored preference and credential.
+    ///
+    /// `@MainActor` because it mutates `@Published` state. The sequence is the
+    /// point: fail closed synchronously, *then* suspend, and only then delete.
+    /// A stale publisher event (one that captured `true` before the reset) can
+    /// still land in the middle — which is why every observer reads the live
+    /// settings and ``isResetting`` when it handles an event instead of trusting
+    /// the value it was handed.
+    @MainActor
     func resetAllSettings() async {
-        defaults.removePersistentDomain(forName: AppIdentity.bundleIdentifier)
+        // 1. Synchronous, before any await: nothing can be sharing from here on.
+        beginReset()
+
+        // 2. Only now may anything suspend — the intent is off and the listener
+        //    that was using the credentials is down.
+        await onResetWillDeleteCredentials?()
+
+        // 3. A teardown hook must not be able to re-enable what is about to be
+        //    deleted.
+        shareWithDevice = false
+        shareAllowedClients = []
+
+        // 4. Wipe persisted state. The domain comes from the same value as the
+        //    store, so this is the suite the manager was built on — never the
+        //    app's own preferences when the manager is a test's.
+        defaults.removePersistentDomain(forName: preferences.domain)
         defaults.synchronize()
 
-        // Every service this app has written to, not just the current one: a
-        // credential left behind under an older bundle identifier would make
-        // "reset all settings" a half-truth.
+        // 5. Every service this app has written to, not just the current one: a
+        //    credential left behind under an older bundle identifier would make
+        //    "reset all settings" a half-truth.
         for account in KeychainHelper.credentialAccounts {
-            KeychainHelper.deleteEverywhere(account: account)
+            secrets.deleteEverywhere(account: account)
         }
         stokenBookmarkData = nil
         stokenTokenBookmarkData = nil
+
+        // 6. Reset over: observers may reconcile again, from a disabled intent.
+        isResetting = false
     }
     
     var vpnHost: String {
@@ -212,6 +320,21 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         didSet { defaults.set(useProxyEngine, forKey: Keys.useProxyEngine) }
     }
 
+    /// "Share with a device": while the tunnel is up and the engine is running,
+    /// let a phone or tablet on the same network route through the rule engine
+    /// by pointing its manual HTTP proxy at this Mac. Off by default — it opens
+    /// a listener to the LAN, so it is a thing the user asks for.
+    @Published var shareWithDevice: Bool = false {
+        didSet { defaults.set(shareWithDevice, forKey: Keys.shareWithDevice) }
+    }
+
+    /// The client addresses the user has approved to share with, in the order
+    /// they were added. Empty is valid: the device is approved on demand when
+    /// the engine refuses it (see `EngineController.allowShareClient`).
+    @Published var shareAllowedClients: [String] = [] {
+        didSet { defaults.set(shareAllowedClients, forKey: Keys.shareAllowedClients) }
+    }
+
     /// Main-window presentation state: `false` = compact controls only,
     /// `true` = the expanded dashboard. Persisted so the window reopens the way
     /// the user left it — the window itself sizes from this in `AppDelegate`.
@@ -300,10 +423,19 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         return nil
     }
     
-    /// Internal (not private) so tests can drive the manager against a
-    /// throwaway `UserDefaults` suite instead of the user's real plist.
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    /// `preferences` names the suite *and* the domain a reset wipes, so a test
+    /// helper cannot pass a disposable store and still reach the app's real
+    /// preferences. It has **no default** on purpose: reaching the application's
+    /// own preferences has to be spelled out as `.application`, which is easy to
+    /// see in review and impossible to arrive at by forgetting an argument.
+    ///
+    /// `secrets` is injectable so a test can watch "Reset all settings" delete
+    /// credentials without opening the login Keychain; production gets the real
+    /// one.
+    init(preferences: PreferenceStore, secrets: SecretStore = KeychainBackedSecrets()) {
+        self.preferences = preferences
+        self.defaults = preferences.defaults
+        self.secrets = secrets
         // Load persisted values
         debugMode = defaults.bool(forKey: Keys.debugMode)
         useTunneling = defaults.bool(forKey: Keys.useTunneling)
@@ -320,6 +452,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         // ship the feature disabled for every existing install.
         recordRequestDetails = defaults.object(forKey: Keys.recordRequestDetails) as? Bool ?? true
         revealSensitiveHeaders = defaults.bool(forKey: Keys.revealSensitiveHeaders)
+        shareWithDevice = defaults.bool(forKey: Keys.shareWithDevice)
+        shareAllowedClients = defaults.stringArray(forKey: Keys.shareAllowedClients) ?? []
         
         // Load theme
         if let raw = defaults.string(forKey: "appTheme"), let t = AppTheme(rawValue: raw) {

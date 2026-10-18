@@ -359,6 +359,21 @@ public final class RelayConnection: @unchecked Sendable {
     /// an error occurred). The engine retires the request-log entry here.
     public var onFinished: ((RelayMetrics, Error?) -> Void)?
 
+    /// Remaining client→outbound bytes this relay may forward (`nil` = stream
+    /// freely). Set by a listener that forwards exactly one framed message: once
+    /// the budget is spent the client side is treated as finished — further
+    /// bytes are discarded, never forwarded — and the outbound leg is
+    /// half-closed after the accepted bytes are on the wire.
+    private var clientBudgetRemaining: Int?
+    /// Set when the request is complete but accepted bytes are still queued for
+    /// the outbound leg; the half-close fires when that buffer drains, so a FIN
+    /// can never overtake the request it terminates.
+    private var pendingOutboundHalfClose = false
+    /// Mirror for the other direction: the outbound leg hit EOF while bytes for
+    /// the client were still queued. `shutdown(client, SHUT_WR)` would make
+    /// every later send fail, so the FIN waits for `outboundToClient` to drain.
+    private var pendingClientWriteShutdown = false
+
     private var finishedError: Error?
 
     /// Optional prefix watcher, called from `queue` only. Set from the relay
@@ -382,6 +397,11 @@ public final class RelayConnection: @unchecked Sendable {
         destination: RelayDestination,
         timeoutSeconds: Double,
         initialBytes: [UInt8]? = nil,
+        /// Caps how many further client bytes are forwarded (see
+        /// `clientBudgetRemaining`). A listener that forwards one framed HTTP
+        /// message passes the body bytes still to come; a CONNECT tunnel and the
+        /// loopback listener pass nil.
+        clientByteBudget: Int? = nil,
         /// Watches the first bytes of either leg (see `RelayStreamObserver`).
         /// Purely an observer: the bytes forwarded are never altered.
         observer: RelayStreamObserver? = nil,
@@ -435,6 +455,10 @@ public final class RelayConnection: @unchecked Sendable {
                     if let initial = initialBytes, !initial.isEmpty {
                         self.clientToOutbound.append(contentsOf: initial)
                     }
+                    // Installed before the sources arm: the pre-arm probe below
+                    // can read the client, and a read must never run with an
+                    // unset budget on a framed connection.
+                    self.clientBudgetRemaining = clientByteBudget
                     self.armSources()
                     // Kick pending initial bytes: with no further client data
                     // in flight (absolute-form requests arrive as one head),
@@ -442,6 +466,10 @@ public final class RelayConnection: @unchecked Sendable {
                     if !self.clientToOutbound.isEmpty {
                         self.flush(buffer: &self.clientToOutbound, toFD: self.outboundFD, clientSide: true)
                     }
+                    if let remaining = self.clientBudgetRemaining, remaining <= 0 {
+                        self.finishClientRequestDirection()
+                    }
+                    self.completeIfDone()
                     completion(nil)
                 }
             } catch {
@@ -507,17 +535,48 @@ public final class RelayConnection: @unchecked Sendable {
 
     // MARK: Reading
 
+    /// What one read attempt did. Returned rather than acted on inside `read`:
+    /// the buffer is an `inout` borrow of a stored property, and touching that
+    /// same property (a buffer-empty check, a completion check) while the borrow
+    /// is live trips Swift's exclusivity enforcement — a hard crash in the
+    /// relay queue.
+    private enum ReadOutcome {
+        case idle
+        case eof
+        /// Client side only: the framed request is fully forwarded.
+        case requestComplete
+        case failed(Error)
+    }
+
     private func readFromClient() {
-        read(from: clientFD, into: &clientToOutbound, toFD: outboundFD, clientSide: true)
+        let outcome = read(from: clientFD, into: &clientToOutbound, toFD: outboundFD, clientSide: true)
+        handle(outcome, clientSide: true)
     }
 
     private func readFromOutbound() {
         Self.traceIO("first-outbound-read client=\(clientFD) outbound=\(outboundFD.map(String.init) ?? "nil")")
-        read(from: outboundFD ?? -1, into: &outboundToClient, toFD: clientFD, clientSide: false)
+        let outcome = read(from: outboundFD ?? -1, into: &outboundToClient, toFD: clientFD, clientSide: false)
+        handle(outcome, clientSide: false)
     }
 
-    private func read(from fd: Int32, into buffer: inout [UInt8], toFD: Int32?, clientSide: Bool) {
-        guard lifecycle == .running else { return }
+    /// Acts on a read's outcome — only here, after `read`'s `inout` borrow of the
+    /// buffer has ended.
+    private func handle(_ outcome: ReadOutcome, clientSide: Bool) {
+        switch outcome {
+        case .idle:
+            completeIfDone()
+        case .eof:
+            sawEOF(clientSide: clientSide)
+            completeIfDone()
+        case .requestComplete:
+            finishClientRequestDirection()
+        case .failed(let error):
+            finish(with: error)
+        }
+    }
+
+    private func read(from fd: Int32, into buffer: inout [UInt8], toFD: Int32?, clientSide: Bool) -> ReadOutcome {
+        guard lifecycle == .running else { return .idle }
 
         // Flush pending data first so ordering client→outbound is preserved.
         flush(buffer: &buffer, toFD: toFD, clientSide: clientSide)
@@ -525,36 +584,50 @@ public final class RelayConnection: @unchecked Sendable {
         var chunk = [UInt8](repeating: 0, count: Self.bufferSize)
         let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, Self.bufferSize) }
         if n > 0 {
-            // Observe before buffering: forwarding is unconditional either way,
-            // so this cannot reorder or drop a byte.
-            observer?.observe(chunk: Array(chunk[0..<n]), direction: clientSide ? .toDestination : .toClient)
-            buffer.append(contentsOf: chunk[0..<n])
-            lifecycleLock.lock()
-            if clientSide {
-                metrics.bytesToDestination += n
-            } else {
-                metrics.bytesToClient += n
+            // A framed request is bounded: anything past the last body byte
+            // belongs to a second message (or to nobody), and forwarding it
+            // would put unauthenticated bytes on an authenticated connection.
+            var accepted = n
+            var budgetExhausted = false
+            if clientSide, let remaining = clientBudgetRemaining {
+                accepted = Swift.max(0, Swift.min(n, remaining))
+                clientBudgetRemaining = remaining - accepted
+                budgetExhausted = clientBudgetRemaining == 0
             }
-            lifecycleLock.unlock()
-            flush(buffer: &buffer, toFD: toFD, clientSide: clientSide)
-            if buffer.count >= Self.pauseWatermark {
-                pauseRead(clientSide: clientSide)
+            if accepted > 0 {
+                // Observe before buffering: forwarding is unconditional either way,
+                // so this cannot reorder or drop a byte.
+                observer?.observe(chunk: Array(chunk[0..<accepted]), direction: clientSide ? .toDestination : .toClient)
+                buffer.append(contentsOf: chunk[0..<accepted])
+                lifecycleLock.lock()
+                if clientSide {
+                    metrics.bytesToDestination += accepted
+                } else {
+                    metrics.bytesToClient += accepted
+                }
+                lifecycleLock.unlock()
+                flush(buffer: &buffer, toFD: toFD, clientSide: clientSide)
+                if buffer.count >= Self.pauseWatermark {
+                    pauseRead(clientSide: clientSide)
+                }
             }
+            return budgetExhausted ? .requestComplete : .idle
         } else if n == 0 {
-            sawEOF(clientSide: clientSide, otherFD: toFD)
+            return .eof
         } else {
             if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR {
-                return // spurious wakeup; source fires again when readable
+                return .idle // spurious wakeup; source fires again when readable
             }
             let err = errno // snapshot before any other call clobbers it
             Self.traceIO("read-error fd=\(fd):\(Self.localPort(fd))->\(Self.remotePort(fd)) errno=\(err) client=\(clientFD):\(Self.localPort(clientFD)) clientSide=\(clientSide)")
-            finish(with: RelayError.upstreamConnectFailed("read failed: \(String(cString: strerror(err)))"))
+            return .failed(RelayError.upstreamConnectFailed("read failed: \(String(cString: strerror(err)))"))
         }
     }
 
-    /// EOF from one side: half-close the other direction and finish when both
-    /// sides are done.
-    private func sawEOF(clientSide: Bool, otherFD: Int32?) {
+    /// EOF from one side: stop reading it and propagate FIN to the other side
+    /// once that direction's pending bytes are on the wire. Completion itself is
+    /// decided by `completeIfDone()`.
+    private func sawEOF(clientSide: Bool) {
         if TCPClient.fdTraceEnabled {
             let from = clientSide ? "client" : "outbound"
             let to = clientSide ? "outbound" : "client"
@@ -563,13 +636,63 @@ public final class RelayConnection: @unchecked Sendable {
             FileHandle.standardError.write(Data("TD-RELAY [\(Int(Date().timeIntervalSince1970 * 1000))] EOF from=\(from) fd=\(fd) -> shut \(to) fd=\(other) toDest=\(metrics.bytesToDestination) toClient=\(metrics.bytesToClient)\n".utf8))
         }
         stopReading(clientSide: clientSide)
-        // Propagate FIN to the other side (ignore errors on dead sockets).
-        if let otherFD, otherFD >= 0 {
-            shutdown(otherFD, SHUT_WR)
+        // Propagate FIN to the other side (ignore errors on dead sockets) — but
+        // never ahead of bytes already accepted for that side: shutdown(SHUT_WR)
+        // keeps what is already in the socket buffer yet makes every later send
+        // fail, so an early FIN silently truncates a backed-up transfer.
+        if clientSide {
+            halfCloseOutboundWhenDrained()
+        } else {
+            halfCloseClientWhenDrained()
         }
-        if clientEOF && outboundEOF {
-            finish(with: nil)
+    }
+
+    /// The client has sent everything this connection may forward: stop reading
+    /// it (a pipelined second request is discarded, never forwarded) and signal
+    /// EOF on the outbound leg once the accepted bytes are actually on the wire.
+    private func finishClientRequestDirection() {
+        if !clientEOF {
+            stopReading(clientSide: true)
+            halfCloseOutboundWhenDrained()
         }
+        completeIfDone()
+    }
+
+    /// `shutdown(outbound, SHUT_WR)` now, or as soon as the accepted request
+    /// bytes have been written.
+    private func halfCloseOutboundWhenDrained() {
+        guard outboundFD != nil else { return }
+        if clientToOutbound.isEmpty {
+            pendingOutboundHalfClose = false
+            if let outbound = outboundFD { shutdown(outbound, SHUT_WR) }
+        } else {
+            pendingOutboundHalfClose = true
+        }
+    }
+
+    /// `shutdown(client, SHUT_WR)` now, or as soon as the response bytes have
+    /// been written.
+    private func halfCloseClientWhenDrained() {
+        if outboundToClient.isEmpty {
+            pendingClientWriteShutdown = false
+            shutdown(clientFD, SHUT_WR)
+        } else {
+            pendingClientWriteShutdown = true
+        }
+    }
+
+    /// The single place a relay decides it is done: both read directions are
+    /// terminal AND both pending buffers have been handed to the kernel.
+    ///
+    /// Finishing on the EOF pair alone truncates a response that arrived faster
+    /// than the client could read it — the buffer still held the tail when the
+    /// sockets were closed. Error and cancellation paths do not come through
+    /// here; they call `finish` directly and stay immediate.
+    private func completeIfDone() {
+        guard lifecycle == .running else { return }
+        guard clientEOF, outboundEOF else { return }
+        guard clientToOutbound.isEmpty, outboundToClient.isEmpty else { return }
+        finish(with: nil)
     }
 
     /// Stops reading one side at EOF, keeping its fd open.
@@ -716,6 +839,17 @@ public final class RelayConnection: @unchecked Sendable {
         }
         // Fully drained: no write source needed anymore.
         disarmWriteSource(clientSide: clientSide)
+        // A deferred FIN is released only here: every byte accepted for this
+        // direction is on the wire now, so the FIN cannot overtake it.
+        if clientSide {
+            if pendingOutboundHalfClose {
+                pendingOutboundHalfClose = false
+                if let outbound = outboundFD, outbound >= 0 { shutdown(outbound, SHUT_WR) }
+            }
+        } else if pendingClientWriteShutdown {
+            pendingClientWriteShutdown = false
+            shutdown(clientFD, SHUT_WR)
+        }
         resumeRead(clientSide: clientSide)
     }
 
@@ -739,6 +873,9 @@ public final class RelayConnection: @unchecked Sendable {
             } else {
                 self.flush(buffer: &self.outboundToClient, toFD: self.clientFD, clientSide: false)
             }
+            // Both the borrow and any deferred FIN are settled; this is where a
+            // relay that drained its last response bytes completes.
+            self.completeIfDone()
         }
         source.setCancelHandler {}
         source.resume()

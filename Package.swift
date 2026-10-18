@@ -160,6 +160,7 @@ let package = Package(
                 "System/ElevationPolicy.swift",
                 "System/ElevatedTermination.swift",
                 "System/ExistingConnection.swift",
+                "System/LANAddress.swift",
                 "System/LifecycleLog.swift",
                 "System/OpenConnectLaunch.swift",
                 "System/ProcessStartTime.swift",

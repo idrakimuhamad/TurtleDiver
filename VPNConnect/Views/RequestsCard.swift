@@ -268,6 +268,13 @@ private struct WideRequestRow: View {
                     .font(.system(size: 9))
                     .foregroundStyle(entry.error == nil ? Color.secondary : Color.red)
                     .lineLimit(1)
+                if let client = entry.client {
+                    Label(client, systemImage: "iphone")
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundStyle(.teal)
+                        .lineLimit(1)
+                        .help("Request from shared device \(client)")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -341,11 +348,18 @@ private struct StackedRequestRow: View {
                     .font(.system(size: 11, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     Text(RequestFormat.subtitle(entry))
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(entry.error == nil ? Color.secondary : Color.red)
                         .lineLimit(1)
+                    if let client = entry.client {
+                        Label(client, systemImage: "iphone")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.teal)
+                            .lineLimit(1)
+                            .help("Request from shared device \(client)")
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

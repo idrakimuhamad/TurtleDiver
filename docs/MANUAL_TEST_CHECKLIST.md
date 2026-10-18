@@ -379,6 +379,89 @@ Requires the engine ON and Settings → Dashboard → *Record request details* O
       size column) — the tooltip hint sits on the table's toolbar, not over the
       rows it would otherwise swallow the click for.
 
+## 2d. Share with a device
+
+Requires the engine ON, the **VPN connected**, macOS **Local Network** permission
+(asked on first bind), and **Dashboard ▸ Share with a device** ON. The shared
+listener is the HTTP one, on the Mac's LAN address and the port the running HTTP
+listener uses (`6152` by default); SOCKS5 is never shared. Run the device-side
+curls from the phone or another
+machine — the Mac reaching its own LAN address over loopback is exempt.
+
+- [ ] **Off by default and never without the tunnel.** On a fresh install the
+      switch is off and `plutil -p ~/Library/Preferences/
+      com.xvii.kurakura.vpn.plist | grep shareWithDevice` is absent (reads as
+      off). Turn it ON with the tunnel **down** → no LAN listener appears
+      (`lsof -nP -iTCP:6152` shows only `127.0.0.1:6152`); connect the VPN and
+      the second listener appears on the LAN address.
+- [ ] **Auth path (iOS).** On the phone: Wi-Fi ▸ (i) ▸ *Configure Proxy* ▸
+      *Manual*, server the Mac's LAN address (for example `192.168.1.20`), port
+      `6152`, Authentication on, username `turtle` and the current password.
+      Browse to a site → it loads through the engine. Equivalent from another
+      machine: `curl -x http://turtle:<password>@192.168.1.20:6152
+      http://cp.cloudflare.com/generate_204 -i` → `204`. Open that row in the
+      dashboard: the sheet's **General** section shows a **Client** row with the
+      device's address (`192.168.1.50`), and `~/Library/Logs/TurtleDiver/vpn.log`
+      does **not** contain that address (details stay in memory).
+- [ ] **Allow path (Android, no auth fields).** On the phone: Wi-Fi ▸ the network
+      ▸ *Edit* ▸ *Advanced options* ▸ *Proxy* ▸ *Manual*, hostname the Mac's LAN
+      address, port `6152` (there is no username/password field). Open a page →
+      it fails once; the Mac's dashboard lists the refused address with an
+      **Allow** button. Press **Allow** → the page loads on the next try, with no
+      password typed anywhere.
+- [ ] **407 for an unknown device.** From another machine, with neither an
+      allowed address nor credentials: `curl -x http://192.168.1.20:6152
+      http://cp.cloudflare.com/generate_204 -i` → `407 Proxy Authentication
+      Required` and a `Proxy-Authenticate: Basic realm="TurtleDiver"` header.
+      The refused address then shows in the dashboard with **Allow** (at most 20
+      are remembered).
+- [ ] **The credential is not forwarded.** With a plain-HTTP origin you control,
+      send a request through the shared proxy carrying
+      `Proxy-Authorization: Basic …` → the engine answers (the credential admits
+      the device) and the origin's received request has **no**
+      `Proxy-Authorization` header. The same request through the loopback
+      listener (`127.0.0.1:6152`) stays unauthenticated and works with no
+      credentials.
+- [ ] **The device is routed like the Mac, not through a second tunnel.** With
+      split tunneling on (only the sliced targets routed) and the tunnel up,
+      reach a VPN-only host from the phone through the proxy → it answers (that
+      host went over the VPN), while an ordinary site also loads (it left through
+      the Mac's normal connection, exactly as the same site does from the Mac).
+      The proxy does not block the ordinary site, and there is no kill switch.
+- [ ] **An `SRC-IP` rule can block the device.** Add
+      `SRC-IP,192.168.1.30/32,REJECT` above `FINAL` (the phone's address) and
+      reload the profile → requests from that phone are rejected (the row is
+      tinted, the matched-rule column names `SRC-IP`) while the Mac's own
+      requests still succeed. Remove the rule to restore.
+- [ ] **Plain HTTP is one request per connection.** Pipe two requests down one
+      connection to the shared proxy —
+      `printf 'GET http://a.example/ HTTP/1.1\r\nHost: a.example\r\n\r\nGET http://b.example/ HTTP/1.1\r\nHost: b.example\r\n\r\n' | nc 192.168.1.20 6152`
+      → the first is served and the second is **dropped**, so its answer arrives
+      only after the client reconnects. Neither origin saw a
+      `Proxy-Authorization` header.
+- [ ] **A disconnected tunnel stops sharing.** Disconnect the VPN → the LAN
+      listener disappears (`lsof -nP -iTCP:6152` back to loopback only), the
+      dashboard shows sharing stopped, and the phone's proxy stops routing.
+      Reconnect → it comes back. During an openconnect **reconnect** the listener
+      may stay up for a moment rather than dropping the device mid-handshake.
+- [ ] **A Wi-Fi change rebinds.** Join a different Wi-Fi network (a new LAN
+      address) → within a moment the dashboard shows the new address and
+      `lsof -nP -iTCP:6152` shows the listener on it. The phone, still pointed at
+      the *old* address, stops routing until it is repointed.
+- [ ] **Regenerate invalidates the old password.** With a device working on
+      password A, press **Regenerate** in the share section → the phone with
+      password A now gets `407` (and appears as a refused-but-known device),
+      while the same device with password B works. Turning the switch off stops
+      the listener entirely.
+- [ ] **Reset All Settings turns sharing off.** With sharing on, some allowed
+      addresses and a set password, run **Advanced ▸ Reset All Settings** →
+      `shareWithDevice` is off (or absent), `shareAllowedClients` is gone
+      (`plutil -p … | grep -c shareAllowedClients` → `0`), the **Advanced** pane
+      shows the share password as NOT SET, and no LAN listener is bound.
+- [ ] Allowed addresses persist across a relaunch
+      (`plutil -p ~/Library/Preferences/com.xvii.kurakura.vpn.plist | grep -A2
+      shareAllowedClients`).
+
 ## 3. Policies & groups
 
 - [ ] Policies → Add Proxy (socks5 127.0.0.1 with a local fake, or any real
