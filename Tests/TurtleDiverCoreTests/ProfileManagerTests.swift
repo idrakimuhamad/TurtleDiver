@@ -46,6 +46,18 @@ final class ProfileManagerTests: XCTestCase {
         XCTAssertEqual(manager.validationErrors, [])
     }
 
+    func testWipedPreferencesKeepExistingMainProfile() throws {
+        let existing = "[General]\nhttp-listen = 127.0.0.1:7000\n\n[Rule]\nDOMAIN-SUFFIX,example.com,DIRECT\nFINAL,DIRECT\n"
+        let url = profilesDir.appendingPathComponent("Main.conf")
+        try existing.write(to: url, atomically: true, encoding: .utf8)
+
+        let manager = makeManager()
+
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), existing, "must not overwrite the user's profile")
+        XCTAssertEqual(manager.activeProfile.rules.count, 2)
+        XCTAssertEqual(tempDefaults.string(forKey: "activeProfileName"), "Main")
+    }
+
     func testCreateProfileAndActivate() {
         let manager = makeManager()
         manager.createProfile(named: "Work")

@@ -81,14 +81,18 @@ public final class ProfileManager: @unchecked Sendable {
         // immediately after by the saved or newly created profile.
         self.activeProfile = Profile(name: "Main")
 
-        // Load active profile or create default.
+        // Load active profile or create default. A missing saved name (wiped
+        // preferences) still loads an existing Main.conf rather than writing a
+        // blank default over it.
         let savedName = defaults.string(forKey: DefaultsKeys.activeProfileName)
-        let loaded = savedName.flatMap { loadProfile(named: $0) }
-        if let loaded = loaded {
+        let fallbackName = savedName ?? "Main"
+        if let loaded = loadProfile(named: fallbackName) {
             activeProfile = loaded
+            if savedName == nil {
+                defaults.set(loaded.name, forKey: DefaultsKeys.activeProfileName)
+            }
             _ = watchActiveProfileFile()
         } else {
-            let fallbackName = savedName ?? "Main"
             let created = ProfileManager.makeDefaultProfile(name: fallbackName)
             activeProfile = created
             saveProfile(created)

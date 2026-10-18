@@ -41,6 +41,22 @@ private final class RecordingNetworkSetupRunner: NetworkSetupRunning, @unchecked
 @MainActor
 final class EngineTogglePersistenceTests: XCTestCase {
 
+    /// A throwaway preference store per test, so the toggle never writes into
+    /// the app's real preferences. Shared by every controller a test builds, so
+    /// a second controller sees what the first persisted (a relaunch).
+    private var settingsSuite = ""
+    private var settings: SettingsManager!
+
+    override func setUp() async throws {
+        settingsSuite = "turtlediver.engine.toggle.settings.\(UUID().uuidString)"
+        settings = SettingsManager(preferences: .suite(settingsSuite))
+    }
+
+    override func tearDown() async throws {
+        UserDefaults(suiteName: settingsSuite)?.removePersistentDomain(forName: settingsSuite)
+        settings = nil
+    }
+
     /// Builds a controller wired to a throwaway profile directory, a throwaway
     /// `UserDefaults` suite and a recording `networksetup` runner, so the tests
     /// never touch the user's profile, system proxy or real ports.
@@ -67,22 +83,15 @@ final class EngineTogglePersistenceTests: XCTestCase {
         let systemProxy = SystemProxyManager(runner: runner, defaults: defaults, snapshotURL: snapshotURL)
         let controller = EngineController(
             profileManager: manager,
-            settings: .shared,
+            settings: settings,
             systemProxy: systemProxy,
             tunnel: StubTunnelStatus()
         )
         return (controller, manager, runner)
     }
 
-    override nonisolated func tearDown() {
-        // Leave the process-wide singleton in its default state for other tests.
-        MainActor.assumeIsolated { SettingsManager.shared.useProxyEngine = false }
-        super.tearDown()
-    }
-
     func testEnablingPersistsFlagAndStartsEngine() throws {
         let (controller, _, _) = makeController(httpPort: 16152, socksPort: 16153)
-        let settings = SettingsManager.shared
         settings.useProxyEngine = false
         XCTAssertFalse(controller.engineRunning)
 
@@ -91,7 +100,7 @@ final class EngineTogglePersistenceTests: XCTestCase {
         // The regression: the toggle must persist its intent.
         XCTAssertTrue(settings.useProxyEngine, "enabling the engine must persist useProxyEngine")
         XCTAssertTrue(
-            UserDefaults.standard.bool(forKey: "useProxyEngine"),
+            UserDefaults(suiteName: settingsSuite)!.bool(forKey: "useProxyEngine"),
             "the persisted flag must be readable from UserDefaults"
         )
         XCTAssertTrue(controller.engineRunning)
@@ -107,7 +116,6 @@ final class EngineTogglePersistenceTests: XCTestCase {
 
     func testDisablingPersistsFlagWithoutEngineEverRunning() throws {
         let (controller, _, _) = makeController(httpPort: 16162, socksPort: 16163)
-        let settings = SettingsManager.shared
         settings.useProxyEngine = true
 
         controller.setEngineEnabled(false)
@@ -118,7 +126,6 @@ final class EngineTogglePersistenceTests: XCTestCase {
     }
 
     func testEngineResumesOnNextLaunchFromPersistedFlag() throws {
-        let settings = SettingsManager.shared
         settings.useProxyEngine = false
 
         // First launch: the user turns the engine on.
@@ -144,7 +151,7 @@ final class EngineTogglePersistenceTests: XCTestCase {
         // change hook, so a freshly started engine showed "No policies in the
         // active profile" on the dashboard even though routing worked.
         let (controller, _, _) = makeController(httpPort: 16192, socksPort: 16193)
-        SettingsManager.shared.useProxyEngine = false
+        settings.useProxyEngine = false
         XCTAssertTrue(controller.policySummaries.isEmpty)
 
         controller.setEngineEnabled(true)
@@ -159,7 +166,7 @@ final class EngineTogglePersistenceTests: XCTestCase {
 
     func testDisablingNeverTouchesTheSystemProxy() async throws {
         let (controller, _, runner) = makeController(httpPort: 16182, socksPort: 16183)
-        SettingsManager.shared.useProxyEngine = false
+        settings.useProxyEngine = false
         // Constructing the controller runs the one-shot legacy PAC retirement;
         // wait for it, then assert the *engine* never touches the system proxy.
         await controller.awaitLegacyPACCleanup()
