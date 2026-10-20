@@ -15,6 +15,13 @@ struct ProfilesView: View {
     @State private var duplicateName = ""
     @State private var deletingProfile: String?
     @State private var showDeleteAlert = false
+    @State private var backupProfile: String?
+    @State private var backups: [ProfileBackup] = []
+    @State private var selectedBackup: ProfileBackup?
+    @State private var showBackupSheet = false
+    @State private var showRestoreConfirmation = false
+    @State private var restoreMessage: String?
+    @State private var restoreSucceeded = false
 
     var body: some View {
         Form {
@@ -85,8 +92,74 @@ struct ProfilesView: View {
             }
             Button("Cancel", role: .cancel) { deletingProfile = nil }
         } message: {
-            Text("Delete \"\(deletingProfile ?? "")\"? This cannot be undone.")
+            Text("Delete \"\(deletingProfile ?? "")\"? A backup is kept, so you can restore it by creating a profile with the same name.")
         }
+        .sheet(isPresented: $showBackupSheet) { backupSheet }
+        .alert("Restore backup?", isPresented: $showRestoreConfirmation) {
+            Button("Restore", role: .destructive) { restoreSelectedBackup() }
+            Button("Cancel", role: .cancel) { selectedBackup = nil }
+        } message: {
+            Text("The current version of \(selectedBackup?.profileName ?? "this profile") will be saved as a backup first.")
+        }
+    }
+
+    private var backupSheet: some View {
+        NavigationStack {
+            Group {
+                if backups.isEmpty {
+                    ContentUnavailableView("No backups", systemImage: "clock.arrow.circlepath",
+                                           description: Text("Backups are created automatically before profile changes."))
+                } else {
+                    List(backups) { backup in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack {
+                                Text(backup.date, style: .relative).font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                Text(backup.date.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                            HStack(spacing: 12) {
+                                Label("^[\(backup.ruleCount) rule](inflect: true)", systemImage: "line.3.horizontal")
+                                Label("^[\(backup.proxyCount) proxy](inflect: true)", systemImage: "point.3.connected.trianglepath.dotted")
+                                Text(ByteCountFormatter.string(fromByteCount: Int64(backup.byteCount), countStyle: .file))
+                            }.font(.system(size: 11)).foregroundStyle(.secondary)
+                            HStack {
+                                Spacer()
+                                Button("Restore…") {
+                                    selectedBackup = backup
+                                    showRestoreConfirmation = true
+                                }
+                                .buttonStyle(.bordered).controlSize(.small)
+                            }
+                        }.padding(.vertical, 4)
+                    }.listStyle(.inset)
+                }
+            }
+            .navigationTitle("Backups — \(backupProfile ?? "Profile")")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { showBackupSheet = false } }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if let restoreMessage {
+                    Label(restoreMessage, systemImage: restoreSucceeded ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(restoreSucceeded ? Color.green : Color.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12).background(.bar)
+                }
+            }
+        }
+        .frame(minWidth: 520, minHeight: 390)
+    }
+
+    private func restoreSelectedBackup() {
+        guard let backup = selectedBackup else { return }
+        let succeeded = manager.restoreBackup(backup)
+        backups = manager.listBackups(forProfile: backup.profileName)
+        restoreSucceeded = succeeded
+        restoreMessage = succeeded ? "Backup restored." : "Could not restore this backup."
+        selectedBackup = nil
+        refresh()
     }
 
     @ViewBuilder
@@ -127,6 +200,13 @@ struct ProfilesView: View {
             }
 
             Menu {
+                Button("Restore from Backup…") {
+                    backupProfile = name
+                    backups = manager.listBackups(forProfile: name)
+                    restoreMessage = nil
+                    showBackupSheet = true
+                }
+                Divider()
                 Button("Duplicate…") {
                     duplicateSource = name
                     duplicateName = ""

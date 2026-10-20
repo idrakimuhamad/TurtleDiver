@@ -306,7 +306,21 @@ release than the installed build, which means a scratch build or a bumped
 - [ ] Settings → Profiles: create, duplicate, activate, delete (active profile
       refuses to delete), Open in External Editor opens the `.conf`.
 - [ ] Hand-edit the active `.conf` in an editor → file watcher reloads it
-      within ~0.5 s; Rules view reflects the change.
+      within ~0.5 s; Rules view reflects the change. Do it **twice**: the second
+      atomic editor save must reload too (the watcher re-arms after the replace).
+- [ ] Change a profile and save in the app → the previous version appears under
+      `~/Library/Application Support/TurtleDiver/ProfileBackups/<name>/` with a
+      UTC `YYYYMMDD-HHMMSS-mmm.conf` name. Saving without changes adds nothing.
+- [ ] Externally edit the active profile → the pre-edit content is backed up.
+      Delete a profile → its last content is retained in its backup folder;
+      backups never appear in the Profiles list.
+- [ ] Make 25 changes to one profile → at most 20 backups remain (oldest pruned).
+- [ ] Restore an older backup of the active profile → the file bytes are the
+      backup's, the in-memory Rules view refreshes, and the engine picks it up
+      on the next connection (as with any save). Restore again → the replaced
+      version is itself in the backup list, so the restore can be undone.
+- [ ] Restore a backup of an inactive profile → its file is rewritten, the
+      active profile stays active.
 
 ## 2. Engine + rules
 

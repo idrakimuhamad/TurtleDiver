@@ -5,11 +5,13 @@ profile syntax for the sections TurtleDiver supports. Profiles live in:
 
 ```
 ~/Library/Application Support/TurtleDiver/Profiles/<name>.conf
+~/Library/Application Support/TurtleDiver/ProfileBackups/<name>/<timestamp>.conf
 ```
 
 The active profile is chosen in the app and remembered across launches. The
 file is watched: edits made in an external editor are reloaded automatically
-(~0.3s debounce).
+(~0.3s debounce). The watcher re-opens the path when an editor saves by atomic
+replace (a new inode), so a second edit is picked up as reliably as the first.
 
 Comments start with `#` or `;`. Inline comments are allowed except inside
 double-quoted values. Values containing commas, quotes, `#`, `;`, or leading/
@@ -17,6 +19,54 @@ trailing spaces should be wrapped in double quotes (`""` escapes a quote).
 
 A profile has four sections. Order within a section does not matter, except
 rules: **the first matching rule wins, and `FINAL` must be the last rule.**
+
+## Backups and restore
+
+Every profile keeps rolling backups under
+`~/Library/Application Support/TurtleDiver/ProfileBackups/<name>/`, outside the
+`Profiles/` directory (so backups are never themselves listed as profiles).
+Each backup is a byte-exact copy of the previous on-disk file, named with a
+sortable UTC timestamp with milliseconds, e.g. `20261019-031522-123.conf`.
+
+A backup is taken when:
+
+- a save changes the file (`saveProfile`/`saveAndActivate`): the current
+  content is copied before the new content is written;
+- the active profile is reloaded after an external edit, and the on-disk bytes
+  differ from the last content the app saw;
+- an engine-driven save (`recordBackup: false`) lands while such an external
+  edit is still waiting for the watcher's debounce — the unseen edit is kept;
+- a profile is deleted (the last content is kept);
+- `createProfile`/`duplicateProfile` overwrite an existing file (they save).
+
+Saves and restores that would reproduce the newest existing backup are skipped.
+A backup failure never blocks the write it precedes; it is reported as a
+profile diagnostic (or logged for delete/restore) and the save still happens.
+
+Retention keeps the newest **20** backups per profile and prunes older ones.
+
+Restoring a backup writes its bytes exactly (atomic write) and, when it is the
+active profile, reloads it in memory and re-arms the file watcher — the engine
+hot-swaps through the normal active-profile publisher. The version being
+replaced is backed up first, so a restore is itself undoable. Restoring an
+inactive profile only rewrites its file and leaves the active profile alone.
+
+### VPN split-tunnel rules are not saved
+
+While the tunnel is connected, the app adds `DIRECT` rules for the configured
+vpn-slice targets to the profile the engine runs. They are merged **in memory
+only** and take precedence over any identical rule further down: `<name>.conf`,
+its backups and the Rules editor always show exactly what was saved, and
+disconnecting runs the plain profile again. Builds before this change persisted
+the overlay; a leftover copy at the top of the active profile is stripped
+whenever the profile is loaded or changes (launch, profile switch, backup
+restore, external edit), with a backup taken first.
+
+The strip compares against the overlay generated from the targets configured
+**now**. Two consequences are deliberate: rules for targets you have since
+removed from the list are not detected and stay as ordinary rules, and an exact
+prefix you wrote yourself is also removed — harmless, because the engine adds
+that overlay back while connected.
 
 ## Full example
 
