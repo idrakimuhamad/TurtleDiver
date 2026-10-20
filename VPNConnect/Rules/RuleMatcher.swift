@@ -248,6 +248,23 @@ public final class RuleMatcher: @unchecked Sendable {
         return rules.count
     }
 
+    /// Snapshot of the expanded rule list, in first-match order. Used by the
+    /// shared listener's PAC generator, which needs the same rules the matcher
+    /// scans but cannot call the (DNS-capable) matcher per rule.
+    public var expandedRules: [ProfileRule] {
+        lock.lock()
+        defer { lock.unlock() }
+        return rules
+    }
+
+    /// Policy name that applies when no rule matches (the FINAL rule's policy,
+    /// or DIRECT when the profile has no FINAL).
+    public var defaultPolicyName: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return defaultPolicy
+    }
+
     // MARK: Matching
 
     /// Matches `context` against the ordered rule list.

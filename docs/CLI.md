@@ -500,3 +500,9 @@ read -rs pw; printf '%s\n' "$pw" | turtlediver connect --sudo-password stdin
 is reported as unresolved rather than silently matching nothing. Downloading
 rule sets is the app's job, and a CLI that reaches the network to answer a
 question is a surprise.
+
+It also answers from the **saved** profile. While the VPN tunnel is connected
+the app overlays `DIRECT` rules for the vpn-slice targets in memory only (see
+docs/PROFILES.md), and the CLI does not see that runtime overlay: a host the
+app would route DIRECT through the split tunnel can be explained as going to a
+proxy while the tunnel is up.

@@ -115,6 +115,12 @@ public enum VPNRuleGenerator {
     /// the rule list: corporate traffic must bypass proxy upstreams even if a
     /// user rule would otherwise match, because proxy egress cannot reach the
     /// tunneled subnets.
+    ///
+    /// This is the *effective* profile (the saved file is never merged). A
+    /// generated rule therefore wins over an identical copy further down —
+    /// including one of a different policy — and the shadowed duplicate is
+    /// dropped. Without that, an earlier `REJECT`/proxy rule with the same
+    /// match would keep winning over the DIRECT overlay.
     public static func merge(
         generated: [ProfileRule],
         replacing previous: [ProfileRule],
@@ -138,12 +144,12 @@ public enum VPNRuleGenerator {
         let previousSignatures = Set(previous.map(signature))
         rules.removeAll { previousSignatures.contains(signature($0)) }
 
-        // Skip any generated rule that a surviving user rule already covers
-        // identically (keeps repeated merges idempotent).
-        let existingSignatures = Set(rules.map(signature))
-        let toInsert = generated.filter { !existingSignatures.contains(signature($0)) }
+        // Generated rules take precedence: any identical rule left further down
+        // would be shadowed by the copy inserted at the top, so drop it.
+        let generatedSignatures = Set(generated.map(signature))
+        rules.removeAll { generatedSignatures.contains(signature($0)) }
 
-        rules.insert(contentsOf: toInsert.map(stabilized), at: 0)
+        rules.insert(contentsOf: generated.map(stabilized), at: 0)
         var updated = profile
         updated.rules = rules
         return updated

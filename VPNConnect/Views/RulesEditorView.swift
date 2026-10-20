@@ -46,7 +46,7 @@ struct RulesEditorView: View {
                         }
                     }
                 } footer: {
-                    Text("First match wins. RULE-SET rules are managed in Rule Sets.")
+                    Text("First match wins. RULE-SET rules are managed in Rule Sets. While the VPN is connected, DIRECT rules for your split-tunnel hosts are added ahead of these and aren't shown here.")
                         .font(.system(size: 10))
                 }
             }

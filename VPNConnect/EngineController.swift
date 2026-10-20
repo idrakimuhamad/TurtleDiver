@@ -21,11 +21,18 @@ import TurtleDiverSystem
 
 // MARK: - Profile Model Bridge
 
-/// Bridges `ProfileManager`'s single change-hook slot into Combine so several
+/// Bridges `ProfileManager`'s change observers into Combine so several
 /// consumers (EngineController + SwiftUI views) can observe profile changes.
-/// The bridge installs itself as the hook on first access.
+///
+/// Each bridge is scoped to the manager it was created for. Views use
+/// ``shared`` (the app's `ProfileManager.shared`); the engine creates one for
+/// its *injected* manager, so building engine glue in a test never reaches the
+/// real profile directory.
 final class ProfileModelBridge: ObservableObject {
-    static let shared = ProfileModelBridge()
+    static let shared = ProfileModelBridge(manager: .shared)
+
+    private let manager: ProfileManager
+    private var observerID: UUID?
 
     /// Coalesces bursts of hook firings into one `objectWillChange` per
     /// main-queue tick. `saveAndActivate` mutates several published fields in
@@ -34,23 +41,31 @@ final class ProfileModelBridge: ObservableObject {
     private var notificationScheduled = false
     private let lock = NSLock()
 
-    private init() {
-        ProfileManager.shared.objectWillChangePublisher = { [weak self] in
+    init(manager: ProfileManager) {
+        self.manager = manager
+        self.observerID = manager.addChangeObserver { [weak self] in
+            self?.scheduleNotification()
+        }
+    }
+
+    deinit {
+        if let observerID { manager.removeChangeObserver(observerID) }
+    }
+
+    private func scheduleNotification() {
+        lock.lock()
+        if notificationScheduled {
+            lock.unlock()
+            return
+        }
+        notificationScheduled = true
+        lock.unlock()
+        DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.lock.lock()
-            if self.notificationScheduled {
-                self.lock.unlock()
-                return
-            }
-            self.notificationScheduled = true
+            self.notificationScheduled = false
             self.lock.unlock()
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                self.notificationScheduled = false
-                self.lock.unlock()
-                self.objectWillChange.send()
-            }
+            self.objectWillChange.send()
         }
     }
 }
@@ -166,6 +181,10 @@ final class EngineController: ObservableObject {
     /// The tunnel's state, injected so tests never create `VPNManager.shared`
     /// (which adopts the machine's own tunnel — see `TunnelStatusSource`).
     private let tunnel: TunnelStatusSource
+    /// Scoped to `profileManager`; deliberately not `ProfileModelBridge.shared`,
+    /// which installs itself on `ProfileManager.shared` and would make every
+    /// engine test touch the real profiles directory.
+    private let profileBridge: ProfileModelBridge
     private var cancellables = Set<AnyCancellable>()
 
     /// Reads the machine's primary LAN IPv4 for the interface names the system
@@ -187,10 +206,20 @@ final class EngineController: ObservableObject {
     /// unrelated profile edit does not re-read the cache from disk.
     private var appliedRuleSetSignature = ""
     private var ruleSetTask: Task<Void, Never>?
-
-    /// The DIRECT rules the VPN tie-in currently has overlaid onto the
-    /// active profile (needed to remove exactly them later).
-    private var appliedVPNRules: [ProfileRule] = []
+    /// Cache-load generation and identity tracking.
+    /// Monotonic token for `reloadRuleSets`: a load that finishes after a newer
+    /// one started must not apply its rules or record its signature.
+    private var ruleSetLoadGeneration = 0
+    /// Expansions currently held by the matcher, and the URL each came from.
+    /// The immediate install below may only reuse an expansion when the new
+    /// profile declares the same set *identity* (lowercased name + URL): a
+    /// same-named set pointing at a different URL has different contents, and
+    /// reusing A's rules under B would route traffic with the wrong list.
+    private var installedRuleSets: [String: [ProfileRule]] = [:]
+    private var installedRuleSetURLs: [String: String] = [:]
+    /// Test seam for the cached-rule load in `reloadRuleSets`; production
+    /// leaves it `nil`. Runs off the main actor.
+    var ruleSetLoaderOverride: (@Sendable (Profile) -> [String: [ProfileRule]])?
 
     /// Launch-time, one-shot retirement of the legacy PAC path. Held so tests
     /// can await it; production never blocks on it.
@@ -226,7 +255,13 @@ final class EngineController: ObservableObject {
 
         let store = PolicyStore(profile: profileManager.activeProfile, autoStartTesting: true)
         self.engine = ProxyEngine(profile: profileManager.activeProfile, policyStore: store)
+        self.profileBridge = ProfileModelBridge(manager: profileManager)
         refreshRequestDetailSettings()
+
+        // Older builds wrote the vpn-slice DIRECT overlay into the profile
+        // file. It is runtime-only now; strip a leftover prefix, keeping a
+        // backup (see `stripPersistedVPNOverlay()`).
+        stripPersistedVPNOverlay()
 
         // Retire the legacy PAC path (its local server is gone): an armed PAC
         // pointing at 127.0.0.1:8765 would black-hole everything it proxied.
@@ -295,18 +330,45 @@ final class EngineController: ObservableObject {
         let profile = profileManager.activeProfile
         let signature = Self.ruleSetSignature(of: profile.ruleSets)
         let store = ruleSets
+        ruleSetLoadGeneration &+= 1
+        let generation = ruleSetLoadGeneration
 
+        // The profile itself is cheap: install it now, reusing only cached
+        // expansions whose set identity (name + URL) is unchanged. A set that
+        // now points somewhere else must match nothing until its load lands —
+        // otherwise A's contents would be expanded under B's policy.
+        let cached = reusableRuleSets(for: profile)
+        engine.reload(profile: engineProfile(profile), ruleSets: cached)
+        installedRuleSets = cached
+        installedRuleSetURLs = Self.ruleSetURLs(of: profile, limitedTo: cached)
+        appliedRuleSetSignature = signature
+
+        let loader = ruleSetLoaderOverride
         Task { [weak self] in
-            let rules = await Task.detached(priority: .utility) { store.rulesBySet(for: profile) }.value
-            guard let self else { return }
-            self.engine.reload(profile: self.profileManager.activeProfile, ruleSets: rules)
+            let rules: [String: [ProfileRule]]
+            if let loader {
+                rules = await Task.detached(priority: .utility) { loader(profile) }.value
+            } else {
+                rules = await Task.detached(priority: .utility) { store.rulesBySet(for: profile) }.value
+            }
+            guard let self, generation == self.ruleSetLoadGeneration else { return }
+
+            // The active profile can have changed while the cache was read. A
+            // newer change owns its own load; this one must not apply A's sets
+            // to B's profile (and must not record A's signature).
+            let current = self.profileManager.activeProfile
+            guard Self.ruleSetSignature(of: current.ruleSets) == signature else { return }
+
+            self.engine.reload(profile: self.engineProfile(current), ruleSets: rules)
+            self.installedRuleSets = rules
+            self.installedRuleSetURLs = Self.ruleSetURLs(of: current, limitedTo: rules)
             self.appliedRuleSetSignature = signature
             self.refreshRuleSetSummaries()
 
             // Opt-in: only sets that declare an interval are worth refreshing
             // on their own, and never while another refresh is running.
             if refreshStale, self.settings.ruleSetAutoRefresh, self.ruleSetsRefreshing.isEmpty {
-                self.refreshRuleSets(self.ruleSets.staleSets(in: self.profileManager.activeProfile))
+                self.refreshRuleSets(self.ruleSets.staleSets(in: current))
             }
         }
     }
@@ -369,6 +431,30 @@ final class EngineController: ObservableObject {
         )
     }
 
+    /// Cached expansions still valid for `profile`: same lowercased set name
+    /// and identical URL (the identity `RuleSetStore` keys its cache by).
+    private func reusableRuleSets(for profile: Profile) -> [String: [ProfileRule]] {
+        var out: [String: [ProfileRule]] = [:]
+        for set in profile.ruleSets {
+            let key = set.name.lowercased()
+            guard installedRuleSetURLs[key] == set.url,
+                  let rules = installedRuleSets[key] else { continue }
+            out[key] = rules
+        }
+        return out
+    }
+
+    private static func ruleSetURLs(
+        of profile: Profile,
+        limitedTo rules: [String: [ProfileRule]]
+    ) -> [String: String] {
+        var out: [String: String] = [:]
+        for set in profile.ruleSets where rules[set.name.lowercased()] != nil {
+            out[set.name.lowercased()] = set.url
+        }
+        return out
+    }
+
     /// Identity of the declared sets; a change means the matcher must be given
     /// a fresh expansion.
     nonisolated static func ruleSetSignature(of sets: [RemoteRuleSet]) -> String {
@@ -382,7 +468,9 @@ final class EngineController: ObservableObject {
     /// proxy when the profile asks for it.
     func startEngine() {
         do {
-            try engine.start(profile: profileManager.activeProfile)
+            // The overlay is applied to the profile the engine runs, never to
+            // the profile file (see `engineProfile(_:)`).
+            try engine.start(profile: engineProfile(profileManager.activeProfile))
             engineRunning = true
             lastError = nil
         } catch {
@@ -670,22 +758,22 @@ final class EngineController: ObservableObject {
 
     /// The active profile is the source of truth for the system-proxy intent:
     /// `handleProfileChange()` re-applies `profile.general.systemProxy` on every
-    /// profile change — including the VPN-overlay rewrite that happens on
-    /// connect. Without writing the toggle back into the profile, the next
-    /// profile change silently reverted it (the proxy flipped off the moment
-    /// the VPN came up).
+    /// profile change. Without writing the toggle back into the profile, the
+    /// next profile change silently reverted it.
     private func persistSystemProxyIntent(_ enabled: Bool) {
         var profile = profileManager.activeProfile
         guard profile.general.systemProxy != enabled else { return }
         profile.general.systemProxy = enabled
-        _ = profileManager.saveAndActivate(profile)
+        _ = profileManager.saveAndActivate(profile, recordBackup: false)
     }
 
     // MARK: Profile observation
 
     private func observeProfileChanges() {
-        // ProfileManager changes arrive via the shared Combine bridge.
-        ProfileModelBridge.shared.objectWillChange
+        // Instance-scoped: this bridge is bound to the injected manager, so an
+        // `EngineController` built in a test never creates
+        // `ProfileManager.shared` or touches the real profiles directory.
+        profileBridge.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.handleProfileChange()
@@ -694,30 +782,20 @@ final class EngineController: ObservableObject {
     }
 
     private func handleProfileChange() {
+        // A profile restored from a backup, edited externally, or switched to
+        // can still carry an overlay persisted by an older build. Checking on
+        // every change (not behind a one-shot flag) covers all of those.
+        stripPersistedVPNOverlay()
         guard engineRunning else { return }
-        var profile = profileManager.activeProfile
+        let profile = profileManager.activeProfile
 
-        // Keep the VPN overlay consistent across external profile edits while
-        // the tunnel is up. Comparisons must ignore rule identity UUIDs —
-        // `VPNRuleGenerator.rules()` mints fresh UUIDs per call, so `==` on the
-        // rule arrays is never equal across generations and would loop:
-        // change → save → change-notification → save → … (main-thread hang).
-        if vpnConnected {
-            let (generated, _) = VPNRuleGenerator.rules(forTargets: settings.vpnSliceURLs)
-            if !generated.isEmpty {
-                let merged = VPNRuleGenerator.merge(generated: generated, replacing: appliedVPNRules, into: profile)
-                if !VPNRuleGenerator.sameRules(merged.rules, profile.rules) {
-                    profile = merged
-                    appliedVPNRules = generated
-                    profileManager.saveAndActivate(profile)
-                }
-            }
-        }
-
+        // The VPN DIRECT overlay is applied in memory only (see
+        // `engineProfile(_:)`). This handler never saves, so a profile change
+        // cannot cause the old save → notification → save loop.
         if Self.ruleSetSignature(of: profile.ruleSets) != appliedRuleSetSignature {
             reloadRuleSets(refreshStale: false)
         } else {
-            engine.reload(profile: profileManager.activeProfile)
+            engine.reload(profile: engineProfile(profile))
         }
 
         // A profile switch can toggle the system-proxy flag.
@@ -762,35 +840,53 @@ final class EngineController: ObservableObject {
         reconcileSharing()
     }
 
-    /// Adds DIRECT rules for vpn-slice targets on top of the user's rules so
-    /// corporate traffic always bypasses proxy upstreams.
-    private func applyVPNRules() {
+    /// The profile the engine should run: the user's saved profile, with the
+    /// vpn-slice DIRECT rules merged on top while the tunnel is connected.
+    ///
+    /// The overlay is **never** written back: `ProfileManager.activeProfile`
+    /// (and therefore the rules editor) always shows what the user saved.
+    private func engineProfile(_ base: Profile) -> Profile {
+        guard settings.useTunneling, vpnConnected else { return base }
+        let (generated, _) = VPNRuleGenerator.rules(forTargets: settings.vpnSliceURLs)
+        guard !generated.isEmpty else { return base }
+        return VPNRuleGenerator.merge(generated: generated, replacing: [], into: base)
+    }
+
+    /// Older builds saved the vpn-slice DIRECT overlay at the top of the active
+    /// profile. The overlay is runtime-only now: strip a leftover prefix.
+    ///
+    /// Runs on every profile load/change rather than once, because a backup
+    /// restore or an external edit can bring the prefix back. One save is the
+    /// whole fix: after it the prefix no longer matches, so the notification it
+    /// causes converges instead of looping.
+    private func stripPersistedVPNOverlay() {
         guard settings.useTunneling else { return }
-        let (generated, invalid) = VPNRuleGenerator.rules(forTargets: settings.vpnSliceURLs)
-        if !invalid.isEmpty {
-            tunnel.log("[Engine] Skipped unrecognizable vpn-slice targets: \(invalid.joined(separator: ", "))\n")
-        }
+        let (generated, _) = VPNRuleGenerator.rules(forTargets: settings.vpnSliceURLs)
         guard !generated.isEmpty else { return }
 
         var profile = profileManager.activeProfile
-        let merged = VPNRuleGenerator.merge(generated: generated, replacing: appliedVPNRules, into: profile)
-        guard !VPNRuleGenerator.sameRules(merged.rules, profile.rules) else { return } // already applied
-        profile = merged
-        appliedVPNRules = generated
-        profileManager.saveAndActivate(profile)
-        engine.reload(profile: profile)
+        let leading = Array(profile.rules.prefix(generated.count))
+        guard leading.count == generated.count,
+              VPNRuleGenerator.sameRules(leading, generated) else { return }
+
+        profile.rules.removeFirst(generated.count)
+        _ = profileManager.saveAndActivate(profile, recordBackup: true)
     }
 
-    /// Removes the overlay when the tunnel goes down.
+    /// Apply the DIRECT overlay for vpn-slice targets to the profile the engine
+    /// runs, so corporate traffic bypasses proxy upstreams. Nothing is saved.
+    private func applyVPNRules() {
+        guard settings.useTunneling else { return }
+        let (_, invalid) = VPNRuleGenerator.rules(forTargets: settings.vpnSliceURLs)
+        if !invalid.isEmpty {
+            tunnel.log("[Engine] Skipped unrecognizable vpn-slice targets: \(invalid.joined(separator: ", "))\n")
+        }
+        engine.reload(profile: engineProfile(profileManager.activeProfile))
+    }
+
+    /// Drops the in-memory overlay when the tunnel goes down.
     private func clearVPNRules() {
-        guard !appliedVPNRules.isEmpty else { return }
-        var profile = profileManager.activeProfile
-        let merged = VPNRuleGenerator.merge(generated: [], replacing: appliedVPNRules, into: profile)
-        guard !VPNRuleGenerator.sameRules(merged.rules, profile.rules) else { return }
-        profile = merged
-        appliedVPNRules = []
-        profileManager.saveAndActivate(profile)
-        engine.reload(profile: profile)
+        engine.reload(profile: profileManager.activeProfile)
     }
 
     // MARK: Share with a device

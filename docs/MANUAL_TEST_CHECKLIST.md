@@ -333,6 +333,10 @@ release than the installed build, which means a scratch build or a bumped
       request log with red policy.
 - [ ] `no-resolve` on an IP-CIDR rule: request to a bare hostname skips the
       rule (visible via the matched-rule column).
+- [ ] Connect the VPN with vpn-slice targets configured → traffic to those
+      subnets is matched by the generated DIRECT rules, but the active profile
+      file and the Rules editor do **not** list them (the overlay is runtime
+      only). Disconnect → the overlay disappears from routing without a save.
 - [ ] Pause freezes the request table; Clear empties it.
 - [ ] CPU: with traffic flowing, `ps -p $(pgrep -x TurtleDiver) -o %cpu=`
       should sit near 0, and `netstat -an -p tcp | grep '\.6152 ' | grep

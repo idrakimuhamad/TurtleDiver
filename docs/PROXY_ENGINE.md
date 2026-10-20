@@ -139,6 +139,22 @@ engine runs group auto-testing only while started (`startAutoTesting` is the
 app's choice; the engine constructs its store with auto-testing off by
 default for tests).
 
+## VPN split-tunnel overlay
+
+While the tunnel is connected and `useTunneling` is on, the app merges
+`VPNRuleGenerator.rules(forTargets: vpnSliceURLs)` — `DIRECT` rules for the
+split-tunnel targets — at the front of the profile it hands the engine, so they
+shadow any identical rule further down. The merge is **in memory only**: the
+profile file, its backups and the Rules editor always show what the user saved,
+and disconnecting reloads the plain profile. Older builds saved those rules
+into the file; a leftover prefix is stripped whenever the active profile is
+loaded or changes (launch, switch, restore, external edit), keeping a backup
+first.
+
+Because the overlay is runtime state, `engine.matcher` and the engine's routing
+include it while connected; `ProfileManager.activeProfile` and the CLI's
+`rules explain` do not.
+
 ## Relay internals
 
 - Two `DispatchSourceRead` sources pump chunks of up to 64 KiB; a single
@@ -304,12 +320,18 @@ than by stream — openconnect writes ordinary progress to stderr, so colouring
 by stream would paint the whole log amber. The colour mapping itself lives in
 the view (`MainView.logTagColor`/`logBodyColor`).
 
-`Tests/TurtleDiverAppTests/EngineTogglePersistenceTests.swift` (5 tests) covers
+`Tests/TurtleDiverAppTests/EngineTogglePersistenceTests.swift` (13 tests) covers
 the app-side glue: it compiles `EngineController`/`SettingsManager`/`VPNManager`
 into a `TurtleDiverAppGlue` target and asserts that the Dashboard/menu engine
 toggle persists `useProxyEngine`, that a fresh controller auto-starts from it,
 and that starting the engine publishes the policy list immediately (the
-Policy Health card used to come up empty until the first reload).
+Policy Health card used to come up empty until the first reload). It also pins
+profile isolation (building a controller never initialises
+`ProfileManager.shared`), that the vpn-slice overlay is handed to the engine
+without touching the file or backups and precedes an earlier matching rule,
+that a persisted overlay is stripped on launch/switch/restore (and left alone
+when it is not an exact prefix or tunneling is off), and that a late rule-set
+load for the previous profile cannot overwrite the new one.
 `Tests/TurtleDiverAppTests/SecretHygieneTests.swift` (10 tests) covers the
 launch-time cleanup of `UserDefaults`: a credential left in the plist by an
 older build is moved into the Keychain *before* its key is dropped, an existing
@@ -317,11 +339,11 @@ Keychain entry always wins over the stale copy, blank values are not stored, no
 credential is ever written back to disk, live keys (`activeProfileName`,
 `appTheme`, `systemProxyEnabled`, `VPNConnectConnectionHistory`, …) are left
 alone, and the pass is idempotent (and self-heals if a dead key reappears).
-`Tests/TurtleDiverAppTests/SystemProxyIntentTests.swift` (10 tests) covers the
+`Tests/TurtleDiverAppTests/SystemProxyIntentTests.swift` (11 tests) covers the
 system-proxy toggle: enabling it writes `system-proxy = true` into the active
-profile, and — the regression it was written for — a later profile rewrite
-(connecting the VPN injects the vpn-slice DIRECT rules and saves) no longer
-turns the system proxy back off. It also pins the behaviour
+profile, and — the regression it was written for — a later profile rewrite (of
+the kind the old VPN overlay used to perform) no longer turns the system proxy
+back off. It also pins the behaviour
 of stopping the app: `stopEngine()` / `shutdown()` still point macOS away from
 the listener they are about to close, but they leave the stored intent alone,
 so the next launch re-arms the proxy from the profile instead of asking the

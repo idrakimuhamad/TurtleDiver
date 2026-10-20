@@ -133,6 +133,33 @@ final class VPNRuleGeneratorTests: XCTestCase {
 
         let merged = VPNRuleGenerator.merge(generated: generated, replacing: [], into: profile)
         XCTAssertEqual(merged.rules.filter { $0.value == "10.0.0.0/8" }.count, 1)
+        XCTAssertTrue(VPNRuleGenerator.sameRule(merged.rules[0], generated[0]))
+        XCTAssertEqual(merged.rules.count, 1, "the shadowed duplicate is dropped, not kept below")
+    }
+
+    /// Runtime precedence: the generated DIRECT rule goes first and shadows an
+    /// earlier identical match (a REJECT would otherwise win), while the
+    /// later identical DIRECT copy is dropped.
+    func testGeneratedRulesWinOverEarlierRulesAndDropLaterDuplicates() {
+        let earlierReject = ProfileRule(
+            type: .domainSuffix, value: "corp.example.com", policy: "REJECT"
+        )
+        let laterDirect = ProfileRule(
+            type: .domainSuffix, value: "corp.example.com", policy: "DIRECT"
+        )
+        let profile = makeProfile(rules: [earlierReject, laterDirect])
+        let generated = VPNRuleGenerator.rules(forTargets: ["*.corp.example.com"]).rules
+
+        let merged = VPNRuleGenerator.merge(generated: generated, replacing: [], into: profile)
+
+        XCTAssertTrue(VPNRuleGenerator.sameRule(merged.rules[0], generated[0]))
+        XCTAssertEqual(merged.rules[0].policy, "DIRECT")
+        XCTAssertEqual(merged.rules[1], earlierReject)
+        XCTAssertEqual(
+            merged.rules.filter { $0.type == .domainSuffix && $0.policy == "DIRECT" }.count,
+            1,
+            "the later identical DIRECT copy is dropped"
+        )
     }
 
     // MARK: Main-thread loop regression (EngineController change-guards)
