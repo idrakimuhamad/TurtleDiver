@@ -321,6 +321,14 @@ release than the installed build, which means a scratch build or a bumped
       version is itself in the backup list, so the restore can be undone.
 - [ ] Restore a backup of an inactive profile → its file is rewritten, the
       active profile stays active.
+- [ ] Delete a profile that has backups → Settings → Profiles shows a
+      **Deleted profiles** section listing it. **Restore** brings back the
+      latest version (or pick an older one from its backup list); the profile
+      reappears in the profile list, is not activated, and its bytes are the
+      backup's. **Delete backups** asks first, then removes the folder; the
+      entry disappears and restoring is no longer possible (irreversible).
+- [ ] A deleted profile with no backups does **not** appear in the Deleted
+      profiles section, and neither does a profile that still exists.
 
 ## 2. Engine + rules
 

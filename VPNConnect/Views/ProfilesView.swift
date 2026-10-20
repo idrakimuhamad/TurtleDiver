@@ -22,6 +22,10 @@ struct ProfilesView: View {
     @State private var showRestoreConfirmation = false
     @State private var restoreMessage: String?
     @State private var restoreSucceeded = false
+    @State private var deletedProfileNames: [String] = []
+    @State private var deletingBackupsFor: String?
+    @State private var backupDeleteCount = 0
+    @State private var showDeleteBackupsConfirmation = false
 
     var body: some View {
         Form {
@@ -47,6 +51,26 @@ struct ProfilesView: View {
                     Text("Profiles (\(profileNames.count))")
                         .font(.system(size: 12, weight: .regular))
                         .textCase(.uppercase)
+                }
+            }
+
+            if !deletedProfileNames.isEmpty {
+                Section {
+                    ForEach(deletedProfileNames, id: \.self) { name in
+                        deletedProfileRow(name)
+                    }
+                } header: {
+                    Text("Deleted profiles")
+                        .font(.system(size: 12, weight: .regular))
+                        .textCase(.uppercase)
+                }
+            }
+
+            if let restoreMessage, !showBackupSheet {
+                Section {
+                    Label(restoreMessage, systemImage: restoreSucceeded ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(restoreSucceeded ? Color.green : Color.red)
                 }
             }
 
@@ -92,7 +116,7 @@ struct ProfilesView: View {
             }
             Button("Cancel", role: .cancel) { deletingProfile = nil }
         } message: {
-            Text("Delete \"\(deletingProfile ?? "")\"? A backup is kept, so you can restore it by creating a profile with the same name.")
+            Text("A backup is kept. You can restore this profile from Deleted profiles below.")
         }
         .sheet(isPresented: $showBackupSheet) { backupSheet }
         .alert("Restore backup?", isPresented: $showRestoreConfirmation) {
@@ -100,6 +124,12 @@ struct ProfilesView: View {
             Button("Cancel", role: .cancel) { selectedBackup = nil }
         } message: {
             Text("The current version of \(selectedBackup?.profileName ?? "this profile") will be saved as a backup first.")
+        }
+        .alert("Delete backups?", isPresented: $showDeleteBackupsConfirmation) {
+            Button("Delete Backups", role: .destructive) { deleteBackups() }
+            Button("Cancel", role: .cancel) { deletingBackupsFor = nil }
+        } message: {
+            Text("This removes \(backupDeleteCount) \(backupDeleteCount == 1 ? "backup" : "backups") of \(deletingBackupsFor.map { "\"\($0)\"" } ?? "this profile") and cannot be undone.")
         }
     }
 
@@ -159,6 +189,61 @@ struct ProfilesView: View {
         restoreSucceeded = succeeded
         restoreMessage = succeeded ? "Backup restored." : "Could not restore this backup."
         selectedBackup = nil
+        refresh()
+    }
+
+    @ViewBuilder
+    private func deletedProfileRow(_ name: String) -> some View {
+        let profileBackups = manager.listBackups(forProfile: name)
+        if let latest = profileBackups.first {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(name).font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Text(latest.date.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Button("Restore") { restoreDeletedProfile(from: latest) }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                    Text("\(profileBackups.count) \(profileBackups.count == 1 ? "backup" : "backups")")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer(minLength: 2)
+                    Menu("More") {
+                        Button("Choose older backup…") {
+                            backupProfile = name
+                            backups = profileBackups
+                            restoreMessage = nil
+                            showBackupSheet = true
+                        }
+                        Button("Delete Backups…", role: .destructive) {
+                            deletingBackupsFor = name
+                            backupDeleteCount = profileBackups.count
+                            showDeleteBackupsConfirmation = true
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func restoreDeletedProfile(from backup: ProfileBackup) {
+        let succeeded = manager.restoreBackup(backup)
+        restoreSucceeded = succeeded
+        restoreMessage = succeeded ? "\(backup.profileName) restored." : "Could not restore \(backup.profileName)."
+        backups = manager.listBackups(forProfile: backup.profileName)
+        refresh()
+    }
+
+    private func deleteBackups() {
+        guard let name = deletingBackupsFor else { return }
+        let succeeded = manager.deleteBackups(forProfile: name)
+        restoreSucceeded = succeeded
+        restoreMessage = succeeded ? "Backups for \(name) deleted." : "Could not delete backups for \(name)."
+        deletingBackupsFor = nil
         refresh()
     }
 
@@ -230,6 +315,7 @@ struct ProfilesView: View {
 
     private func refresh() {
         profileNames = manager.listProfileNames()
+        deletedProfileNames = manager.deletedProfileNamesWithBackups()
     }
 
     private func reloadActive() {

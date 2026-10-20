@@ -459,4 +459,107 @@ final class ProfileManagerTests: XCTestCase {
                           "fixtures must not share one backups directory")
         XCTAssertEqual(first.listProfileNames(), ["Main"], "the backups directory is not a profile")
     }
+
+    // MARK: - Deleted profiles with backups
+
+    func testDeletedProfileWithBackupsIsListed() throws {
+        let manager = makeManager()
+        manager.createProfile(named: "Work")
+        XCTAssertTrue(manager.deleteProfile(named: "Main"))
+
+        XCTAssertEqual(manager.deletedProfileNamesWithBackups(), ["Main"])
+        XCTAssertEqual(manager.listProfileNames(), ["Work"])
+    }
+
+    func testExistingOrNeverBackedUpProfilesAreNotListedAsDeleted() throws {
+        let manager = makeManager()
+        // Main exists and has history: not deleted.
+        var main = try XCTUnwrap(manager.loadProfile(named: "Main"))
+        main.rules = [ProfileRule(type: .domain, value: "example.com", policy: "DIRECT")]
+        _ = manager.saveProfile(main)
+        XCTAssertFalse(manager.listBackups(forProfile: "Main").isEmpty)
+
+        XCTAssertTrue(manager.deletedProfileNamesWithBackups().isEmpty)
+    }
+
+    func testEmptyBackupFolderIsNotListedAsDeleted() throws {
+        let manager = makeManager()
+        let empty = backupsDir.appendingPathComponent("Ghost", isDirectory: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        try "notes".write(
+            to: empty.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8
+        )
+
+        XCTAssertTrue(manager.deletedProfileNamesWithBackups().isEmpty)
+    }
+
+    func testRestoringADeletedProfileBringsItBackWithoutActivatingIt() throws {
+        let manager = makeManager()
+        manager.createProfile(named: "Work")
+        XCTAssertTrue(manager.activateProfile(named: "Main"))
+
+        let lastText = try String(contentsOf: manager.fileURL(for: "Work"), encoding: .utf8)
+        XCTAssertTrue(manager.deleteProfile(named: "Work"))
+        XCTAssertEqual(manager.deletedProfileNamesWithBackups(), ["Work"])
+
+        let backup = try XCTUnwrap(manager.listBackups(forProfile: "Work").first)
+        XCTAssertTrue(manager.restoreBackup(backup))
+
+        XCTAssertEqual(
+            try String(contentsOf: manager.fileURL(for: "Work"), encoding: .utf8),
+            lastText,
+            "restore writes the backup bytes exactly"
+        )
+        XCTAssertEqual(manager.activeProfile.name, "Main", "a restore must not activate the profile")
+        XCTAssertTrue(manager.deletedProfileNamesWithBackups().isEmpty)
+        XCTAssertEqual(manager.listProfileNames(), ["Main", "Work"])
+    }
+
+    func testDeletedProfileNameRoundTripsThroughListAndRestore() throws {
+        let manager = makeManager()
+        manager.createProfile(named: "Sales EU")
+        var edited = manager.activeProfile
+        edited.rules = [
+            ProfileRule(type: .domain, value: "example.com", policy: "DIRECT"),
+            ProfileRule(type: .final, value: "", policy: "DIRECT"),
+        ]
+        _ = manager.saveAndActivate(edited)
+        XCTAssertTrue(manager.activateProfile(named: "Main"))
+        XCTAssertTrue(manager.deleteProfile(named: "Sales EU"))
+
+        let names = manager.deletedProfileNamesWithBackups()
+        XCTAssertEqual(names, ["Sales EU"])
+        let backups = manager.listBackups(forProfile: try XCTUnwrap(names.first))
+        XCTAssertFalse(backups.isEmpty)
+        XCTAssertTrue(manager.restoreBackup(try XCTUnwrap(backups.first)))
+        XCTAssertTrue(manager.listProfileNames().contains("Sales EU"))
+        XCTAssertTrue(manager.deletedProfileNamesWithBackups().isEmpty)
+    }
+
+    func testDeleteBackupsRemovesTheFolderAndTheListing() throws {
+        let manager = makeManager()
+        manager.createProfile(named: "Work")
+        XCTAssertTrue(manager.deleteProfile(named: "Main"))
+        XCTAssertEqual(manager.deletedProfileNamesWithBackups(), ["Main"])
+
+        XCTAssertTrue(manager.deleteBackups(forProfile: "Main"))
+
+        XCTAssertTrue(manager.deletedProfileNamesWithBackups().isEmpty)
+        XCTAssertTrue(manager.listBackups(forProfile: "Main").isEmpty)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: backupsDir.appendingPathComponent("Main").path)
+        )
+    }
+
+    func testDeleteBackupsRefusesForAnExistingProfile() throws {
+        let manager = makeManager()
+        var main = try XCTUnwrap(manager.loadProfile(named: "Main"))
+        main.rules = [ProfileRule(type: .domain, value: "example.com", policy: "DIRECT")]
+        _ = manager.saveProfile(main)
+        let backupsBefore = manager.listBackups(forProfile: "Main")
+        XCTAssertFalse(backupsBefore.isEmpty)
+
+        XCTAssertFalse(manager.deleteBackups(forProfile: "Main"))
+        XCTAssertEqual(manager.listBackups(forProfile: "Main"), backupsBefore)
+    }
 }

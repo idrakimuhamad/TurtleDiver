@@ -446,6 +446,75 @@ public final class ProfileManager: @unchecked Sendable {
         return true
     }
 
+    // MARK: Deleted profiles
+
+    /// Names of profiles that no longer have a `.conf` file but still have
+    /// backups, sorted case-insensitively.
+    ///
+    /// A backup folder is named with the same sanitized component as the
+    /// profile file (`Sales/EU` → `Sales_EU.conf` and `Sales_EU/`), so a name
+    /// returned here round-trips through ``listBackups(forProfile:)`` and
+    /// ``restoreBackup(_:)``. Entries that are not folders, folders without a
+    /// `.conf` backup, the derived `.backups` folder, and profiles whose file
+    /// still exists are all excluded.
+    public func deletedProfileNamesWithBackups() -> [String] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: backupsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ) else { return [] }
+
+        var names: [String] = []
+        for entry in entries {
+            let name = entry.lastPathComponent
+            guard name != Self.derivedBackupsDirectoryName else { continue }
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            guard !fm.fileExists(atPath: fileURL(for: name).path) else { continue }
+            let files = (try? fm.contentsOfDirectory(atPath: entry.path)) ?? []
+            guard files.contains(where: { $0.hasSuffix(".conf") }) else { continue }
+            names.append(name)
+        }
+
+        return names.sorted { lhs, rhs in
+            let ordered = lhs.compare(rhs, options: [.caseInsensitive])
+            if ordered == .orderedSame { return lhs < rhs }
+            return ordered == .orderedAscending
+        }
+    }
+
+    /// Removes a deleted profile's backup folder for good.
+    ///
+    /// Refuses while the profile still exists: this cleans up after a delete, it
+    /// is not a way to drop the history of a live profile.
+    ///
+    /// - Returns: `true` when the folder was removed.
+    @discardableResult
+    public func deleteBackups(forProfile name: String) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: fileURL(for: name).path) else { return false }
+
+        let dir = backupDirectory(for: name)
+        // A profile literally named `.backups` would resolve to the backup root;
+        // never delete every profile's history through that name.
+        guard dir.standardizedFileURL != backupsDirectory.standardizedFileURL else { return false }
+        guard fm.fileExists(atPath: dir.path) else { return false }
+
+        do {
+            try fm.removeItem(at: dir)
+            return true
+        } catch {
+            NSLog(
+                "TurtleDiver: failed to delete backups for profile %@: %@",
+                name, error.localizedDescription
+            )
+            return false
+        }
+    }
+
     /// Copies `data` into the profile's backup directory. Returns an error
     /// description on failure, `nil` on success or when the content is already
     /// identical to the newest backup.

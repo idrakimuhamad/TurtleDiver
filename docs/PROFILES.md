@@ -51,6 +51,21 @@ hot-swaps through the normal active-profile publisher. The version being
 replaced is backed up first, so a restore is itself undoable. Restoring an
 inactive profile only rewrites its file and leaves the active profile alone.
 
+### Deleted profiles
+
+A profile's backup folder survives its `.conf`. Settings › Profiles lists the
+names that have a folder with at least one backup but no `.conf` (sorted
+case-insensitively; a name with no backups, or one whose file still exists, is
+not listed). The folder is named with the same sanitized component as the file,
+so the listed name works with the backup list and with restore.
+
+- **Restore** writes the chosen backup (latest by default) back to
+  `<name>.conf` byte-exactly. It does not activate the profile, and the missing
+  current file is simply not backed up first. Afterwards the name leaves the
+  deleted list and appears in the normal profile list.
+- **Delete backups** removes the folder for good after a confirmation; it cannot
+  be undone and is refused while a profile of that name exists.
+
 ### VPN split-tunnel rules are not saved
 
 While the tunnel is connected, the app adds `DIRECT` rules for the configured
