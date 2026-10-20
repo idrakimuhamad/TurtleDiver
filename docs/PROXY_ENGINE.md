@@ -99,6 +99,71 @@ phone. It binds a second HTTP listener; the loopback listener is unchanged.
   dashboard with an **Allow** button — the fast path for Android, whose manual
   proxy screen has no username or password fields, so the first request is
   refused and then allowed from the Mac.
+- **PAC for devices that follow rules.** The shared listener also serves a
+  generated PAC at `http://<lan-ip>:<port>/<token>/proxy.pac`, where `<token>` is
+  the first 24 hex characters of `SHA256("turtlediver-pac:" + sharePassword)`.
+  `EngineController.sharePACURL` publishes that URL while sharing is active; it
+  rotates when the password is regenerated and disappears when sharing stops or
+  the credentials are reset. The PAC URL (origin-form or absolute-form) is
+  answered before the `407` gate and is never recorded in the request log, so a
+  phone's automatic fetch — and the token in it — leaves no trace in the
+  dashboard. Every other path still requires access, and the loopback listener
+  never serves a PAC.
+- **What the PAC decides.** The document is generated per fetch from the
+  engine's current expanded rules and policy selections, so an edit is live on
+  the device's next fetch. The tunnel mode is explicit: **full tunnel** (Standard
+  VPN, or split tunneling with no usable target) sends every host to the Mac;
+  **split tunnel** checks the `vpnSliceURLs` targets first and always sends them
+  to the Mac (a single-label target such as `intranet` included, and a valid
+  IPv6 target makes IPv6-literal hosts go to the Mac; a malformed
+  IPv6-looking value is ignored rather than splitting the tunnel). Otherwise
+  the profile's `DOMAIN`, `DOMAIN-SUFFIX`, `DOMAIN-KEYWORD` and IPv4 `IP-CIDR`
+  rules are evaluated in order. Rule values are lowercased exactly as
+  `RuleMatcher` lowercases them — root dots are **not** stripped, so
+  `DOMAIN-KEYWORD,corp.,DIRECT` does not match `evilcorpx.example`. VPN target
+  values are lowercased and dot-stripped, which only sends more traffic to the
+  Mac. A `DIRECT` policy becomes `DIRECT`, while `PROXY`/`REJECT` become the
+  Mac's proxy so the Mac applies its own routing or reject. A `FINAL` in the
+  rule list is terminal in the PAC exactly as it is in the matcher.
+- **No DNS is performed by the PAC.** A non-literal host that reaches an
+  address-bearing split target (an IPv4/IPv6 address or CIDR in
+  `vpnSliceURLs`) goes to the Mac, because the phone's resolver may be
+  split-horizon: a name the Mac resolves to `10.42.1.2` over VPN DNS can look
+  like `203.0.113.5` to the phone. Explicit domain/suffix targets are still
+  checked first. In the profile rule list, the first `IP-CIDR`/`IP-CIDR6` rule
+  **without** `no-resolve` terminates a hostname: it goes to the Mac when that
+  rule or any later rule (through `FINAL`) can be non-DIRECT, and is `DIRECT`
+  only when the whole remainder is certainly DIRECT. This mirrors the Mac,
+  where that rule resolves the name and caches it, so a later `no-resolve` rule
+  can still match. A `no-resolve` rule before any resolving rule is literal-only
+  for hostnames. Every IPv6 literal goes to the Mac, including IPv4-mapped
+  `::ffff:` addresses, which would otherwise slip past IPv4 rules. The PAC never
+  calls `dnsResolve` or `isInNet`.
+- **The PAC fails open, never closed.** A rule the PAC cannot evaluate
+  (`DEST-PORT`, `SRC-IP`, `URL-REGEX`, `USER-AGENT`, `PROCESS-NAME`,
+  `IP-CIDR6`, …) whose policy is not certainly DIRECT terminates the scan:
+  every host not matched by an earlier rule goes to the Mac instead of being
+  sent DIRECT past a possible proxy or reject. `GEOIP` never matches, but
+  without `no-resolve` the Mac still resolves DNS for it and caches the result,
+  so it is a resolving point for hostnames exactly like an address rule; an
+  unexpanded `RULE-SET` is dropped because it has no rules. Plain hostnames and
+  `localhost` get no shortcut: they go through the same rule evaluation as any
+  other host. Only rules whose outcome is certainly DIRECT are dropped.
+  Policy classification for this is
+  side-effect-free: generating the PAC does not advance a load-balance counter,
+  consult health, or perturb the engine's own routing. A group is treated as
+  DIRECT only when every member is.
+  The response is `200` with `Content-Type: application/x-ns-proxy-autoconfig`
+  and `Cache-Control: no-store`; `HEAD` returns the same headers without a body,
+  and only `PROXY`/`DIRECT` tokens are emitted — Android understands nothing
+  else.
+  - **Device caveats.** Android has no proxy password field, so a PAC-only
+    device still has to be on the allowed-device list or its traffic is refused
+    when it reaches the proxy. iOS prompts for credentials on the first `407`
+    and is likely to fail closed while the PAC is unreachable, whereas Android
+    falls back to `DIRECT`. The PAC itself is plain HTTP: iOS has deprecated
+    HTTP PAC URLs but still accepts one, and anyone on the LAN who learns the
+    URL can fetch it.
 - **The credential is stripped, not forwarded.** `Proxy-Authorization` is
   removed from a forwarded plain-HTTP request on **both** listeners, so the Basic
   value authenticates the device to this engine and never reaches an origin.

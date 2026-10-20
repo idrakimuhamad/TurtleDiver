@@ -169,6 +169,10 @@ final class EngineController: ObservableObject {
     /// Set when the share password could not be read from or written to the
     /// Keychain. The password and the share state are otherwise left alone.
     @Published private(set) var sharePasswordError: String?
+    /// The PAC URL a shared device can fetch, or `nil` when sharing is off.
+    /// Carries a token derived from the share password, so regenerating the
+    /// password changes it and a reset removes it.
+    @Published private(set) var sharePACURL: String?
 
     // MARK: Collaborators
 
@@ -959,6 +963,7 @@ final class EngineController: ObservableObject {
         cachedSharePassword = generated
         setSharePasswordError(nil)
         pushShareAccess()
+        refreshSharePACURL()
     }
 
     /// Approves `address`, pushes the new allowed list to the engine and tells
@@ -994,7 +999,8 @@ final class EngineController: ObservableObject {
         engine.updateShareAccess(
             username: shareUsername,
             password: password,
-            allowedClients: shareAllowedClientSet
+            allowedClients: shareAllowedClientSet,
+            tunnelMode: shareTunnelMode
         )
     }
 
@@ -1005,6 +1011,18 @@ final class EngineController: ObservableObject {
     }
 
     private var shareAllowedClientSet: Set<String> { Set(settings.shareAllowedClients) }
+
+    /// Full tunnel unless split tunneling is on *and* the list holds at least
+    /// one usable target. A list of junk is still a full tunnel. The running
+    /// VPN is configured from these same settings (`VPNManager` builds the
+    /// `vpn-slice` command line from them), so this is the configuration the
+    /// tunnel actually has.
+    private var shareTunnelMode: SharePACGenerator.TunnelMode {
+        SharePACGenerator.resolvedMode(
+            useTunneling: settings.useTunneling,
+            targets: settings.vpnSliceURLs
+        )
+    }
 
     /// Brings the running share in line with the setting, the engine, the tunnel,
     /// the network and the allowed-client list. Idempotent; every place one of
@@ -1070,8 +1088,10 @@ final class EngineController: ObservableObject {
             engine.updateShareAccess(
                 username: shareUsername,
                 password: password,
-                allowedClients: shareAllowedClientSet
+                allowedClients: shareAllowedClientSet,
+                tunnelMode: shareTunnelMode
             )
+            refreshSharePACURL()
             return
         }
 
@@ -1081,12 +1101,15 @@ final class EngineController: ObservableObject {
                 port: port,
                 username: shareUsername,
                 password: password,
-                allowedClients: shareAllowedClientSet
+                allowedClients: shareAllowedClientSet,
+                tunnelMode: shareTunnelMode
             ))
             setShareState(.active(host: host, port: port))
+            refreshSharePACURL()
             refreshRefusedClients()
         } catch {
             setShareState(.failed(error.localizedDescription))
+            setSharePACURL(nil)
         }
     }
 
@@ -1095,6 +1118,7 @@ final class EngineController: ObservableObject {
     private func stopSharing() {
         if sharingActive { engine.stopSharing() }
         if !shareRefusedClients.isEmpty { shareRefusedClients = [] }
+        setSharePACURL(nil)
     }
 
     /// Torn down before "Reset all settings" deletes the credentials the share
@@ -1114,6 +1138,23 @@ final class EngineController: ObservableObject {
     private var sharingActive: Bool {
         if case .active = shareState { return true }
         return engine.sharingAddress != nil
+    }
+
+    /// Recomputes the PAC URL from the state that is actually serving: the
+    /// active listener's host/port and the password the engine was given. Called
+    /// whenever any of those can move (share start, LAN rebind, password
+    /// regeneration) and from `stopSharing()` with the share off.
+    private func refreshSharePACURL() {
+        guard case .active(let host, let port) = shareState,
+              let password = cachedSharePassword else {
+            setSharePACURL(nil)
+            return
+        }
+        setSharePACURL(SharePACGenerator.pacURL(host: host, port: port, password: password))
+    }
+
+    private func setSharePACURL(_ url: String?) {
+        if sharePACURL != url { sharePACURL = url }
     }
 
     /// Publishes only on a real change: `reconcileSharing()` runs on every

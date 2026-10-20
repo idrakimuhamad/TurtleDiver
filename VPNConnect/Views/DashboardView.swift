@@ -39,6 +39,9 @@ struct DashboardView: View {
                 if case let .active(host, port) = controller.shareState {
                     LabeledContent("Server") { shareCopyValue(host) }
                     LabeledContent("Port") { shareCopyValue(String(port)) }
+                    if let setupURL = controller.sharePACURL {
+                        LabeledContent("Setup URL") { shareCopyValue(setupURL) }
+                    }
                     LabeledContent("Username") {
                         Text(controller.shareUsername).font(.system(size: 11, design: .monospaced))
                     }
@@ -71,8 +74,10 @@ struct DashboardView: View {
 
                     DisclosureGroup("Setup instructions", isExpanded: $showSetupSteps) {
                         VStack(alignment: .leading, spacing: 7) {
-                            Text("iPhone / iPad: Settings › Wi-Fi › ⓘ › Configure Proxy › Manual. Enter the server and port, turn on Authentication, and enter the username and password.")
-                            Text("Android: Settings › Wi-Fi › your network › Edit › Proxy › Manual. Enter the server as the hostname, and the port. Android has no password field, so open any site on the phone, then allow it below.")
+                            Text("Automatic (recommended): On the phone, open Wi-Fi settings for this network, choose Proxy › Automatic / Auto-config, then paste the Setup URL. Only traffic that needs the VPN goes through the Mac; the rest goes direct from the phone.")
+                            Text("Manual: Choose Proxy › Manual and enter the Server and Port above. On iPhone or iPad, turn on Authentication and enter the username and password.")
+                            Text("Android can't save a proxy password: open any site on the phone, then allow it below. On iPhone or iPad, enter the username and password when asked the first time.")
+                            Text("If the Mac sleeps or sharing stops, iPhones may lose connection until it is back; Android goes direct. Regenerating the password changes the Setup URL, so update it on the phone.")
                         }
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
@@ -116,7 +121,7 @@ struct DashboardView: View {
             Button("Cancel", role: .cancel) {}
             Button("Regenerate", role: .destructive) { controller.regenerateSharePassword() }
         } message: {
-            Text("Devices using the current credentials must be updated with the new password.")
+            Text("Update the password and Setup URL on any phones using this share.")
         }
     }
 
@@ -146,6 +151,8 @@ struct DashboardView: View {
     private func shareCopyValue(_ value: String) -> some View {
         HStack(spacing: 5) {
             Text(value).font(.system(size: 11, design: .monospaced))
+                .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
             Button { copyShareValue(value) } label: { Image(systemName: "doc.on.doc") }
                 .buttonStyle(.borderless).help("Copy")
         }

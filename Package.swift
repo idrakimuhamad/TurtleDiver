@@ -149,6 +149,7 @@ let package = Package(
                 "Rules/DNSResolver.swift",
                 "Rules/IPAddress.swift",
                 "Rules/PACRuleConverter.swift",
+                "Rules/SharePACGenerator.swift",
                 "Rules/ProcessPeerResolver.swift",
                 "Rules/RuleSetStore.swift",
                 "Rules/RuleMatcher.swift",

@@ -273,13 +273,24 @@ public struct ShareConfiguration: Equatable, Sendable {
     public var password: String
     /// IPv4 addresses admitted without credentials, e.g. the phone itself.
     public var allowedClients: Set<String>
+    /// Whether the tunnel carries everything or only explicit `vpn-slice`
+    /// targets. Drives the PAC the shared device fetches.
+    public var tunnelMode: SharePACGenerator.TunnelMode
 
-    public init(host: String, port: Int, username: String, password: String, allowedClients: Set<String>) {
+    public init(
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        allowedClients: Set<String>,
+        tunnelMode: SharePACGenerator.TunnelMode = .fullTunnel
+    ) {
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.allowedClients = allowedClients
+        self.tunnelMode = tunnelMode
     }
 }
 
@@ -404,7 +415,11 @@ public final class ProxyEngine: @unchecked Sendable {
                 password: config.password,
                 allowedClients: config.allowedClients
             ),
-            onRefusedClient: { [weak self] address in self?.recordRefusal(address) }
+            onRefusedClient: { [weak self] address in self?.recordRefusal(address) },
+            // Generated per fetch, from the engine's current profile and
+            // policy selections, so a rule edit is live on the device's next
+            // refresh. Weak: the engine owns the server.
+            pacProvider: { [weak self] in self?.sharePACDocument() }
         )
         try server.start(host: config.host, port: config.port)
         lock.lock()
@@ -413,14 +428,21 @@ public final class ProxyEngine: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Hot-swaps the shared listener's credentials and allow-list without
-    /// rebinding; in-flight relays are untouched.
-    public func updateShareAccess(username: String, password: String, allowedClients: Set<String>) {
+    /// Hot-swaps the shared listener's credentials, allow-list and tunnel mode
+    /// without rebinding; in-flight relays are untouched. `tunnelMode` is
+    /// optional so an existing caller can change only the access rules.
+    public func updateShareAccess(
+        username: String,
+        password: String,
+        allowedClients: Set<String>,
+        tunnelMode: SharePACGenerator.TunnelMode? = nil
+    ) {
         lock.lock()
         if var config = shareConfig {
             config.username = username
             config.password = password
             config.allowedClients = allowedClients
+            if let tunnelMode { config.tunnelMode = tunnelMode }
             shareConfig = config
         }
         let server = shareServer
@@ -447,6 +469,31 @@ public final class ProxyEngine: @unchecked Sendable {
     /// The shared listener's bound address, or nil when sharing is off.
     public var sharingAddress: (host: String, port: Int)? {
         lock.withLock { shareConfig.map { ($0.host, $0.port) } }
+    }
+
+    /// Builds the PAC document from the *current* matcher, policy store and
+    /// share configuration. Called by the shared listener on each fetch; a nil
+    /// result means sharing stopped in the meantime.
+    ///
+    /// Policy classification is deliberately side-effect-free: it must not
+    /// advance a load-balance counter or otherwise perturb the engine's own
+    /// routing just because a phone asked for its PAC.
+    private func sharePACDocument() -> String? {
+        let config = lock.withLock { shareConfig }
+        guard let config else { return nil }
+
+        func isDirect(_ policy: String) -> Bool {
+            policyStore.effect(of: policy) == .direct
+        }
+
+        let pacRules = SharePACGenerator.rules(from: matcher.expandedRules, isDirect: isDirect)
+        return SharePACGenerator.pac(SharePACGenerator.Configuration(
+            proxyHost: config.host,
+            proxyPort: config.port,
+            mode: config.tunnelMode,
+            rules: pacRules,
+            finalUsesProxy: !isDirect(matcher.defaultPolicyName)
+        ))
     }
 
     /// Clients the shared listener refused, most recent first.

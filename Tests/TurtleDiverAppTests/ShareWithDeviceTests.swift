@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CryptoKit
 @testable import TurtleDiverAppGlue
 import TurtleDiverCore
 import TurtleDiverSystem
@@ -728,5 +729,58 @@ final class ShareWithDeviceTests: XCTestCase {
         XCTAssertNotNil(after)
         XCTAssertNotEqual(after, before)
         XCTAssertEqual(h.secrets.storedPassword, after)
+    }
+
+    // MARK: PAC URL
+
+    /// Derived here independently of the generator: the URL is part of the
+    /// app/engine contract, not an implementation detail of one helper.
+    private func pacToken(_ password: String) -> String {
+        let digest = SHA256.hash(data: Data("turtlediver-pac:\(password)".utf8))
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(24))
+    }
+
+    func testSharePACURLIsNilWhileSharingIsOff() {
+        let h = makeHarness(lanAddress: { _ in "192.168.1.50" })
+        XCTAssertNotNil(h.controller.ensureSharePassword(), "a password alone does not start a share")
+        XCTAssertNil(h.controller.sharePACURL)
+        XCTAssertEqual(h.controller.shareState, .off)
+    }
+
+    /// Active share → a URL carrying the listener and the password-derived
+    /// token. Regenerating the password rotates it; turning sharing off clears
+    /// it.
+    func testSharePACURLFollowsTheActiveShareAndPassword() async throws {
+        guard let lan = LANAddress.primaryLANIPv4() else {
+            throw XCTSkip("this machine has no LAN IPv4, so a live share cannot bind")
+        }
+
+        let h = makeHarness(lanAddress: { _ in lan })
+        h.controller.setEngineEnabled(true)
+        XCTAssertTrue(h.controller.engineRunning, h.controller.lastError ?? "")
+        h.tunnel.set(.connected)
+        h.settings.shareWithDevice = true
+
+        await waitUntil("an active share") {
+            if case .active(let host, _) = h.controller.shareState { return host == lan }
+            return false
+        }
+        let port = try XCTUnwrap(h.controller.httpPort)
+        let password = try XCTUnwrap(h.controller.sharePassword)
+        let expected = "http://\(lan):\(port)/\(pacToken(password))/proxy.pac"
+        XCTAssertEqual(h.controller.sharePACURL, expected)
+
+        h.controller.regenerateSharePassword()
+        let newPassword = try XCTUnwrap(h.controller.sharePassword)
+        XCTAssertNotEqual(newPassword, password)
+        XCTAssertEqual(
+            h.controller.sharePACURL,
+            "http://\(lan):\(port)/\(pacToken(newPassword))/proxy.pac"
+        )
+        XCTAssertNotEqual(h.controller.sharePACURL, expected, "the old URL must be revoked")
+
+        h.settings.shareWithDevice = false
+        await waitUntil("off") { h.controller.shareState == .off }
+        XCTAssertNil(h.controller.sharePACURL)
     }
 }

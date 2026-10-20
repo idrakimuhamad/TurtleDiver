@@ -392,6 +392,10 @@ final class HTTPProxyServer: @unchecked Sendable {
     /// Called when a request is refused for want of valid credentials. Only the
     /// shared listener sets it.
     private let onRefusedClient: (@Sendable (String) -> Void)?
+    /// Builds the PAC document for the shared listener. `nil` on the loopback
+    /// listener, which never serves one. Weakly captured by the engine, so it
+    /// cannot outlive its state.
+    private let pacProvider: (@Sendable () -> String?)?
     /// Relays this listener started, so its teardown closes exactly them and
     /// leaves relays owned by another listener on the shared registry alone.
     private var liveRelays: [ObjectIdentifier: RelayConnection] = [:]
@@ -411,7 +415,8 @@ final class HTTPProxyServer: @unchecked Sendable {
         acceptQueue: DispatchQueue = DispatchQueue(label: "com.turtlediver.engine.http.accept", qos: .userInitiated),
         ioQueues: [DispatchQueue]? = nil,
         accessPolicy: ProxyAccessPolicy? = nil,
-        onRefusedClient: (@Sendable (String) -> Void)? = nil
+        onRefusedClient: (@Sendable (String) -> Void)? = nil,
+        pacProvider: (@Sendable () -> String?)? = nil
     ) {
         self.matcher = matcher
         self.policyStore = policyStore
@@ -420,6 +425,7 @@ final class HTTPProxyServer: @unchecked Sendable {
         self.acceptQueue = acceptQueue
         self.accessPolicy = accessPolicy
         self.onRefusedClient = onRefusedClient
+        self.pacProvider = pacProvider
         // Small round-robin pool keeps independent connections off one queue.
         self.ioQueues = ioQueues ?? (0..<4).map {
             DispatchQueue(label: "com.turtlediver.engine.http.io\($0)", qos: .userInitiated)
@@ -680,6 +686,31 @@ final class HTTPProxyServer: @unchecked Sendable {
         // is contacted for an unauthenticated client.
         let policy = lock.withLock { accessPolicy }
         if let policy {
+            // PAC fetch: the token path, answered *before* the credential
+            // gate. Phones fetch a PAC automatically and cannot attach
+            // Proxy-Authorization to that fetch; the token in the path
+            // (derived from the share password) is what authorises it. Any
+            // other origin-form target still falls through to the gate and
+            // then to the usual 400. Both origin-form and absolute-form are
+            // recognised so a proxy-style request for the PAC URL is served
+            // here too — and never reaches the request log, where the token
+            // would otherwise be recorded.
+            let pacPath = "/\(SharePACGenerator.token(password: policy.password))/proxy.pac"
+            if let path = Self.requestPath(head: head),
+               Self.constantTimeEquals(path, pacPath) {
+                let method = head.method.uppercased()
+                if method == "GET" || method == "HEAD" {
+                    respondPAC(clientFD: clientFD, includeBody: method != "HEAD")
+                } else {
+                    respondSimple(
+                        clientFD: clientFD,
+                        status: "400 Bad Request",
+                        body: "the PAC URL is fetched with GET or HEAD"
+                    )
+                }
+                return
+            }
+
             let admittedByAddress = clientAddress.map { policy.allowedClients.contains($0) } ?? false
             let admittedByCredentials = Self.credentialsMatch(head: head, policy: policy)
             if !admittedByAddress && !admittedByCredentials {
@@ -1082,6 +1113,50 @@ final class HTTPProxyServer: @unchecked Sendable {
             // Client already gone; nothing to report to.
         }
         TCPClient.closeSocket(clientFD)
+    }
+
+    /// The PAC document: one fixed URL, no credentials, no logging as a proxied
+    /// request. `Content-Length` always describes the body, so `HEAD` can answer
+    /// with the same headers and no body.
+    private func respondPAC(clientFD: Int32, includeBody: Bool) {
+        guard let document = pacProvider?() else {
+            respondSimple(clientFD: clientFD, status: "503 Service Unavailable", body: "PAC unavailable")
+            return
+        }
+        guard takePending(clientFD) else {
+            TCPClient.closeSocket(clientFD)
+            return
+        }
+        let body = Array(document.utf8)
+        let head = "HTTP/1.1 200 OK\r\n"
+            + "Content-Type: application/x-ns-proxy-autoconfig\r\n"
+            + "Cache-Control: no-store\r\n"
+            + "Content-Length: \(body.count)\r\n"
+            + "Connection: close\r\n\r\n"
+        var response = Array(head.utf8)
+        if includeBody { response += body }
+        do {
+            try TCPClient.sendAll(fd: clientFD, response, timeoutSeconds: 5)
+        } catch {
+            // Client already gone; nothing to report to.
+        }
+        TCPClient.closeSocket(clientFD)
+    }
+
+    /// The path of an origin-form or absolute-form request, without its query.
+    /// CONNECT's authority-form and anything unparseable return nil. Used only
+    /// to recognise (and keep out of the request log) the PAC URL.
+    static func requestPath(head: HTTPRequestHead) -> String? {
+        let path: String
+        if head.target.hasPrefix("/") {
+            path = head.target
+        } else if let (_, _, parsed) = LatencyTester.parseHTTPURL(head.target) {
+            path = parsed
+        } else {
+            return nil
+        }
+        guard let query = path.firstIndex(of: "?") else { return path }
+        return String(path[..<query])
     }
 
     // MARK: Shared-listener access

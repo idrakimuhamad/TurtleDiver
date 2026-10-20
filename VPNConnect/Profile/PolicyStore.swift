@@ -154,6 +154,64 @@ public final class PolicyStore: @unchecked Sendable {
         try resolve(policyName, visited: [])
     }
 
+    // MARK: Side-effect-free classification
+
+    /// The conservative, read-only effect of a policy for the shared device's
+    /// PAC file.
+    public enum PolicyEffect: Equatable, Sendable {
+        /// Certain to go DIRECT on every reachable path.
+        case direct
+        /// May proxy or reject, or cannot be resolved.
+        case nonDirect
+    }
+
+    /// Classifies a policy **without resolving it**: no load-balance counter
+    /// advances, no health or selection state is consulted, and `onChange` does
+    /// not fire. Used by PAC generation, which must be repeatable and must not
+    /// perturb the engine's own routing.
+    ///
+    /// A group is `.direct` only when every member is `.direct`; anything that
+    /// could pick a proxy or a reject is `.nonDirect`, and so is an unknown
+    /// name or a cycle (fail closed towards the Mac).
+    public func effect(of policyName: String) -> PolicyEffect {
+        let (proxies, groups) = lock.withLock { (profile.proxies, profile.groups) }
+        return Self.effect(of: policyName, proxies: proxies, groups: groups, visited: [])
+    }
+
+    private static func effect(
+        of policyName: String,
+        proxies: [ProxyDefinition],
+        groups: [ProxyGroup],
+        visited: [String]
+    ) -> PolicyEffect {
+        if visited.contains(policyName) { return .nonDirect }
+
+        switch policyName.uppercased() {
+        case BuiltinPolicy.direct.rawValue:
+            return .direct
+        case BuiltinPolicy.reject.rawValue:
+            return .nonDirect
+        default:
+            break
+        }
+
+        if proxies.contains(where: { $0.name == policyName }) {
+            return .nonDirect
+        }
+        if let group = groups.first(where: { $0.name == policyName }) {
+            // An empty group falls back to DIRECT in `selectMember`.
+            guard !group.policies.isEmpty else { return .direct }
+            let path = visited + [policyName]
+            for member in group.policies {
+                if effect(of: member, proxies: proxies, groups: groups, visited: path) != .direct {
+                    return .nonDirect
+                }
+            }
+            return .direct
+        }
+        return .nonDirect // unknown policy: the Mac might proxy it
+    }
+
     private func resolve(_ policyName: String, visited: [String]) throws -> ResolvedDecision {
         if visited.contains(policyName) {
             throw PolicyStoreError.groupCycle(visited + [policyName])

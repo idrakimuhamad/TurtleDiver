@@ -59,6 +59,7 @@
 		7C0FFEE10000000000000003 /* ProcessPeerResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */; };
 		7C0FFEE10000000000000004 /* RuleMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000014 /* RuleMatcher.swift */; };
 		7C0FFEE10000000000000005 /* PACRuleConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000015 /* PACRuleConverter.swift */; };
+		7C0FFEE10000000000000006 /* SharePACGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE10000000000000016 /* SharePACGenerator.swift */; };
 		7C0FFEE00000000000000005 /* TCPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000015 /* TCPClient.swift */; };
 		7C0FFEE00000000000000006 /* LatencyTester.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000016 /* LatencyTester.swift */; };
 		7C0FFEE00000000000000007 /* PolicyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C0FFEE00000000000000017 /* PolicyStore.swift */; };
@@ -163,6 +164,7 @@
 		7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessPeerResolver.swift; sourceTree = "<group>"; };
 		7C0FFEE10000000000000014 /* RuleMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleMatcher.swift; sourceTree = "<group>"; };
 		7C0FFEE10000000000000015 /* PACRuleConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PACRuleConverter.swift; sourceTree = "<group>"; };
+		7C0FFEE10000000000000016 /* SharePACGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharePACGenerator.swift; sourceTree = "<group>"; };
 		7C0FFEE00000000000000015 /* TCPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TCPClient.swift; sourceTree = "<group>"; };
 		7C0FFEE00000000000000016 /* LatencyTester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTester.swift; sourceTree = "<group>"; };
 		7C0FFEE00000000000000017 /* PolicyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolicyStore.swift; sourceTree = "<group>"; };
@@ -274,6 +276,7 @@
 				7C0FFEE10000000000000013 /* ProcessPeerResolver.swift */,
 				7C0FFEE10000000000000014 /* RuleMatcher.swift */,
 				7C0FFEE10000000000000015 /* PACRuleConverter.swift */,
+				7C0FFEE10000000000000016 /* SharePACGenerator.swift */,
 				7C0FFEE80000000000000012 /* RuleSetStore.swift */,
 			);
 			path = Rules;
@@ -468,6 +471,7 @@
 				7C0FFEE10000000000000003 /* ProcessPeerResolver.swift in Sources */,
 				7C0FFEE10000000000000004 /* RuleMatcher.swift in Sources */,
 				7C0FFEE10000000000000005 /* PACRuleConverter.swift in Sources */,
+				7C0FFEE10000000000000006 /* SharePACGenerator.swift in Sources */,
 				7C0FFEE20000000000000001 /* ProxyEngine.swift in Sources */,
 				7C0FFEE20000000000000002 /* HTTPProxyServer.swift in Sources */,
 				7C0FFEE20000000000000003 /* SOCKS5Server.swift in Sources */,

@@ -20,10 +20,16 @@ final class ProxyShareTests: XCTestCase {
 
     // MARK: - Harness
 
-    private func makeEngine(rules: [ProfileRule]) throws -> (engine: ProxyEngine, httpPort: Int) {
+    private func makeEngine(
+        rules: [ProfileRule],
+        proxies: [ProxyDefinition] = [],
+        groups: [ProxyGroup] = []
+    ) throws -> (engine: ProxyEngine, httpPort: Int) {
         var profile = Profile(name: "share-test")
         profile.general.testInterval = 3600
         profile.rules = rules
+        profile.proxies = proxies
+        profile.groups = groups
         let httpPort = try freePort()
         let socksPort = try freePort()
         profile.general.httpListen = "127.0.0.1:\(httpPort)"
@@ -40,11 +46,13 @@ final class ProxyShareTests: XCTestCase {
         host: String = "127.0.0.1",
         user: String = "phone",
         pass: String = "secret",
-        allowed: Set<String> = []
+        allowed: Set<String> = [],
+        tunnelMode: SharePACGenerator.TunnelMode = .fullTunnel
     ) throws -> Int {
         let sharePort = try freePort()
         try engine.startSharing(ShareConfiguration(
-            host: host, port: sharePort, username: user, password: pass, allowedClients: allowed
+            host: host, port: sharePort, username: user, password: pass,
+            allowedClients: allowed, tunnelMode: tunnelMode
         ))
         return sharePort
     }
@@ -862,6 +870,244 @@ final class ProxyShareTests: XCTestCase {
         XCTAssertTrue(origin.requests.isEmpty, "the origin must not be contacted: \(origin.requests)")
         XCTAssertEqual(engine.sharedPendingConnectionCount, 0)
         XCTAssertEqual(engine.relayRegistry.activeCount, 0)
+    }
+
+    // MARK: - PAC file
+
+    private func pacToken(_ password: String) -> String {
+        SharePACGenerator.token(password: password)
+    }
+
+    private func rawResponse(_ port: Int, _ request: String) throws -> String {
+        let client = try connect(host: "127.0.0.1", port: port)
+        defer { TCPClient.closeSocket(client) }
+        try send(client, request)
+        return readAll(client, timeout: 5)
+    }
+
+    private func responseBody(_ response: String) -> String {
+        guard let range = response.range(of: "\r\n\r\n") else { return "" }
+        return String(response[range.upperBound...])
+    }
+
+    private func header(_ name: String, in response: String) -> String? {
+        let head = response.components(separatedBy: "\r\n\r\n").first ?? response
+        for line in head.components(separatedBy: "\r\n").dropFirst() {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            if line[..<colon].trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(name) == .orderedSame {
+                return String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    /// A phone's PAC fetch carries no proxy credentials. The token path is what
+    /// authorises it, and it is served before the 407 gate.
+    func testSharedListenerServesThePACWithoutCredentials() throws {
+        let (engine, _) = try makeEngine(rules: [
+            ProfileRule(type: .domainSuffix, value: "example.com", policy: "DIRECT"),
+        ])
+        let sharePort = try startShare(engine, user: "phone", pass: "secret")
+        let token = pacToken("secret")
+
+        let response = try rawResponse(
+            sharePort,
+            "GET /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\nConnection: close\r\n\r\n"
+        )
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 200 OK"), "got: \(response)")
+        XCTAssertEqual(header("Content-Type", in: response), "application/x-ns-proxy-autoconfig")
+        XCTAssertEqual(header("Cache-Control", in: response), "no-store")
+        XCTAssertEqual(header("Connection", in: response), "close")
+
+        let body = responseBody(response)
+        XCTAssertTrue(body.contains("function FindProxyForURL(url, host)"), body)
+        XCTAssertTrue(body.contains("\"PROXY \" + \"127.0.0.1\" + \":\(sharePort)\""), body)
+        XCTAssertEqual(header("Content-Length", in: response), String(body.utf8.count))
+        XCTAssertTrue(engine.refusedClients.isEmpty, "a PAC fetch is not a refused client")
+    }
+
+    func testSharedListenerAnswersHEADForThePACWithoutABody() throws {
+        let (engine, _) = try makeEngine(rules: [ProfileRule(type: .final, value: "", policy: "DIRECT")])
+        let sharePort = try startShare(engine, pass: "secret")
+        let token = pacToken("secret")
+
+        let response = try rawResponse(
+            sharePort,
+            "HEAD /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\nConnection: close\r\n\r\n"
+        )
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 200 OK"), "got: \(response)")
+        XCTAssertEqual(header("Content-Type", in: response), "application/x-ns-proxy-autoconfig")
+        XCTAssertEqual(responseBody(response), "", "HEAD must not carry the PAC body")
+        let length = try XCTUnwrap(Int(try XCTUnwrap(header("Content-Length", in: response))))
+        XCTAssertGreaterThan(length, 0, "Content-Length describes the GET body")
+    }
+
+    /// The token is the only thing standing between the LAN and the PAC; a wrong
+    /// one is an ordinary unauthenticated proxy request and gets 407.
+    func testPACWithAWrongTokenIsRefused() throws {
+        let (engine, _) = try makeEngine(rules: [ProfileRule(type: .final, value: "", policy: "DIRECT")])
+        let sharePort = try startShare(engine, user: "phone", pass: "secret")
+
+        let response = try rawResponse(
+            sharePort,
+            "GET /\(String(repeating: "0", count: 24))/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        )
+
+        XCTAssertTrue(response.contains("407"), "got: \(response)")
+        XCTAssertEqual(waitForRefusal(engine, attempts: 1)?.address, "127.0.0.1")
+    }
+
+    /// Only the shared listener serves a PAC; the loopback listener stays a
+    /// proxy, so an origin-form request there is still a 400.
+    func testLoopbackListenerDoesNotServeThePAC() throws {
+        let (engine, httpPort) = try makeEngine(rules: [ProfileRule(type: .final, value: "", policy: "DIRECT")])
+        let token = pacToken("secret")
+
+        let response = try rawResponse(
+            httpPort,
+            "GET /\(token)/proxy.pac HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+
+        XCTAssertTrue(response.contains("400"), "got: \(response)")
+        XCTAssertFalse(response.contains("FindProxyForURL"))
+    }
+
+    /// Rotating the password rotates the URL on the same listener, and the VPN
+    /// targets hot-swap with it.
+    func testPACFollowsUpdateShareAccess() throws {
+        let (engine, _) = try makeEngine(rules: [ProfileRule(type: .final, value: "", policy: "DIRECT")])
+        let sharePort = try startShare(engine, user: "phone", pass: "oldpass")
+        let oldToken = pacToken("oldpass")
+
+        let old = try rawResponse(
+            sharePort,
+            "GET /\(oldToken)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        )
+        XCTAssertTrue(old.contains("200"), "got: \(old)")
+
+        engine.updateShareAccess(
+            username: "phone",
+            password: "newpass",
+            allowedClients: [],
+            tunnelMode: .split(targets: ["vpn.corp.example.com", "10.20.0.0/16"])
+        )
+
+        let stale = try rawResponse(
+            sharePort,
+            "GET /\(oldToken)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        )
+        XCTAssertTrue(stale.contains("407"), "the old token must stop working, got: \(stale)")
+
+        let newToken = pacToken("newpass")
+        let fresh = try rawResponse(
+            sharePort,
+            "GET /\(newToken)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        )
+        XCTAssertTrue(fresh.contains("200"), "got: \(fresh)")
+        let body = responseBody(fresh)
+        XCTAssertTrue(body.contains("vpn.corp.example.com"), body)
+        XCTAssertTrue(body.contains("var VNET = [[169082880,16]];"), body)
+    }
+
+    /// The document is rebuilt on every fetch, so a profile reload is visible
+    /// without restarting the listener.
+    func testPACIsRegeneratedFromTheCurrentProfile() throws {
+        let (engine, _) = try makeEngine(rules: [ProfileRule(type: .final, value: "", policy: "DIRECT")])
+        let sharePort = try startShare(engine, pass: "secret")
+        let token = pacToken("secret")
+        let request = "GET /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+
+        let before = responseBody(try rawResponse(sharePort, request))
+        XCTAssertFalse(before.contains("new.example.com"))
+
+        var updated = Profile(name: "pac-live")
+        updated.rules = [
+            ProfileRule(type: .domain, value: "new.example.com", policy: "DIRECT"),
+            ProfileRule(type: .final, value: "", policy: "DIRECT"),
+        ]
+        engine.reload(profile: updated)
+
+        let after = responseBody(try rawResponse(sharePort, request))
+        XCTAssertTrue(after.contains("new.example.com"), after)
+    }
+
+    /// A rule the PAC cannot evaluate must stop the scan instead of being
+    /// silently skipped: the Mac may reject or proxy what follows it.
+    func testPACFailsOpenForAnUnsupportedRule() throws {
+        let (engine, _) = try makeEngine(rules: [
+            ProfileRule(type: .destPort, value: "443", policy: "REJECT"),
+            ProfileRule(type: .domain, value: "later.example.com", policy: "DIRECT"),
+            ProfileRule(type: .final, value: "", policy: "DIRECT"),
+        ])
+        let sharePort = try startShare(engine, pass: "secret")
+        let token = pacToken("secret")
+
+        let body = responseBody(try rawResponse(
+            sharePort,
+            "GET /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        ))
+        XCTAssertTrue(body.contains("[\"b\",\"\",0,1]"), body)
+        XCTAssertTrue(body.contains("later.example.com"), body)
+    }
+
+    /// Building the PAC must not consume a load-balance round-robin slot: the
+    /// phone's fetch is not a routed request.
+    func testPACGenerationDoesNotAdvanceLoadBalanceCounters() throws {
+        let first = ProxyDefinition(name: "first-upstream", type: .http, host: "10.0.0.1", port: 8080)
+        let second = ProxyDefinition(name: "second-upstream", type: .http, host: "10.0.0.2", port: 8080)
+        let group = ProxyGroup(name: "spread", type: .loadBalance, policies: [first.name, second.name])
+        let (engine, _) = try makeEngine(
+            rules: [
+                ProfileRule(type: .domain, value: "example.com", policy: group.name),
+                ProfileRule(type: .final, value: "", policy: "DIRECT"),
+            ],
+            proxies: [first, second],
+            groups: [group]
+        )
+        let sharePort = try startShare(engine, pass: "secret")
+        let token = pacToken("secret")
+
+        XCTAssertTrue(try rawResponse(
+            sharePort,
+            "GET /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        ).contains("200"))
+
+        XCTAssertEqual(try engine.policyStore.resolve(group.name), .proxy(first))
+        XCTAssertEqual(try engine.policyStore.resolve(group.name), .proxy(second),
+                       "the counter must start where it would have without the PAC fetch")
+    }
+
+    /// The token authorises the PAC fetch; it must not end up in the request
+    /// log, whichever request form a client uses.
+    func testPACFetchIsServedButNeverLogged() throws {
+        let (engine, _) = try makeEngine(rules: [ProfileRule(type: .final, value: "", policy: "DIRECT")])
+        let sharePort = try startShare(engine, user: "phone", pass: "secret")
+        let token = pacToken("secret")
+
+        let originForm = try rawResponse(
+            sharePort,
+            "GET /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\n\r\n"
+        )
+        XCTAssertTrue(originForm.contains("200"), originForm)
+
+        let absoluteForm = try rawResponse(
+            sharePort,
+            "GET http://192.168.1.20:\(sharePort)/\(token)/proxy.pac HTTP/1.1\r\n"
+                + "Host: 192.168.1.20:\(sharePort)\r\n"
+                + "Proxy-Authorization: \(basic("phone", "secret"))\r\n\r\n"
+        )
+        XCTAssertTrue(absoluteForm.contains("200"), absoluteForm)
+
+        let post = try rawResponse(
+            sharePort,
+            "POST /\(token)/proxy.pac HTTP/1.1\r\nHost: 192.168.1.20\r\nContent-Length: 0\r\n\r\n"
+        )
+        XCTAssertTrue(post.contains("400"), post)
+
+        XCTAssertTrue(engine.requestLog.snapshot().isEmpty,
+                      "a PAC fetch is not a proxied request: \(engine.requestLog.snapshot())")
     }
 
     // MARK: - Helpers

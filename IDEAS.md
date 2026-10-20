@@ -544,7 +544,10 @@ pair is generated.
   follows the Mac's routing like the Mac's own — VPN-routed hosts go over the
   tunnel, the rest leaves the ordinary way — and the device's own address is what
   `SRC-IP` rules match, so a rule can block it. `docs/PROXY_ENGINE.md` is the
-  contract.
+  contract. Picked up later: the same listener serves a generated PAC at
+  `/\<token>/proxy.pac`, so a device can follow the profile's rules instead of a
+  static manual proxy; the PAC is rebuilt on every fetch and the token derives
+  from the share password, so rotating the password revokes the URL.
   **What has not been picked up:** the expensive half is still refused — full
   routing for the device means forwarding its packets (NAT, and the
   elevated-helper territory of idea 16) or a tunnel the device joins, and an
