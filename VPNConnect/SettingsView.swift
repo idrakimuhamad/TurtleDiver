@@ -330,27 +330,9 @@ struct VPNConfigurationView: View {
             .padding(.vertical, SettingsStyle.rowPaddingV)
 
             if draft.useTunneling {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("vpn-slice targets")
-                        .font(.system(size: 12.5))
-                    Text("One domain or IP range per line")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                    TextEditor(text: $draft.sliceURLsText)
-                        .font(.system(size: 11, design: .monospaced))
-                        .frame(height: 104)
-                        .padding(4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color(nsColor: .textBackgroundColor))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.12))
-                        )
-                }
-                .padding(.horizontal, SettingsStyle.rowPaddingH)
-                .padding(.vertical, SettingsStyle.rowPaddingV)
+                SplitTunnelTargetsEditor(text: $draft.sliceURLsText)
+                    .padding(.horizontal, SettingsStyle.rowPaddingH)
+                    .padding(.vertical, SettingsStyle.rowPaddingV)
             }
         }
     }
@@ -426,6 +408,216 @@ struct VPNConfigurationView: View {
         loaded = draft
         pickedTokenURL = nil
         hasStoredAdminPassword = !settings.adminPassword.isEmpty
+    }
+}
+
+/// An editable, scrollable target list. Edits stay in the settings draft until
+/// the pane's Save button is used, just like the other VPN settings.
+/// The whole target list as plain text, one per line. Applying replaces the
+/// list; nothing is saved until the pane's Save.
+private struct SplitTunnelTargetsTextSheet: View {
+    let cancel: () -> Void
+    let apply: (String) -> Void
+    @State private var text: String
+
+    init(initialText: String, cancel: @escaping () -> Void, apply: @escaping (String) -> Void) {
+        _text = State(initialValue: initialText)
+        self.cancel = cancel
+        self.apply = apply
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Edit targets as text").font(.headline)
+            Text("One domain or IP range per line. Blank lines are ignored. Applying replaces the list.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            TextEditor(text: $text)
+                .font(.system(size: 12, design: .monospaced))
+                .padding(5)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction)
+                Button("Apply") { apply(text) }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 520, minHeight: 420)
+    }
+}
+
+private struct SplitTunnelTargetsEditor: View {
+    @Binding var text: String
+    @State private var targets: [String] = []
+    @State private var selection = Set<Int>()
+    @State private var search = ""
+    @State private var showingBulkEditor = false
+    @State private var lastWrittenText: String?
+
+    private var visibleIndices: [Int] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return targets.indices.filter { query.isEmpty || targets[$0].localizedCaseInsensitiveContains(query) }
+    }
+
+    private var duplicateIndices: Set<Int> {
+        let grouped = Dictionary(grouping: targets.indices, by: { targets[$0].trimmingCharacters(in: .whitespaces).lowercased() })
+        return Set(grouped.filter { !$0.key.isEmpty }.values.filter { $0.count > 1 }.flatMap { $0 })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("vpn-slice targets").font(.system(size: 12.5, weight: .medium))
+                Text("\(targets.count) \(targets.count == 1 ? "target" : "targets")")
+                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Edit as Text…") { showingBulkEditor = true }
+                .controlSize(.small)
+            }
+
+            if targets.count >= 8 {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
+                    TextField("Filter targets", text: $search).textFieldStyle(.plain)
+                }
+                .font(.system(size: 11))
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1)))
+            }
+
+            List(selection: $selection) {
+                ForEach(visibleIndices, id: \.self) { index in
+                    targetRow(at: index)
+                        .tag(index)
+                        .listRowBackground(index.isMultiple(of: 2) ? Color.primary.opacity(0.025) : Color.clear)
+                }
+            }
+            .listStyle(.inset)
+            .frame(height: min(max(CGFloat(max(targets.count, 4)) * 29, 116), 360))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12)))
+            .onDeleteCommand(perform: removeSelection)
+
+            HStack(spacing: 0) {
+                Button { addTarget() } label: { barSymbol("plus") }
+                    .help("Add target")
+                Rectangle().fill(Color.primary.opacity(0.14)).frame(width: 1, height: 14)
+                Button(action: removeSelection) { barSymbol("minus") }
+                    .disabled(selection.isEmpty)
+                    .help("Remove selected targets")
+            }
+            .buttonStyle(.borderless)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.12)))
+            .fixedSize()
+            .padding(.top, 1)
+        }
+        .onAppear { synchronizeFromText() }
+        .onChange(of: text) { _, newValue in
+            if newValue == lastWrittenText {
+                lastWrittenText = nil
+            } else {
+                synchronizeFromText()
+            }
+        }
+        .sheet(isPresented: $showingBulkEditor) {
+            SplitTunnelTargetsTextSheet(
+                initialText: targets.joined(separator: "\n"),
+                cancel: { showingBulkEditor = false },
+                apply: { newText in
+                    targets = normalizedRows(newText)
+                    writeTargets()
+                    selection.removeAll()
+                    showingBulkEditor = false
+                }
+            )
+        }
+    }
+
+    private func barSymbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 11, weight: .medium))
+            .frame(width: 26, height: 20)
+            .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func targetRow(at index: Int) -> some View {
+        let value = targets[index]
+        let classification = VPNConfigurationDraft.classifySliceTarget(value)
+        HStack(spacing: 8) {
+            TextField("Enter domain or IP range", text: Binding(
+                get: { targets.indices.contains(index) ? targets[index] : "" },
+                set: { newValue in
+                    guard targets.indices.contains(index) else { return }
+                    targets[index] = newValue
+                    writeTargets()
+                }
+            ))
+            .textFieldStyle(.plain)
+            .font(.system(size: 11.5, design: .monospaced))
+            .onSubmit { addTarget(after: index) }
+
+            Text(classification.kind.rawValue.uppercased())
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(Color.primary.opacity(0.06), in: Capsule())
+
+            if !value.trimmingCharacters(in: .whitespaces).isEmpty && !classification.isValid {
+                Label("Invalid target", systemImage: "exclamationmark.triangle.fill")
+                    .labelStyle(.iconOnly).font(.system(size: 10)).foregroundStyle(.orange)
+                    .help("This target is not a valid domain, IP address, or range.")
+            }
+            if duplicateIndices.contains(index) {
+                Label("Duplicate target", systemImage: "doc.on.doc.fill")
+                    .labelStyle(.iconOnly).font(.system(size: 9)).foregroundStyle(.secondary)
+                    .help("This target appears more than once.")
+            }
+        }
+        .padding(.vertical, 2)
+        .contextMenu {
+            Button("Remove Target", systemImage: "minus", role: .destructive) {
+                targets.remove(at: index)
+                selection = Set(selection.compactMap { $0 > index ? $0 - 1 : ($0 == index ? nil : $0) })
+                writeTargets()
+            }
+        }
+    }
+
+    private func normalizedRows(_ value: String) -> [String] {
+        value.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func synchronizeFromText() {
+        let parsed = normalizedRows(text)
+        if parsed != targets { targets = parsed }
+    }
+
+    private func writeTargets() {
+        let value = targets.joined(separator: "\n")
+        if text != value {
+            lastWrittenText = value
+            text = value
+        }
+    }
+
+    private func addTarget(after index: Int? = nil) {
+        let newIndex = min((index.map { $0 + 1 } ?? targets.count), targets.count)
+        targets.insert("", at: newIndex)
+        selection = [newIndex]
+        writeTargets()
+    }
+
+    private func removeSelection() {
+        for index in selection.sorted(by: >) where targets.indices.contains(index) {
+            targets.remove(at: index)
+        }
+        selection.removeAll()
+        writeTargets()
     }
 }
 

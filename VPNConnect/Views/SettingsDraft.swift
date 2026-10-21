@@ -6,6 +6,12 @@ import Foundation
 #if canImport(TurtleDiverCore)
 import TurtleDiverCore
 #endif
+#if canImport(TurtleDiverRules)
+import TurtleDiverRules
+#endif
+#if canImport(TurtleDiverSystem)
+import TurtleDiverSystem
+#endif
 
 /// The VPN pane's editable state, held as a value.
 ///
@@ -53,6 +59,21 @@ public struct VPNConfigurationDraft: Equatable, Sendable {
             .filter { !$0.isEmpty }
     }
 
+    /// Presentation metadata shared by the target editor and its tests.
+    public static func classifySliceTarget(_ target: String) -> SliceTargetClassification {
+        let value = target.trimmingCharacters(in: .whitespaces)
+        let valid = VPNRuleGenerator.rules(forTargets: [value]).errors.isEmpty
+        let kind: SliceTargetKind
+        if value.contains("/") {
+            kind = .range
+        } else if IPAddress.parseIPv4(value) != nil || IPAddress.parseIPv6(value) != nil {
+            kind = .ip
+        } else {
+            kind = .domain
+        }
+        return SliceTargetClassification(kind: kind, isValid: valid)
+    }
+
     /// True when the draft differs from `other` in a way that matters.
     ///
     /// Cosmetic differences in the slice list (blank lines, trailing spaces,
@@ -65,6 +86,22 @@ public struct VPNConfigurationDraft: Equatable, Sendable {
         if adminPassword != other.adminPassword { return true }
         if tokenFilePath != other.tokenFilePath || useTunneling != other.useTunneling { return true }
         return sliceURLList != other.sliceURLList
+    }
+}
+
+public enum SliceTargetKind: String, Equatable, Sendable {
+    case domain = "Domain"
+    case ip = "IP"
+    case range = "Range"
+}
+
+public struct SliceTargetClassification: Equatable, Sendable {
+    public let kind: SliceTargetKind
+    public let isValid: Bool
+
+    public init(kind: SliceTargetKind, isValid: Bool) {
+        self.kind = kind
+        self.isValid = isValid
     }
 }
 

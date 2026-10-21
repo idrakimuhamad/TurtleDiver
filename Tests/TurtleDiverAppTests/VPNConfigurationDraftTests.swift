@@ -87,6 +87,16 @@ final class VPNConfigurationDraftTests: XCTestCase {
     func testSliceListKeepsInteriorCharacters() {
         XCTAssertEqual(draft(sliceURLsText: "  *.corp.example.com  ").sliceURLList, ["*.corp.example.com"])
     }
+
+    func testSliceTargetClassificationIncludesKindAndValidity() {
+        XCTAssertEqual(VPNConfigurationDraft.classifySliceTarget("api.example.com"),
+                       SliceTargetClassification(kind: .domain, isValid: true))
+        XCTAssertEqual(VPNConfigurationDraft.classifySliceTarget("192.0.2.15"),
+                       SliceTargetClassification(kind: .ip, isValid: true))
+        XCTAssertEqual(VPNConfigurationDraft.classifySliceTarget("192.0.2.0/24"),
+                       SliceTargetClassification(kind: .range, isValid: true))
+        XCTAssertFalse(VPNConfigurationDraft.classifySliceTarget("bad..example.com").isValid)
+    }
 }
 
 /// The formatters that keep raw values out of `Text`.
